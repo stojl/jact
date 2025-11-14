@@ -94,22 +94,26 @@ def update_p_j_static(p_j, outflow, inflow, step_size):
     
     return p_j
 
-@partial(jax.jit, static_argnames=['flow', 'step_size'])
-def update_p_j_scan(init_p_j, p_j_0, duration_grid, flow, step_size):
+@partial(jax.jit, static_argnames=['flow'])
+def update_p_j_scan(p_j_0: jnp.ndarray, 
+                    step_sizes: jnp.ndarray, 
+                    flow: Callable[..., tuple[jnp.ndarray, jnp.ndarray]], 
+                    *args: jnp.ndarray, 
+                    **kwargs: jnp.ndarray):
     
-    def update_p_j(p_j, t):    
-        outflow, inflow = flow(t, duration_grid)
+    def update_p_j(carry, step_size):
+        p_j, t = carry
+        outflow, inflow = flow(t, *args, **kwargs)
         p_j = update_p_j_static(p_j, outflow, inflow, step_size)
-        return p_j, p_j
-    
-    p_j_2, p_j = jax.lax.scan(update_p_j, init_p_j, duration_grid)
+        t += step_size
 
-    #p_j = jnp.swapaxes(p_j, -3, -2)
-
-    p_j_0 = jnp.expand_dims(p_j_0, axis=-2)
-    init_p_j = jnp.expand_dims(init_p_j, axis=-2)
+        return (p_j, t), p_j
     
-    return p_j_2#jnp.concatenate([p_j_0, init_p_j, p_j], axis=-2)
+    _, p_j = jax.lax.scan(update_p_j, p_j_0, step_sizes)
+
+    p_j = jnp.swapaxes(p_j, -3, -2)
+    
+    return p_j
 
 @jax.jit
 def init_p_j_ones(x):
@@ -120,8 +124,8 @@ def init_p_j_ones(x):
     slice_tuple = tuple(indicies)
     return x.at[slice_tuple].set(1)
 
-@partial(jax.jit, static_argnames=['flow', 'step_size'])
-def solve(step_sizes, flow, *args: Any, **kwargs: Any):
+@partial(jax.jit, static_argnames=['flow'])
+def solve(step_sizes: jnp.ndarray, flow: Callable[..., tuple[jnp.ndarray, jnp.ndarray]], *args: jnp.ndarray, **kwargs: jnp.ndarray):
     outflow, inflow = flow(0, *args, **kwargs)
 
     grid_shape = outflow.shape
