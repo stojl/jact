@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-from typing import Callable, Any, Iterable, Union, List, Dict
+from typing import Callable, Any, Iterable, Union, Sequence
 
 def construct_jit_sum_function(
     funcs: Iterable[Callable[..., Any]]
@@ -101,11 +101,27 @@ def _get_zero_placeholder(func: Callable[..., jnp.ndarray]) -> Callable[..., jnp
 
     return zero_placeholder_func
 
-
-def construct_jit_functions_from_intensity_matrix(
-    intensity_matrix
-):
+def fill_intensity_matrix(
+        intensity_matrix: Sequence[Sequence[Callable[..., jnp.ndarray]]],
+        fill_func = Callable[..., jnp.ndarray]
+) -> Sequence[Sequence[Callable[..., jnp.ndarray]]]:
+    filled_matrix = [
+        [
+            (func if func is not None else fill_func)
+            for func in row 
+        ]
+        for row in intensity_matrix
+    ]
     
+    return filled_matrix
+
+def construct_func_from_intensity_matrix(
+        intensity_matrix: Sequence[Sequence[Callable[..., jnp.ndarray]]]
+) -> Callable[..., tuple[jnp.ndarray, jnp.ndarray]]:
+    """
+    Returns a new function that computes the outflow and inflow according to an
+    n x n intensity matrix.
+    """
     n = len(intensity_matrix)
     if not all(len(row) == n for row in intensity_matrix):
         raise ValueError("Intensity matrix must be square (n x n).")
@@ -117,48 +133,22 @@ def construct_jit_functions_from_intensity_matrix(
         raise ValueError("The intensity matrix contains only None entries. Cannot construct any function or determine output shape.")
     
     zero_func = _get_zero_placeholder(global_reference_func)
-    
-    row_sum_functions = []
-    for row in intensity_matrix:
-        filled_row = [
-            f if f is not None else zero_func
-            for f in row
-        ]
-        
-        row_sum_func = construct_jit_sum_function(filled_row)
-        row_sum_functions.append(row_sum_func)
-        
-    # Transpose intensity matrix
-    columns_of_functions = list(zip(*intensity_matrix))
-    
-    column_concat_functions = []
-    for column in columns_of_functions:
-        
-        filled_column = [
-            f if f is not None else zero_func
-            for f in column
-        ]
-        
-        column_concat_func = construct_jit_stack_function(
-            filled_column, 
-            axis=0
-        )
-        column_concat_functions.append(column_concat_func)
-    
+    intensity_matrix = fill_intensity_matrix(intensity_matrix, zero_func)
     
     @jax.jit
-    def inflow_function(*args, **kwargs) -> jnp.ndarray:
-        col_results = [f(*args, **kwargs) for f in column_concat_functions]
+    def outflow_inflow(*args: Any, **kwargs: Any) -> tuple[jnp.ndarray, jnp.ndarray]:
+        inflow_list_of_lists = [
+            [func(*args, **kwargs)for func in row]
+            for row in intensity_matrix
+        ]
 
-        return jnp.stack(col_results, axis=0)
+        inflow_rows = [jnp.stack(row_list, axis=0) for row_list in inflow_list_of_lists]
+        inflow = jnp.stack(inflow_rows, axis=0)
+        outflow = jnp.sum(inflow, axis=1)
+
+        return outflow, inflow
     
-    @jax.jit
-    def outflow_function(*args, **kwargs) -> jnp.ndarray:
-        row_results = [f(*args, **kwargs) for f in row_sum_functions]
-        
-        return jnp.stack(row_results, axis=0)
-    
-    return outflow_function, inflow_function
+    return outflow_inflow
     
     
         
