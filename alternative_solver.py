@@ -1,3 +1,8 @@
+import jax
+import jax.numpy as jnp
+from typing import Callable, Sequence, Any
+from functools import partial
+
 def _get_zero_placeholder(func: Callable[..., jnp.ndarray]) -> Callable[..., jnp.ndarray]:
     """Returns a new function that returns zeros of the same shape as func."""
     def zero_placeholder_func(*args, **kwargs):
@@ -58,82 +63,54 @@ def construct_func_from_intensity_matrix(
     return outflow_inflow
 
 @jax.jit
-def pad_last_axis(x: jnp.ndarray) -> jnp.ndarray:
-    num_axes = len(x.shape)
-    padding = [(0,0)] * (num_axes - 1) + [(1, 0)]
-    return jnp.pad(x, padding)
-
-@jax.jit
-def slice_second_to_last(x: jnp.ndarray) -> jnp.ndarray:
-    num_axes = len(x.shape)
-    slices = [slice(None)] * num_axes
-    slices[-2] = 0
-    return x[tuple(slices)]
-
-@jax.jit
-def update_p_j_static_first(p_j, outflow, inflow, step_size):
-    outflow = pad_last_axis(outflow)
-    inflow = pad_last_axis(inflow)
-    inflow =  slice_second_to_last(inflow)
-    p_j = p_j + step_size * (inflow - outflow)
-    p_j = p_j.at[..., 0].set(0)
-    
-    return p_j
-
-@jax.jit
-def update_p_j_static(p_j, outflow, inflow, step_size):
-    dp_j = jnp.diff(p_j, axis=-1)
-    
-    outflow_integral = jnp.cumulative_sum(outflow * dp_j, axis=-1, include_initial=True)
-    inflow_integral = jnp.sum(inflow * dp_j, axis=(-2,-1))
+def next_p_j(p_j, outflow, inflow, step_size):
+    dp_j = jnp.diff(p_j, axis=-1, prepend=0)
+    outflow_integral = jnp.cumsum(outflow * dp_j, axis=-1)
+    inflow_integral = jnp.sum(inflow * jnp.expand_dims(dp_j, axis=-3), axis=(-2,-1))
     inflow_integral = jnp.expand_dims(inflow_integral, axis=-1)
     
-    p_j = p_j + step_size * (inflow_integral - outflow_integral)
+    p_j = p_j + jnp.expand_dims(step_size, axis=-1) * (inflow_integral - outflow_integral)
     p_j = jnp.roll(p_j, shift=1, axis=-1)
     p_j = p_j.at[..., 0].set(0)
     
     return p_j
 
 @partial(jax.jit, static_argnames=['flow'])
-def update_p_j_scan(p_j_0: jnp.ndarray, 
-                    step_sizes: jnp.ndarray, 
-                    flow: Callable[..., tuple[jnp.ndarray, jnp.ndarray]], 
-                    *args: jnp.ndarray, 
-                    **kwargs: jnp.ndarray):
-    
-    def update_p_j(carry, step_size):
+def solve_p_j(p_j_0: jnp.ndarray, 
+              step_sizes: jnp.ndarray, 
+              flow: Callable[..., tuple[jnp.ndarray, jnp.ndarray]], 
+              *args: jnp.ndarray,
+              **kwargs: jnp.ndarray):
+
+    def scan_p_j(carry, step_size):
         p_j, t = carry
         outflow, inflow = flow(t, *args, **kwargs)
-        p_j = update_p_j_static(p_j, outflow, inflow, step_size)
+        p_j = next_p_j(p_j, outflow, inflow, step_size)
         t += step_size
 
         return (p_j, t), p_j
     
-    _, p_j = jax.lax.scan(update_p_j, p_j_0, step_sizes)
-
-    p_j = jnp.swapaxes(p_j, -3, -2)
+    t0 = jnp.zeros_like(step_sizes[0])
+    _, p_j = jax.lax.scan(scan_p_j, (p_j_0, t0), step_sizes)
     
+    p_j = jnp.concatenate([jnp.expand_dims(p_j_0, axis=0), p_j])
+    p_j = jnp.swapaxes(p_j, 0, 1)
+    p_j = jnp.swapaxes(p_j, 1, 2)
+
     return p_j
 
-@jax.jit
-def init_p_j_ones(x):
-    num_axes = len(x.shape)
-    indicies = [slice(None)] * num_axes
-    indicies[-2] = 0
-
-    slice_tuple = tuple(indicies)
-    return x.at[slice_tuple].set(1)
-
 @partial(jax.jit, static_argnames=['flow'])
-def solve(step_sizes: jnp.ndarray, flow: Callable[..., tuple[jnp.ndarray, jnp.ndarray]], *args: jnp.ndarray, **kwargs: jnp.ndarray):
+def solve(step_sizes: jnp.ndarray, 
+          flow: Callable[..., tuple[jnp.ndarray, jnp.ndarray]], 
+          *args: jnp.ndarray, 
+          **kwargs: jnp.ndarray):
+
     outflow, inflow = flow(0, *args, **kwargs)
-
-    grid_shape = outflow.shape
-    p_j_shape = grid_shape[:-1] + (grid_shape[-1] + 1,)
-
-    p_j = jnp.zeros(p_j_shape, dtype=outflow.dtype)
-    p_j = init_p_j_ones(p_j)
-
-    p_j_init = update_p_j_static_first(p_j, outflow, inflow, step_size)
+    step_sizes = jnp.expand_dims(step_sizes, axis=-1)
     
-    return update_p_j_scan(p_j_init, p_j, duration_grid, flow, step_size)
+    p_j_0 = jnp.zeros_like(outflow)
+    p_j_0 = p_j_0.at[(..., 0, slice(None))].set(1.0)
+
+    p_j = solve_p_j(p_j_0, step_sizes, flow, *args, **kwargs)
+    
+    return p_j
