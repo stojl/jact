@@ -99,6 +99,56 @@ def solve_p_j(p_j_0: jnp.ndarray,
 
     return p_j
 
+@jax.jit
+def next_p_j_heun(p_j, outflow, inflow, step_size):
+    dp_j = jnp.diff(p_j, axis=-1, prepend=0)
+    outflow_integral = jnp.cumsum(outflow * dp_j, axis=-1)
+    inflow_integral = jnp.sum(inflow * jnp.expand_dims(dp_j, axis=-3), axis=(-2,-1))
+    inflow_integral = jnp.expand_dims(inflow_integral, axis=-1)
+    
+    delta_p_j = inflow_integral - outflow_integral
+    
+    p_j = p_j + step_size * delta_p_j
+    p_j = jnp.roll(p_j, shift=1, axis=-1)
+    p_j = p_j.at[..., 0].set(0)
+    
+    return p_j, delta_p_j
+
+@partial(jax.jit, static_argnames=['flow'])
+def solve_p_j_heun(p_j_0: jnp.ndarray, 
+                   step_sizes: jnp.ndarray, 
+                   flow: Callable[..., tuple[jnp.ndarray, jnp.ndarray]], 
+                   *args: jnp.ndarray,
+                   **kwargs: jnp.ndarray):
+
+    def scan_p_j(carry, step_size):
+        p_j, t, flow_i = carry
+        outflow, inflow = flow_i
+        
+        p_j_1, delta_p_j_1 = next_p_j(p_j, outflow, inflow, step_size)
+        
+        t += step_size
+        outflow, inflow = flow(t, *args, **kwargs)
+        
+        _, delta_p_j_2 = next_p_j(p_j_1, outflow, inflow, step_size)
+        
+        p_j = p_j + 0.5 * step_size * delta_p_j_1
+        p_j = jnp.roll(p_j, shift=1, axis=-1) + 0.5 * step_size * delta_p_j_2
+        p_j = p_j.at[..., 0].set(0)
+
+        return (p_j, t, (outflow, inflow)), p_j
+    
+    t0 = jnp.zeros_like(step_sizes[0])
+    flow_0 = flow(t0, *args, **kwargs)
+    _, p_j = jax.lax.scan(scan_p_j, (p_j_0, t0, flow_0), jnp.expand_dims(step_sizes, axis=-1))
+    
+    p_j = jnp.concatenate([jnp.expand_dims(p_j_0, axis=0), p_j])
+    p_j = jnp.swapaxes(p_j, 0, 1)
+    p_j = jnp.swapaxes(p_j, 1, 2)
+
+    return p_j
+
+
 @partial(jax.jit, static_argnames=['flow'])
 def solve(step_sizes: jnp.ndarray, 
           flow: Callable[..., tuple[jnp.ndarray, jnp.ndarray]], 
@@ -112,5 +162,21 @@ def solve(step_sizes: jnp.ndarray,
     p_j_0 = p_j_0.at[(..., 0, slice(None))].set(1.0)
 
     p_j = solve_p_j(p_j_0, step_sizes, flow, *args, **kwargs)
+    
+    return p_j
+
+@partial(jax.jit, static_argnames=['flow'])
+def solve_heun(step_sizes: jnp.ndarray, 
+          flow: Callable[..., tuple[jnp.ndarray, jnp.ndarray]], 
+          *args: jnp.ndarray, 
+          **kwargs: jnp.ndarray):
+
+    outflow, inflow = flow(0, *args, **kwargs)
+    step_sizes = jnp.expand_dims(step_sizes, axis=-1)
+    
+    p_j_0 = jnp.zeros_like(outflow)
+    p_j_0 = p_j_0.at[(..., 0, slice(None))].set(1.0)
+
+    p_j = solve_p_j_heun(p_j_0, step_sizes, flow, *args, **kwargs)
     
     return p_j
