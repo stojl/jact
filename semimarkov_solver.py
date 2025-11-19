@@ -91,8 +91,8 @@ def solve_p(p_0: jnp.ndarray,
             
             delta_p_2, delta_p_point_2 = compute_derivative(p_2, p_point_2, mu_plus, mu_minus)
             
-            delta_p_2 = delta_p_2[..., 1:] + delta_p[..., :-1]
-            delta_p_point2 = delta_p_point_2[..., 1:] + delta_p_point[..., :-1]
+            delta_p_2 = 0.5 * (delta_p_2[..., 1:] + delta_p[..., :-1])
+            delta_p_point2 = 0.5 * (delta_p_point_2[..., 1:] + delta_p_point[..., :-1])
             
             delta_p = delta_p.at[..., :-1].set(delta_p_2)
             delta_p_point = delta_p_point.at[..., :-1].set(delta_p_point2)
