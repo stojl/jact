@@ -31,6 +31,9 @@ def compute_derivative(p: jnp.ndarray,
       outflow_plus, inflow_plus = mu_plus
       outflow_minus, inflow_minus = mu_minus
       
+      outflow_plus = jnp.sum(outflow_plus, axis=-2)
+      outflow_minus = jnp.sum(outflow_minus, axis=-2)
+      
       dp = jnp.diff(p, axis=-1) # B X J X (D - 1)
       dp_point = jnp.diff(p_point, axis=-1, prepend=0) # B X D
       
@@ -53,11 +56,37 @@ def compute_derivative(p: jnp.ndarray,
       
       return delta_p, delta_p_point            
 
+@jax.jit
+def compute_cashflow(p: jnp.ndarray,
+                     p_point: jnp.ndarray,
+                     c_plus: jnp.ndarray,
+                     c_minus: jnp.ndarray,
+                     mu_plus: jnp.ndarray,
+                     mu_minus: jnp.ndarray):
+      
+      dp = jnp.diff(p, axis=-1) # B X J X (D - 1)
+      dp_point = jnp.diff(p_point, axis=-1, prepend=0) # B X D
+      
+      dB_plus, B_jump_plus = c_plus
+      dB_minus, B_jump_minus = c_minus
+      
+      outflow_plus, _ = mu_plus
+      outflow_minus, _ = mu_minus
+      
+      dB_all_plus = dB_plus + jnp.sum(B_jump_plus * outflow_plus, axis=-2)
+      dB_all_minus = dB_minus + jnp.sum(B_jump_minus * outflow_minus, axis=-2)
+      
+      dB_all_avg = 0.5 * (dB_all_plus[..., :-1] + dB_all_minus[..., 1:])
+      dB_int = jnp.sum(dB_all_avg * dp + dB_all_plus * dp_point, axis=-1)
+      
+      return dB_int      
+
 @partial(jax.jit, static_argnames=['flow'])
 def solve_p(p_0: jnp.ndarray, 
             p_point_0: jnp.ndarray, 
             grid: jnp.ndarray, 
             flow: Callable[..., tuple[jnp.ndarray, jnp.ndarray]],
+            cashflow: Callable[..., tuple[jnp.ndarray, jnp.ndarray]],
             pertubation: jnp.ndarray,
             *args: jnp.ndarray, 
             **kwargs: jnp.ndarray):
@@ -74,8 +103,14 @@ def solve_p(p_0: jnp.ndarray,
             
             t_plus = t + pertubation
             
+            c_plus = cashflow(t_plus, grid_plus)
+            c_minus = cashflow(t_plus, grid_minus)
+            
             mu_plus = flow(t_plus, grid_plus, *args, **kwargs)
             mu_minus = flow(t_plus, grid_minus, *args, **kwargs)
+            
+            # Left end point of cashflow
+            dB_left = compute_cashflow(p, p_point, c_plus, c_minus, mu_plus, mu_minus)
             
             delta_p, delta_p_point = compute_derivative(p, p_point, mu_plus, mu_minus)
             
@@ -100,8 +135,15 @@ def solve_p(p_0: jnp.ndarray,
             p = update_p(p, delta_p, step_size)
             p_point = update_p_point(p_point, delta_p_point, step_size)
             
+            c_plus = cashflow(t_minus, grid_plus)
+            c_minus = cashflow(t_minus, grid_minus)
+            
+            # Right end point of cashflow
+            dB_right = compute_cashflow(p, p_point, c_plus, c_minus, mu_plus, mu_minus)
+            dA = 0.5 * (dB_left + dB_right) * step_size
+            
             next_carry = (p, p_point, t)
-            history = (p, p_point)
+            history = (p, p_point, dA)
             
             return next_carry, history
       
