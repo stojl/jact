@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from functools import partial
 from typing import Callable, Sequence, Any, Dict, Optional, Union
 from probability_callbacks import ProbabilityCallbacks
-
+from cashflow_callbacks import CashflowCallbacks
 
 @jax.jit
 def roll_probability_tensor(p: jnp.ndarray):
@@ -116,26 +116,6 @@ def step_sizes_from_grid(grid: jnp.ndarray) -> jnp.ndarray:
 
     return step_sizes
 
-
-@partial(jax.jit, static_argnames=["prob_callback", "cashflow_callback"])
-def construct_callback(
-    prob_callback: Optional[Callable[..., jnp.ndarray]],
-    cashflow_callback: Optional[Callable[..., jnp.ndarray]],
-):
-    @jax.jit
-    def callback(p, p_point, dB_left, dB_right, step_size, t_left, t_right):
-        prob_value = prob_callback(p, p_point) if callable(prob_callback) else None
-        cashflow_value = (
-            cashflow_callback(p, p_point, dB_left, dB_right, step_size, t_left, t_right)
-            if callable(cashflow_callback)
-            else None
-        )
-
-        return {"probability": prob_value, "cashflow": cashflow_value}
-
-    return callback
-
-
 @jax.jit
 def concatenate_init_probability(x, x0):
     return jnp.concatenate([jnp.expand_dims(x0, axis=0), x])
@@ -143,16 +123,16 @@ def concatenate_init_probability(x, x0):
 
 @partial(
     jax.jit,
-    static_argnames=["intensity", "cashflow", "prob_callback", "cashflow_callback"],
+    static_argnames=['intensity', 'cashflow', 'prob_callback', 'cashflow_callback'],
 )
 def heun_scheme_solver(
     p_0: jnp.ndarray,
     p_point_0: jnp.ndarray,
     grid: jnp.ndarray,
     intensity: Callable[..., tuple[jnp.ndarray, jnp.ndarray]],
-    intensity_kwargs: Optional[Dict[str, jnp.ndarray]],
-    cashflow: Optional[Callable[..., tuple[jnp.ndarray, jnp.ndarray]]],
-    cashflow_kwargs: Optional[Dict[str, jnp.ndarray]],
+    intensity_kwargs: Dict[str, jnp.ndarray],
+    cashflow: Callable[..., tuple[jnp.ndarray, jnp.ndarray]],
+    cashflow_kwargs: Dict[str, jnp.ndarray],
     prob_callback: Callable[..., jnp.ndarray],
     cashflow_callback: Callable[..., jnp.ndarray],
     pertubation: jnp.ndarray,
@@ -162,8 +142,6 @@ def heun_scheme_solver(
     grid_plus = grid + pertubation
 
     step_sizes = step_sizes_from_grid(grid)
-
-    callback_fn = construct_callback(prob_callback, cashflow_callback)
 
     def heun_scan(carry, step_size):
         p, p_point, t = carry
@@ -181,12 +159,12 @@ def heun_scheme_solver(
 
         delta_p, delta_p_point = compute_derivative(p, p_point, mu_plus, mu_minus)
 
-        t_right += step_size
+        t += step_size
 
         p_2 = update_p(p, delta_p, step_size)
         p_point_2 = update_p_point(p_point, delta_p_point, step_size)
 
-        t_minus = t - pertubation
+        t_right = t - pertubation
 
         mu_plus = intensity(t_right, grid_plus, **intensity_kwargs)
         mu_minus = intensity(t_right, grid_minus, **intensity_kwargs)
@@ -205,26 +183,28 @@ def heun_scheme_solver(
         p_point = update_p_point(p_point, delta_p_point, step_size)
 
         if cashflow is not None:
-            c_plus = cashflow(t_minus, grid_plus, **cashflow_kwargs)
-            c_minus = cashflow(t_minus, grid_minus, **cashflow_kwargs)
+            c_plus = cashflow(t_right, grid_plus, **cashflow_kwargs)
+            c_minus = cashflow(t_right, grid_minus, **cashflow_kwargs)
 
             dB_right = compute_cashflow(p, p_point, c_plus, c_minus, mu_plus, mu_minus)
 
         next_carry = (p, p_point, t)
-        history = callback_fn(p, p_point, dB_left, dB_right, step_size, t_left, t_right)
+        history = {
+            'probability': prob_callback(p, p_point),
+            'cashflow': cashflow_callback(p, p_point, dB_left, dB_right, step_size, t_left, t_right)
+        }
 
         return next_carry, history
 
     t0 = jnp.zeros_like(step_sizes[0])
 
     _, result = jax.lax.scan(heun_scan, (p_0, p_point_0, t0), step_sizes)
-
-    if result["probability"] is not None:
-        init_prob_callback_value = prob_callback(p_0, p_point_0)
-        result["probability"] = jax.tree_util.tree_map(
-            lambda arr: concatenate_init_probability(arr, init_prob_callback_value),
-            result["probability"],
-        )
+    
+    init_prob_callback_value = prob_callback(p_0, p_point_0)
+    result['probability'] = jax.tree_util.tree_map(
+        lambda arr: concatenate_init_probability(arr, init_prob_callback_value),
+        result['probability'],
+    )
 
     return result
 
@@ -247,7 +227,7 @@ def transpose_cashflow(x):
 
 @partial(
     jax.jit,
-    static_argnames=["intensity", "cashflow", "prob_callback", "cashflow_callback"],
+    static_argnames=['intensity', 'cashflow', 'prob_callback', 'cashflow_callback'],
 )
 def semimarkov_solver(
     grid: jnp.ndarray,
@@ -255,7 +235,7 @@ def semimarkov_solver(
     intensity_kwargs: Optional[Dict[str, jnp.ndarray]] = None,
     cashflow: Optional[Callable[..., tuple[jnp.ndarray, jnp.ndarray]]] = None,
     cashflow_kwargs: Optional[Dict[str, jnp.ndarray]] = None,
-    prob_callback: Union[None, str, Callable[..., Any]] = "default",
+    prob_callback: Union[None, str, Callable[..., Any]] = 'default',
     cashflow_callback: Union[str, Callable[..., Any]] = None,
     pertubation: jnp.ndarray = 1e-12,
     transpose_result: bool = True,
@@ -263,17 +243,17 @@ def semimarkov_solver(
 
     if not callable(prob_callback):
         prob_callback = ProbabilityCallbacks.from_str(prob_callback)
-
-    if intensity_kwargs is None:
-        intensity_kwargs = {}
-
-    if cashflow_kwargs is None:
-        cashflow_kwargs = {}
+        
+    if not callable(cashflow_callback):
+        cashflow_callback = CashflowCallbacks.from_str(cashflow_callback)
+        
+    intensity_kwargs = {} if intensity_kwargs is None else intensity_kwargs
+    cashflow_kwargs = {} if cashflow_kwargs is None else cashflow_kwargs
 
     outflow, inflow = intensity(0, grid, **intensity_kwargs)
 
-    p_point_0 = jnp.ones_like(outflow[..., 0, :])
-    p_0 = jnp.zeros_like(outflow)
+    p_point_0 = jnp.ones_like(outflow[..., 0, 0, :])
+    p_0 = jnp.zeros_like(outflow[..., 0, :])
 
     result = heun_scheme_solver(
         p_0,
@@ -287,7 +267,7 @@ def semimarkov_solver(
         cashflow_callback,
         pertubation,
     )
-
+    return result
     if transpose_result:
         transposed_cf = jax.tree_util.tree_map(transpose_cashflow, result["cashflow"])
         result["cashflow"] = transposed_cf

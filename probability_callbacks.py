@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-
+from typing import Union
 
 class ProbabilityCallbacks:
 
@@ -96,7 +96,7 @@ class ProbabilityCallbacks:
             The sum of the absolutely continuous part (p) and point
             mass (p_point).
         """
-        p_with_point = p[..., 0, :] + jnp.expand_dims(p_point, axis=1)
+        p_with_point = p[..., 0, :] + p_point
         p = p.at[..., 0, :].set(p_with_point)
         return p
 
@@ -220,7 +220,7 @@ class ProbabilityCallbacks:
         return p[..., -1]
 
     @staticmethod
-    def from_str(str: str):
+    def from_str(str: Union[str, None]):
         match str:
             case "default":
                 return ProbabilityCallbacks.default
@@ -240,5 +240,7 @@ class ProbabilityCallbacks:
                 return ProbabilityCallbacks.no_point
             case "no_point_no_duration":
                 return ProbabilityCallbacks.no_point_no_duration
+            case None:
+                return ProbabilityCallbacks.none
             case _:
                 return ProbabilityCallbacks.default
