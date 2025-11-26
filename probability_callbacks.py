@@ -91,8 +91,7 @@ class ProbabilityCallbacks:
         Returns
         -------
         jnp.ndarray
-            Returns the sum of the absolutely continuous part (p) and point
-            mass (p_point).
+            The sum of the absolutely continuous part (p) and point mass (p_point).
         """
         p_with_point = p[..., 0, :] + jnp.expand_dims(p_point, axis=1)
         p = p.at[..., 0, :].set(p_with_point)
@@ -116,9 +115,8 @@ class ProbabilityCallbacks:
         Returns
         -------
         jnp.ndarray
-            Returns the sum of the absolutely continuous part (p) and point
-            mass (p_point) and marginalizes the duration as an array of shape
-            (Batch, States).
+            The sum of the absolutely continuous part (p) and point mass (p_point) 
+            and marginalizes the duration as an array of shape (Batch, States).
         """
         p = ProbabilityCallbacks.collapse_point(p, p_point)
         return p[..., -1]
@@ -140,7 +138,7 @@ class ProbabilityCallbacks:
         Returns
         -------
         jnp.ndarray
-            Returns the point mass probability (p_point).
+            The point mass probability (p_point).
         """
         return p_point
 
@@ -162,8 +160,8 @@ class ProbabilityCallbacks:
         Returns
         -------
         jnp.ndarray
-            Returns the point mass probability (p_point) with marginalized
-            duration as an array of shape (Batch,).
+            The point mass probability (p_point) with marginalized duration as 
+            an array of shape (Batch,).
         """
         return p_point[..., -1]
 
@@ -185,7 +183,7 @@ class ProbabilityCallbacks:
         Returns
         -------
         jnp.ndarray
-            Returns the absolutely continuous part (p).
+            The absolutely continuous part (p).
         """
         return p
 
@@ -207,8 +205,8 @@ class ProbabilityCallbacks:
         Returns
         -------
         jnp.ndarray
-            Returns the absolutely continuous part (p) with marginalized
-            duration as an array of shape (Batch, States).
+            The absolutely continuous part (p) with marginalized duration as 
+            an array of shape (Batch, States).
         """
         return p[..., -1]
 
