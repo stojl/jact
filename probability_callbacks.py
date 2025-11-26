@@ -6,7 +6,7 @@ class ProbabilityCallbacks:
 
     @staticmethod
     @jax.jit
-    def empty(p: jnp.ndarray, p_point: jnp.ndarray) -> None:
+    def none(p: jnp.ndarray, p_point: jnp.ndarray) -> None:
         """Probability empty callback
 
         Callback ignores probabilities altogether.
@@ -14,9 +14,11 @@ class ProbabilityCallbacks:
         Parameters
         ----------
         p : jnp.ndarray
-            A 3D array of shape (Batch, States, Duration)
+            A 3D array of shape (Batch, States, Duration). This argument
+            is **ignored**.
         p_point : jnp.ndarray
-            A 2D array of shape (Batch, Duration)
+            A 2D array of shape (Batch, Duration). This argument is 
+            **ignored**.
 
         Returns
         -------
@@ -53,7 +55,7 @@ class ProbabilityCallbacks:
     def no_duration(
         p: jnp.ndarray, p_point: jnp.ndarray
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
-        """Probability marginalized duration callback
+        """Probability with marginalized duration callback
 
         Returns the absolutely continuous part and the point mass of the
         transition probabilities and marginalizes duration.
@@ -91,7 +93,8 @@ class ProbabilityCallbacks:
         Returns
         -------
         jnp.ndarray
-            The sum of the absolutely continuous part (p) and point mass (p_point).
+            The sum of the absolutely continuous part (p) and point
+            mass (p_point).
         """
         p_with_point = p[..., 0, :] + jnp.expand_dims(p_point, axis=1)
         p = p.at[..., 0, :].set(p_with_point)
@@ -110,13 +113,15 @@ class ProbabilityCallbacks:
         p : jnp.ndarray
             A 3D array of shape (Batch, States, Duration)
         p_point : jnp.ndarray
-            A 2D array of shape (Batch, Duration)
+            A 2D array of shape (Batch, Duration). This argument is 
+            **ignored**.
 
         Returns
         -------
         jnp.ndarray
-            The sum of the absolutely continuous part (p) and point mass (p_point) 
-            and marginalizes the duration as an array of shape (Batch, States).
+            The sum of the absolutely continuous part (p) and point
+            mass (p_point) and marginalizes the duration as an array of shape
+            (Batch, States).
         """
         p = ProbabilityCallbacks.collapse_point(p, p_point)
         return p[..., -1]
@@ -131,7 +136,8 @@ class ProbabilityCallbacks:
         Parameters
         ----------
         p : jnp.ndarray
-            A 3D array of shape (Batch, States, Duration)
+            A 3D array of shape (Batch, States, Duration). This argument is 
+            **ignored**.
         p_point : jnp.ndarray
             A 2D array of shape (Batch, Duration)
 
@@ -153,15 +159,16 @@ class ProbabilityCallbacks:
         Parameters
         ----------
         p : jnp.ndarray
-            A 3D array of shape (Batch, States, Duration)
+            A 3D array of shape (Batch, States, Duration). This argument is 
+            **ignored**.
         p_point : jnp.ndarray
             A 2D array of shape (Batch, Duration)
 
         Returns
         -------
         jnp.ndarray
-            The point mass probability (p_point) with marginalized duration as 
-            an array of shape (Batch,).
+            The point mass probability (p_point) with marginalized
+            duration as an array of shape (Batch,).
         """
         return p_point[..., -1]
 
@@ -178,7 +185,8 @@ class ProbabilityCallbacks:
         p : jnp.ndarray
             A 3D array of shape (Batch, States, Duration)
         p_point : jnp.ndarray
-            A 2D array of shape (Batch, Duration)
+            A 2D array of shape (Batch, Duration). This argument is 
+            **ignored**.
 
         Returns
         -------
@@ -200,13 +208,14 @@ class ProbabilityCallbacks:
         p : jnp.ndarray
             A 3D array of shape (Batch, States, Duration)
         p_point : jnp.ndarray
-            A 2D array of shape (Batch, Duration)
+            A 2D array of shape (Batch, Duration). This argument is 
+            **ignored**.
 
         Returns
         -------
         jnp.ndarray
-            The absolutely continuous part (p) with marginalized duration as 
-            an array of shape (Batch, States).
+            The absolutely continuous part (p) with marginalized
+            duration as an array of shape (Batch, States).
         """
         return p[..., -1]
 
@@ -216,7 +225,7 @@ class ProbabilityCallbacks:
             case "default":
                 return ProbabilityCallbacks.default
             case "none":
-                return ProbabilityCallbacks.empty
+                return ProbabilityCallbacks.none
             case "no_duration":
                 return ProbabilityCallbacks.no_duration
             case "collapse_point":
