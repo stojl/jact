@@ -84,11 +84,12 @@ def compute_cashflow(
     outflow_plus, _ = mu_plus
     outflow_minus, _ = mu_minus
 
-    dB_all_plus = dB_plus + jnp.sum(B_jump_plus * outflow_plus, axis=-2)
+    dB_all_plus = dB_plus + jnp.sum(B_jump_plus * outflow_plus, axis=-2) # B X J X D
     dB_all_minus = dB_minus + jnp.sum(B_jump_minus * outflow_minus, axis=-2)
 
     dB_all_avg = 0.5 * (dB_all_plus[..., :-1] + dB_all_minus[..., 1:])
-    dB_int = jnp.sum(dB_all_avg * dp + dB_all_plus * dp_point, axis=-1)
+    dB_int = jnp.sum(dB_all_avg * dp, axis=-1)
+    dB_int += jnp.sum(dB_all_plus[..., 0, :] * dp_point, axis=-1, keepdims=True)
 
     return dB_int
 
@@ -217,17 +218,17 @@ def transpose_probability(x):
     if N == 2:
         return jnp.transpose(x, axes=(1, 0))
 
-    return jnp.moveaxis(x, 0, 2)
+    return jnp.moveaxis(x, 0, -2)
 
 
 @jax.jit
 def transpose_cashflow(x):
-    return jnp.swapaxes(x, axis1=0, axis2=-1)
+    return jnp.moveaxis(x, 0, -1)
 
 
 @partial(
     jax.jit,
-    static_argnames=['intensity', 'cashflow', 'prob_callback', 'cashflow_callback'],
+    static_argnames=['intensity', 'cashflow', 'prob_callback', 'cashflow_callback', 'transpose_result'],
 )
 def semimarkov_solver(
     grid: jnp.ndarray,
@@ -236,7 +237,7 @@ def semimarkov_solver(
     cashflow: Optional[Callable[..., tuple[jnp.ndarray, jnp.ndarray]]] = None,
     cashflow_kwargs: Optional[Dict[str, jnp.ndarray]] = None,
     prob_callback: Union[None, str, Callable[..., Any]] = 'default',
-    cashflow_callback: Union[str, Callable[..., Any]] = None,
+    cashflow_callback: Union[str, Callable[..., Any]] = 'default',
     pertubation: jnp.ndarray = 1e-12,
     transpose_result: bool = True,
 ):
@@ -267,7 +268,7 @@ def semimarkov_solver(
         cashflow_callback,
         pertubation,
     )
-    return result
+
     if transpose_result:
         transposed_cf = jax.tree_util.tree_map(transpose_cashflow, result["cashflow"])
         result["cashflow"] = transposed_cf
