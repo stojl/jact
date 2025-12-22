@@ -24,6 +24,11 @@ def fill_function_matrix(
     
     return filled_matrix
 
+def get_reference_function(function_matrix):
+    all_functions = (f for row in function_matrix for f in row)
+    global_reference_func = next((f for f in all_functions if f is not None), None)
+    return global_reference_func
+
 def prepare_function_matrix(
     function_matrix: Sequence[Sequence[Callable[..., jnp.ndarray]]]
 ):
@@ -31,8 +36,7 @@ def prepare_function_matrix(
     if not all(len(row) == n for row in function_matrix):
         raise ValueError("Intensity matrix must be square (n x n).")
     
-    all_functions = (f for row in function_matrix for f in row)
-    global_reference_func = next((f for f in all_functions if f is not None), None)
+    global_reference_func = get_reference_function(function_matrix)
     
     if global_reference_func is None:
         raise ValueError("The intensity matrix contains only None entries. Cannot construct any function or determine output shape.")
