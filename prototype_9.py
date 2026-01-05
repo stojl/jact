@@ -3,6 +3,7 @@ import jax.numpy as jnp
 from functools import partial, reduce
 from typing import Callable, Sequence, Any, Dict, Optional, Union
 from probability_callbacks import ProbabilityCallbacks
+from cashflow_callbacks import CashflowCallbacks
 from function_utils import get_reference_function
 
 
@@ -26,8 +27,8 @@ def update_p_point(p: jnp.ndarray, delta: jnp.ndarray, step_size: jnp.ndarray):
     return p
 
 
-def _compute_core(p_single, p_point_single, mu_plus_matrix, mu_minus_matrix):
-    J, D_minus_1 = p_single.shape
+def _compute_core(p, p_point, mu_plus_matrix, mu_minus_matrix):
+    J, D_minus_1 = p.shape
     
     outflow_plus_list = [[] for _ in range(J)]
     outflow_avg_list = [[] for _ in range(J)]
@@ -39,18 +40,18 @@ def _compute_core(p_single, p_point_single, mu_plus_matrix, mu_minus_matrix):
             m_p = mu_plus_matrix[i][j]
             m_m = mu_minus_matrix[i][j]
             
-            if m_p is not None:
+            if m_p is not None and j != i:
                 m_p_slice = m_p[:-1]
                 m_avg = 0.5 * (m_p_slice + m_m[1:])
 
                 outflow_plus_list[i].append(m_p_slice)
                 outflow_avg_list[i].append(m_avg)
 
-                term_p = jnp.sum(m_avg * p_single[i, :])
+                term_p = jnp.sum(m_avg * p[i, :])
                 inflow_terms_for_j.append(term_p)
                 
                 if i == 0:
-                    term_p_point = jnp.sum(m_p_slice * p_point_single)
+                    term_p_point = jnp.sum(m_p_slice * p_point)
                     inflow_terms_for_j.append(term_p_point)
 
         if inflow_terms_for_j:
@@ -63,8 +64,8 @@ def _compute_core(p_single, p_point_single, mu_plus_matrix, mu_minus_matrix):
 
     next_inflow = jnp.array(next_inflow_list)
     
-    delta_p = -p_single * final_outflow_avg
-    delta_p_point = -final_outflow_plus[0, :] * p_point_single 
+    delta_p = -p * final_outflow_avg
+    delta_p_point = -final_outflow_plus[0, :] * p_point 
 
     return next_inflow, delta_p, delta_p_point
 
@@ -75,6 +76,118 @@ def compute_derivative(p, p_point, mu_plus_matrix, mu_minus_matrix):
     vmap_func = jax.vmap(_compute_core, in_axes=(0, 0, mu_axes, mu_axes))
     
     return vmap_func(p, p_point, mu_plus_matrix, mu_minus_matrix)
+
+def compute_jump_payments(mu, payments):
+    result_matrix = []
+
+    for m_row, p_row in zip(mu, payments):
+        if p_row is None or m_row is None:
+            result_matrix.append(None)
+            continue
+            
+        current_row_res = []
+        
+        for m_val, b_val in zip(m_row, p_row):
+            if m_val is None or b_val is None:
+                current_row_res.append(None)
+            else:
+                prod = jax.tree_util.tree_map(lambda x: m_val * x, b_val)
+                current_row_res.append(prod)
+        
+        result_matrix.append(tuple(current_row_res))
+        
+    return tuple(result_matrix)
+
+def trapezoid_increment(left, right):
+    return 0.5 * (left[..., :-1] + right[..., 1:])
+
+def compute_cashflow(
+    p, p_point,
+    mu_plus, mu_minus,
+    cf_plus, cf_minus,
+    cashflow_callback):
+    
+    _, J, _ = p.shape
+
+    cf_plus['jump'] = compute_jump_payments(mu_plus, cf_plus['jump'])
+    cf_minus['jump'] = compute_jump_payments(mu_minus, cf_minus['jump'])
+    
+    cf_plus = cashflow_callback(**cf_plus)
+    cf_minus = cashflow_callback(**cf_minus)
+    
+    cf_avg = jax.tree_util.tree_map(lambda a, b: trapezoid_increment(a, b), cf_plus, cf_minus)
+    
+    for j in range(J):
+        dp = p[:, j, ...]
+        cf_avg_j = cf_avg[j]
+        
+        cf_avg_j = 
+        
+        
+
+
+def compute_cashflow_optimized(
+    p, p_point, 
+    mu_p_matrix, mu_m_matrix,      # Intensities (Tuples of Tuples)
+    dB_p_tuple, dB_m_tuple,        # Continuous cashflow (Tuples)
+    Bj_p_matrix, Bj_m_matrix       # Jump cashflow (Tuples of Tuples)
+):
+    """
+    p: (B, J, D-1)
+    p_point: (B, D-1)
+    All matrices/tuples are pre-evaluated or static function handles.
+    """
+    B, J, D_minus_1 = p.shape
+    
+    # This will store the combined cashflow rate per state i: (B, J, D-1)
+    state_cashflow_rates = []
+
+    for i in range(J):
+        db_p = dB_p_tuple[i]
+        db_m = dB_m_tuple[i]
+        
+        # Slicing to D-1
+        db_p_slice = db_p[..., :-1]
+        db_avg = 0.5 * (db_p_slice + db_m[..., 1:])
+        
+        jump_contributions = []
+        for j in range(J):
+            mu_p = mu_p_matrix[i][j]
+            mu_m = mu_m_matrix[i][j]
+            bj_p = Bj_p_matrix[i][j]
+            bj_m = Bj_m_matrix[i][j]
+            
+            if mu_p is not None and bj_p is not None:
+                rate_p = bj_p[..., :-1] * mu_p[..., :-1]
+                rate_m = bj_m[..., 1:] * mu_m[..., 1:]
+                jump_contributions.append(0.5 * (rate_p + rate_m))
+
+        if jump_contributions:
+            total_rate_i = reduce(jax.lax.add, [db_avg] + jump_contributions)
+        else:
+            total_rate_i = db_avg
+            
+        state_cashflow_rates.append(total_rate_i)
+
+    total_cashflow = jnp.zeros((B,))
+    for i in range(J):
+        term = jnp.sum(state_cashflow_rates[i] * p[:, i, :], axis=-1)
+        total_cashflow = total_cashflow + term
+
+    db_p0 = dB_p_tuple[0][..., :-1]
+    jump_p0_list = []
+    for j in range(J):
+        if Bj_p_matrix[0][j] is not None and mu_p_matrix[0][j] is not None:
+            jump_p0_list.append(Bj_p_matrix[0][j][..., :-1] * mu_p_matrix[0][j][..., :-1])
+    
+    if jump_p0_list:
+        db_all_p0 = reduce(lax.add, [db_p0] + jump_p0_list)
+    else:
+        db_all_p0 = db_p0
+        
+    point_term = jnp.sum(db_all_p0 * p_point, axis=-1)
+    
+    return total_cashflow + point_term
 
 @jax.jit
 def step_sizes_from_grid(grid: jnp.ndarray) -> jnp.ndarray:
@@ -121,6 +234,8 @@ def heun_scheme_solver(
     step_size: float,
     intensity: Sequence[Sequence[Optional[Callable[..., jnp.ndarray]]]],
     intensity_kwargs: Dict[str, jnp.ndarray],
+    cashflow: Sequence[Sequence[Optional[Callable[..., jnp.ndarray]]]],
+    cashflow_kwargs: Dict[str, jnp.ndarray],
     prob_callback: Callable[..., jnp.ndarray],
     pertubation: jnp.ndarray,
 ):
@@ -196,14 +311,16 @@ def transpose_probability(x):
 
 @partial(
     jax.jit,
-    static_argnames=['units', 'discretization_unit', 'intensity', 'prob_callback', 'transpose_result'],
+    static_argnames=['units', 'discretization_unit', 'intensity', 'prob_callback', 'cashflow_callback', 'transpose_result'],
 )
 def semimarkov_solver(
     units: int,
     discretization_unit: int,
     intensity: Sequence[Sequence[Optional[Callable[..., jnp.ndarray]]]],
     intensity_kwargs: Optional[Dict[str, jnp.ndarray]] = None,
+    cashflow: Sequence[Sequence[Optional[Callable[..., jnp.ndarray]]]] = None,
     prob_callback: Union[None, str, Callable[..., Any]] = 'default',
+    cashflow_callback: Union[None, str, Callable[..., Any]] = 'default',
     pertubation: jnp.ndarray = 1e-12,
     transpose_result: bool = True,
 ):
@@ -217,6 +334,9 @@ def semimarkov_solver(
     
     if not callable(prob_callback):
         prob_callback = ProbabilityCallbacks.from_str(prob_callback)
+        
+    if not callable(cashflow_callback):
+        cashflow_callback = CashflowCallbacks.from_str(cashflow_callback)
         
     intensity_kwargs = {} if intensity_kwargs is None else intensity_kwargs
     

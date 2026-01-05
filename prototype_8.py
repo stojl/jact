@@ -5,25 +5,23 @@ from typing import Callable, Sequence, Any, Dict, Optional, Union
 from probability_callbacks import ProbabilityCallbacks
 from function_utils import get_reference_function
 
-
 @jax.jit
 def roll_probability_tensor(p: jnp.ndarray, next_inflow: jnp.ndarray):
-    p = jnp.roll(p, shift=1, axis=-1)
+    p = p.at[..., 1:].set(p[..., :-1])
     p = p.at[..., 0].set(next_inflow)
-
     return p
 
 @jax.jit
 def update_p(p: jnp.ndarray, delta: jnp.ndarray, next_inflow: jnp.ndarray, step_size: float):
-    p = p + step_size * delta
-    p = roll_probability_tensor(p, step_size * next_inflow)
-    return p
+    p_next = p.at[..., 1:].set(p[..., :-1] + step_size * delta[..., :-1])
+    p_next = p_next.at[..., 0].set(step_size * next_inflow)
+    return p_next
 
 @jax.jit
 def update_p_point(p: jnp.ndarray, delta: jnp.ndarray, step_size: jnp.ndarray):
-    p = p + step_size * delta
-    p = roll_probability_tensor(p, 0)
-    return p
+    p_next = p.at[..., 1:].set(p[..., :-1] + step_size * delta[..., :-1])
+    p_next = p_next.at[..., 0].set(0.0)
+    return p_next
 
 
 def _compute_core(p_single, p_point_single, mu_plus_matrix, mu_minus_matrix):
