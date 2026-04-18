@@ -225,72 +225,74 @@ model.info("healthy", "disabled")
 
 ## Intensity protocol
 
-Every intensity callable must be JIT-compatible and conform to this signature:
+Intensity callables are **pure functions**. No class protocol or two-phase interface is supported — a callable is the only contract. Fitted model parameters are captured via closures.
+
+### Call signature
 
 ```python
-def intensity(t, grid, **kwargs):
-    """
-    Parameters
-    ----------
-    t : scalar or array
-        Current calendar time.
-    grid : jnp.ndarray
-        Duration grid points, shape (1, D).
-    **kwargs
-        Covariate arrays, each of shape (batch, ...).
-
-    Returns
-    -------
-    jnp.ndarray
-        Intensity values. Shape depends on assignment type.
-    """
+def intensity(t, d, **kwargs) -> jnp.ndarray:
+    ...
 ```
+
+| Argument | Type | Description |
+|---|---|---|
+| `t` | `float` scalar | Current clock time. Ranges from `0` to `horizon` as the solver marches forward. |
+| `d` | `jnp.ndarray`, shape `(1, D)` | Duration grid points. Each entry is the time spent in the current state at that duration slot. The `1` axis broadcasts over the batch dimension. |
+| `**kwargs` | `jnp.ndarray`, shape `(batch, ...)` | Covariate arrays passed through from `solve()`. Each callable consumes the subset it needs; unused kwargs are ignored. |
+
+#### On `t` and `d`
+
+The solver maintains a probability density over duration `d` for each state and advances it in clock time `t`. At each solver step the callable receives the current `t` and the full duration array `d` simultaneously, and must return the intensity surface `μ(t, d)` over all `D` duration points in a single call.
+
+`t` and `d` play distinct roles. For a population observed at `t=0` with known baseline ages, attained age at clock time `t` is `baseline_age + t` — age advances with clock time, not with duration in state. Duration `d` enters separately when the intensity depends on how long the individual has been in the current state, which is the semi-Markov component. A Markov intensity uses only `t`; a pure duration-dependent intensity uses only `d`; a semi-Markov intensity uses both.
+
+#### JAX requirements
+
+The callable is traced by JAX and compiled into the solver's `lax.scan` body. It must be:
+
+- **Pure**: no Python side effects, no mutation.
+- **JIT-compatible**: no data-dependent Python control flow, no non-JAX operations.
+- **Closed over static values only**: fitted parameters (arrays, scalars) may be captured in the closure; they become compile-time constants.
 
 ### Return shapes by assignment type
 
 | Assignment | Return shape | Description |
 |---|---|---|
 | `transitions` (single) | `(batch, D)` | One intensity surface |
-| `exits` (all exits) | `(n_targets, batch, D)` | One per target state |
-| `groups` (arbitrary) | `(n_transitions, batch, D)` | One per listed transition |
+| `exits` (all exits) | `(n_targets, batch, D)` | One per target state, ordered by `state_space.targets(source)` |
+| `groups` (arbitrary) | `(n_transitions, batch, D)` | One per listed transition, in the order provided to `build()` |
 
 ### Examples
 
-Single transition — Gompertz mortality:
+**Markov — Gompertz mortality** (depends only on attained age, i.e. clock time):
 
 ```python
-def gompertz(t, grid, age, **kwargs):
-    x = age[:, None] + grid
-    return jnp.exp(alpha + beta * x)
+alpha, beta = fit_gompertz(data)
+
+def gompertz_mortality(t, d, baseline_age, **kwargs):
+    attained_age = baseline_age + t   # (batch,)
+    return jnp.exp(alpha + beta * attained_age)[:, None] * jnp.ones_like(d)  # (batch, D)
 ```
 
-Competing risks — neural network with multiple output heads:
+**Semi-Markov — duration-dependent onset** (depends on both attained age and duration in state):
 
 ```python
-def joint_hazard(t, grid, age, bmi, smoking, **kwargs):
-    features = jnp.stack([age, bmi, smoking], axis=-1)
-    # ... neural net forward pass ...
-    return intensities  # (n_targets, batch, D)
+coef = fit_glm(data).coef_
+
+def onset_semi_markov(t, d, baseline_age, **kwargs):
+    attained_age = baseline_age + t          # (batch,)
+    lp = coef[0] + coef[1] * attained_age   # (batch,)
+    return jnp.exp(lp[:, None]) * baseline(d)  # (batch, D)
 ```
 
-Each callable can consume whatever subset of `**kwargs` it needs. The Gompertz might only use `age`, while the neural net uses `age`, `bmi`, and `smoking`. Unused kwargs are simply ignored.
-
-### Pre-computation (future)
-
-For intensity models where part of the computation is independent of time and duration (e.g. the covariate contribution exp(β·x) in a log-link GLM), a two-phase protocol will be supported:
+**Competing risks — neural network with multiple output heads**:
 
 ```python
-class MyIntensity:
-    def prepare(self, **kwargs):
-        """Called once before the solver runs."""
-        return jnp.exp(self.beta @ kwargs["covariates"].T)
-
-    def evaluate(self, t, grid, prepared):
-        """Called at each solver step."""
-        return prepared[:, None] * self.baseline(t, grid)
+def joint_hazard(t, d, baseline_age, bmi, smoking, **kwargs):
+    features = jnp.stack([baseline_age + t, bmi, smoking], axis=-1)  # (batch, p)
+    log_hazards = net(features)                                        # (batch, n_targets)
+    return jnp.exp(log_hazards).T[:, :, None] * baseline(d)          # (n_targets, batch, D)
 ```
-
-This avoids redundant covariate computation at every time step, which is significant for 100K+ individuals. This is reserved for a future version.
 
 ---
 
@@ -352,7 +354,7 @@ result["probability"]   # Only 2 states computed, not 3
 
 The solver implements a Heun scheme (second-order predictor-corrector) using `jax.lax.scan`. At each time step:
 
-1. Evaluate intensity functions at the current `(t, grid)`.
+1. Evaluate intensity functions at the current `(t, d)`.
 2. Compute outflows (probability leaving each state) and inflows (probability entering each state).
 3. Predict the next state using an Euler step.
 4. Evaluate intensities at the predicted state.
@@ -415,17 +417,17 @@ state_space = jact.StateSpace(
 )
 
 # 2. Define intensity models
-def onset_intensity(t, grid, age, **kwargs):
-    x = age[:, None] + grid
-    return jnp.exp(-5.0 + 0.04 * x)
+def onset_intensity(t, d, baseline_age, **kwargs):
+    attained_age = baseline_age + t   # (batch,)
+    return jnp.exp(-5.0 + 0.04 * attained_age)[:, None] * jnp.ones_like(d)
 
-def mortality_healthy(t, grid, age, **kwargs):
-    x = age[:, None] + grid
-    return jnp.exp(-10.0 + 0.08 * x)
+def mortality_healthy(t, d, baseline_age, **kwargs):
+    attained_age = baseline_age + t
+    return jnp.exp(-10.0 + 0.08 * attained_age)[:, None] * jnp.ones_like(d)
 
-def mortality_disabled(t, grid, age, **kwargs):
-    x = age[:, None] + grid
-    return jnp.exp(-8.0 + 0.08 * x)
+def mortality_disabled(t, d, baseline_age, **kwargs):
+    attained_age = baseline_age + t
+    return jnp.exp(-8.0 + 0.08 * attained_age)[:, None] * jnp.ones_like(d)
 
 # 3. Build the model
 model = state_space.build(
@@ -444,7 +446,7 @@ result_h = model.solve(
     initial="healthy",
     horizon=30,
     steps_per_unit=12,
-    age=ages,
+    baseline_age=ages,
 )
 result_h["states"]  # ("healthy", "disabled", "dead")
 
@@ -453,7 +455,7 @@ result_d = model.solve(
     initial="disabled",
     horizon=30,
     steps_per_unit=12,
-    age=ages,
+    baseline_age=ages,
 )
 result_d["states"]  # ("disabled", "dead")
 ```
@@ -470,7 +472,7 @@ model_nn = state_space.build(
 )
 
 result_nn = model_nn.solve(
-    initial="healthy", horizon=30, steps_per_unit=12, age=ages
+    initial="healthy", horizon=30, steps_per_unit=12, baseline_age=ages
 )
 
 diff = jax.tree.map(
@@ -524,7 +526,7 @@ result["states"]
 
 1. **Separation of structure and models.** The `StateSpace` is the stable backbone. Models are swappable experiments bound to the same structure.
 
-2. **Uniform callable interface.** The solver doesn't know or care whether an intensity comes from a Gompertz function, a GLM, or a neural network. All it sees is `(t, grid, **kwargs) → array`.
+2. **Uniform callable interface.** The solver doesn't know or care whether an intensity comes from a Gompertz function, a GLM, or a neural network. All it sees is `(t, d, **kwargs) → array`.
 
 3. **Compute only what's needed.** Given an initial state, the solver reduces to the reachable subgraph. Unreachable states are excluded entirely.
 
