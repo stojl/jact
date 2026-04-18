@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jact"
+version = "0.1.0"
+description = "JAX-based transition probability computation for multi-state models"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "jax>=0.4",
+    "jaxlib>=0.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["jact*"]
