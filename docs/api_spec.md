@@ -164,18 +164,39 @@ The callable must return an array whose first axis indexes over the listed trans
 
 #### Combining all three
 
-All three arguments can be used in a single `build()` call. The `StateSpace` validates that every declared transition is assigned exactly once — no gaps, no overlaps.
+All three arguments can be used in a single `build()` call. `build()` validates that every declared transition is assigned exactly once — no gaps, no overlaps.
+
+Consider a state space with a recovery transition:
 
 ```python
+state_space = jact.StateSpace(
+    states=["healthy", "disabled", "recovered", "dead"],
+    transitions=[
+        ("healthy", "disabled"),
+        ("healthy", "dead"),
+        ("disabled", "recovered"),
+        ("disabled", "dead"),
+        ("recovered", "dead"),
+    ],
+)
+
 model = state_space.build(
     exits={
-        "healthy": joint_onset_and_mortality_model,
+        "disabled": joint_recovery_and_mortality_model,
     },
     groups={
-        shared_model: [("disabled", "healthy"), ("disabled", "dead")],
+        shared_mortality_frailty: [
+            ("healthy", "dead"),
+            ("recovered", "dead"),
+        ],
+    },
+    transitions={
+        ("healthy", "disabled"): onset_fn,
     },
 )
 ```
+
+Here `exits` covers both transitions out of `disabled`, `groups` pairs two mortality transitions that don't share a source, and `transitions` handles the remaining single transition.
 
 ### Experimenting with models
 
