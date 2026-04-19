@@ -246,7 +246,7 @@ model.info("healthy", "disabled")
 
 ## Intensity protocol
 
-Intensity callables are **pure functions**. No class protocol or two-phase interface is supported — a callable is the only contract. Fitted model parameters are captured via closures.
+Intensity callables are **pure functions** bound to transitions at `Model.build()` time. The solver treats every cell of the (reduced) intensity matrix uniformly; fitted model parameters are captured via closures and become compile-time constants.
 
 ### Call signature
 
@@ -257,15 +257,19 @@ def intensity(t, d, **kwargs) -> jnp.ndarray:
 
 | Argument | Type | Description |
 |---|---|---|
-| `t` | `float` scalar | Current clock time. Ranges from `0` to `horizon` as the solver marches forward. |
-| `d` | `jnp.ndarray`, shape `(1, D)` | Duration grid points. Each entry is the time spent in the current state at that duration slot. The `1` axis broadcasts over the batch dimension. |
+| `t` | `float` scalar | Current clock time. Advances from `0` to `horizon` as the solver marches forward. |
+| `d` | `jnp.ndarray`, shape `(1, D)` | Duration grid for the source state. Entry `k` corresponds to a duration of `k / steps_per_unit`. The leading `1` axis broadcasts over the batch dimension. |
 | `**kwargs` | `jnp.ndarray`, shape `(batch, ...)` | Covariate arrays passed through from `solve()`. Each callable consumes the subset it needs; unused kwargs are ignored. |
 
 #### On `t` and `d`
 
-The solver maintains a probability density over duration `d` for each state and advances it in clock time `t`. At each solver step the callable receives the current `t` and the full duration array `d` simultaneously, and must return the intensity surface `μ(t, d)` over all `D` duration points in a single call.
+The solver maintains a probability density over duration `d` for each state and advances it in clock time `t`. Per solver step the callable receives the current `t` and the full duration array `d` simultaneously and must return the intensity surface `μ(t, d)` over all `D` duration points in a single call.
 
-`t` and `d` play distinct roles. For a population observed at `t=0` with known baseline ages, attained age at clock time `t` is `baseline_age + t` — age advances with clock time, not with duration in state. Duration `d` enters separately when the intensity depends on how long the individual has been in the current state, which is the semi-Markov component. A Markov intensity uses only `t`; a pure duration-dependent intensity uses only `d`; a semi-Markov intensity uses both.
+`t` and `d` play distinct roles. For a population observed at `t=0` with known baseline ages, attained age at clock time `t` is `baseline_age + t` — age advances with clock time, not with duration in state. Duration `d` enters separately when the intensity depends on how long the individual has been in the current state. A Markov intensity uses only `t`; a pure duration-dependent intensity uses only `d`; a semi-Markov intensity uses both.
+
+#### Càdlàg convention
+
+Intensities are assumed **càdlàg** (right-continuous with left limits). At a point of discontinuity, the default evaluation is the right limit. This is the mathematical convention the solver assumes throughout; everything in the discontinuity-handling discussion below inherits it.
 
 #### JAX requirements
 
@@ -282,6 +286,8 @@ The callable is traced by JAX and compiled into the solver's `lax.scan` body. It
 | `transitions` (single) | `(batch, D)` | One intensity surface |
 | `exits` (all exits) | `(n_targets, batch, D)` | One per target state, ordered by `state_space.targets(source)` |
 | `groups` (arbitrary) | `(n_transitions, batch, D)` | One per listed transition, in the order provided to `build()` |
+
+The solver itself only ever sees `(batch, D)`: `exits` and `groups` callables are pre-sliced by `Model._build_full_solver_matrix` at build time.
 
 ### Examples
 
@@ -315,9 +321,50 @@ def joint_hazard(t, d, baseline_age, bmi, smoking, **kwargs):
     return jnp.exp(log_hazards).T[:, :, None] * baseline(d)          # (n_targets, batch, D)
 ```
 
+### Discontinuity handling (open question, WIP)
+
+Discontinuities along `t` or `d` — benefit entitlement boundaries, policy changes, waiting periods, age cutoffs — are a first-class modelling concern. The current solver handles them by evaluating every intensity at `d ± perturbation` and nudging clock time by `t ± perturbation` on each step, where `perturbation` defaults to `1e-12`. This scheme has three known limitations:
+
+1. **Absolute `ε` does not scale with the argument.** In IEEE float64, the ulp at `|d| = 30` is ~`3.6e-15`; `1e-12` leaves very little margin once downstream arithmetic (`exp`, `log`, additions with `baseline_age`) erodes the last few bits. Float32 collapses this entirely.
+2. **The perturbation is invisible to the user.** Whether two evaluations at `tau ± 1e-12` straddle a user-placed jump at `tau` depends on how `tau` was computed inside the callable. There is no knob for the user to declare "my jump is at exactly `tau`".
+3. **Heun is 2nd-order only for smooth right-hand sides.** Through a finite jump, local error is `O(step_size)` regardless of the sampling scheme. Perturbation picks a consistent side to be wrong on; it does not restore the second order.
+
+Options under consideration for the long-term protocol (see `docs/design/solver.md` §1 for the full treatment):
+
+- **(a) Declared break points** — callables advertise a sorted array of jump times/durations; the solver aligns the grid or sub-steps around them.
+- **(b) Piecewise callables** — the intensity is a list of `(interval, fn)` pairs.
+- **(c) Relative perturbation** — replace `1e-12` with `rtol * (1 + |d|)`.
+- **(d) Left/right-evaluation protocol** — callables opt into `fn(t, d, side)` where `side ∈ {left, right}` is a compile-time constant; the solver requests the side it needs, no perturbation required.
+- **(e) Adaptive sub-stepping around declared break points** — composes with (a).
+
+Until this is resolved: treat intensities as smooth, or place jumps well inside `(perturbation, horizon − perturbation)` on cleanly representable values.
+
 ---
 
 ## Solver
+
+### What the solver computes
+
+For a reduced model rooted at an initial state, the solver advances a probability state over `[0, horizon]` using a **Heun (2nd-order predictor-corrector) scheme** inside a single `jax.lax.scan`, vectorised over a batch axis via `jax.vmap`. The full pipeline from covariates to transition probabilities compiles into one XLA program.
+
+### Solver state
+
+Per reachable state, the solver tracks two conceptually separate objects:
+
+- **`density`** — the absolutely continuous duration density for that state, shape `(batch, D)`. Entry `density[b, k]` is the density at batch element `b` at duration slot `k`. Slot 0 is "entered the current state just now"; slot `k` is "entered `k` solver steps ago".
+- **`point_mass`** — a point mass at duration zero, shape `(batch, D)` or `None`. `None` for states that never carry one. For states that do (today: the initial state only), the `(batch, D)` tensor tracks the shifted-along-duration Dirac that seeded at `t=0`.
+
+The full solver state is a pytree, one entry per reachable state in `reachable_states` order:
+
+```python
+state: tuple[StateCarry, ...]            # length = J = reduced.n_states
+
+class StateCarry(NamedTuple):
+    density: jnp.ndarray                 # (batch, D)
+    point_mass: jnp.ndarray | None       # (batch, D) or None
+```
+
+`density` evolves by advection-reaction with a rigid duration shift (mass at duration `k` becomes mass at duration `k+1` each step). `point_mass` evolves by a scalar exponential decay along the characteristic `(s, d_0 + s)` — a 1-D problem, not a 2-D one. They are co-evolved but mathematically distinct; keeping them separate avoids diffusing a Dirac through the finite-difference scheme and makes heterogeneous `d_0` and analytic point-mass integration available as future extensions.
 
 ### Calling the solver
 
@@ -326,7 +373,10 @@ result = model.solve(
     initial="healthy",
     horizon=10,
     steps_per_unit=12,
-    age=age_array,
+    callback="collapse_point_no_duration",
+    record_every=1,
+    perturbation=1e-12,
+    baseline_age=age_array,
     bmi=bmi_array,
 )
 ```
@@ -334,94 +384,160 @@ result = model.solve(
 Or equivalently via the functional interface:
 
 ```python
-result = jact.solve(
-    model,
-    initial="healthy",
-    horizon=10,
-    steps_per_unit=12,
-    age=age_array,
-    bmi=bmi_array,
-)
+result = jact.solve(model, initial=..., horizon=..., steps_per_unit=..., **covariates)
 ```
 
 ### Parameters
 
 | Parameter | Type | Description |
 |---|---|---|
-| `initial` | `str` | Starting state. Only reachable states are computed. |
+| `initial` | `str` | Starting state. The reachable subgraph from `initial` is computed; `initial` is always at reduced index 0. |
 | `horizon` | `int` | Number of time units to solve over. |
-| `steps_per_unit` | `int` | Discretization resolution per time unit. |
+| `steps_per_unit` | `int` | Discretisation resolution per time unit. `D = horizon * steps_per_unit`. |
 | `callback` | `str`, `callable`, or `None` | Probability callback (default: `"collapse_point_no_duration"`). |
-| `perturbation` | `float` | Grid perturbation for finite differences (default: `1e-12`). |
-| `transpose_result` | `bool` | Transpose time axis in result (default: `True`). |
+| `record_every` | `int` | Record the callback output every `record_every`-th step. Must divide `horizon * steps_per_unit` evenly; otherwise `ValueError`. Default: `1`. |
+| `perturbation` | `float` | Grid perturbation for the current discontinuity scheme (default: `1e-12`; see Intensity protocol §Discontinuity handling). |
 | `**kwargs` | `jnp.ndarray` | Covariate arrays, each of shape `(batch, ...)`. |
+
+The name `initial_duration` is **reserved** for a future heterogeneous-`d_0` kwarg; don't use it as a covariate name.
 
 ### Result
 
 ```python
-result["probability"]   # Transition probabilities (shape depends on callback)
-result["states"]        # Tuple of state names in result ordering
+result["probability"]   # callback output, time as the leading axis of every leaf
+result["states"]        # tuple of state names in reachable order, initial first
 ```
 
-The `"states"` key tells you which state corresponds to which index in the probability array. The initial state is always first.
+The recorded time axis has length `T_out = (horizon * steps_per_unit) // record_every + 1`, covering `t = 0, record_every * step_size, 2 * record_every * step_size, ..., horizon`.
 
 ```python
-result = model.solve(initial="disabled", horizon=30, steps_per_unit=12, age=ages)
+result = model.solve(initial="disabled", horizon=30, steps_per_unit=12, baseline_age=ages)
 result["states"]        # ("disabled", "dead")
-result["probability"]   # Only 2 states computed, not 3
+result["probability"]   # only 2 states computed, not 3 — per callback shape
 ```
 
-### Solver internals
+### Reduction to reachable subgraph
 
-The solver implements a Heun scheme (second-order predictor-corrector) using `jax.lax.scan`. At each time step:
+Solving from `initial` automatically reduces the model to the reachable subgraph via `Model.reduce(initial)`. Unreachable states are excluded entirely.
 
-1. Evaluate intensity functions at the current `(t, d)`.
-2. Compute outflows (probability leaving each state) and inflows (probability entering each state).
-3. Predict the next state using an Euler step.
-4. Evaluate intensities at the predicted state.
-5. Correct using the average of the two derivatives.
-6. Shift the duration axis (probability at duration d moves to d+1).
+**Load-bearing invariant.** The initial state is **always** at reduced index 0. Several solver internals depend on this — the point-mass initial condition, the heterogeneous-`d_0` hook, future per-state point masses. `result["states"]` records the mapping from reduced index back to state name.
 
-The point mass at duration zero (initial state probability) is tracked separately for numerical accuracy and handled internally by the solver. Users do not interact with it directly; the callback system abstracts over it.
+### Initial conditions
+
+At `t = 0`, all probability mass lives on the initial state's `point_mass` at duration zero:
+
+- `state[0].density = 0`
+- `state[0].point_mass[..., 0] = 1`, zero elsewhere
+- for all `j > 0`: `state[j].density = 0`, `state[j].point_mass = None`
+
+The point-mass formulation makes per-individual `d_0` a drop-in extension: instead of initialising at slot 0 for everyone, individual `b` initialises at their own duration slot (or, equivalently, phase 1 of a split solve treats `point_mass` as a per-individual scalar ODE along its characteristic). Not yet exposed.
+
+### Heun scheme
+
+Each scan step advances the state by `step_size = 1 / steps_per_unit`:
+
+1. **Predictor** — evaluate intensities at clock time `t` (nudged by `±perturbation`; see Intensity protocol §Discontinuity handling), compute per-state derivatives (outflows from `density` and `point_mass`, inflows to `density`), take an Euler step.
+2. **Corrector** — evaluate intensities at `t + step_size`, recompute derivatives, average with the predictor's derivatives.
+3. **Duration shift** — mass at duration `k` becomes mass at duration `k+1`; slot 0 of `density` receives fresh inflow from other states; slot 0 of `point_mass` is zeroed. Mass reaching the final slot is truncated (the grid is sized so this corresponds to "in-state since `t=0`").
+
+### Numerical order
+
+**Second-order on smooth intensities**; **first-order across finite jumps** regardless of `perturbation`. Resolving the discontinuity protocol to sub-step around declared break points would restore second order everywhere (see Intensity protocol §Discontinuity handling).
+
+### JIT boundary
+
+| Static (trace-time constants) | Traced (runtime values) |
+|---|---|
+| Matrix sparsity pattern (positions of `None` cells) | Covariate arrays (`**kwargs`) |
+| Callback function | Fitted parameters captured in closures |
+| Presence/absence of `point_mass` per state | |
+| `step_size`, `record_every`, `perturbation` | |
+
+Changing any static field triggers a re-trace. Rebuilding a `Model` with a different sparsity pattern re-traces; changing only parameter values inside existing callables does not.
+
+### Memory budget
+
+Peak output memory in bytes, at float32:
+
+```
+bytes ≈ 4 * T_out * product(callback_output_non_time_dims)
+```
+
+where `T_out = (horizon * steps_per_unit) // record_every + 1`. Worked examples at `batch = 100_000`, `J = 10`, `D = 360`, `T_out = 361`:
+
+- `default` (leaves `(time, batch, D)` per state's density + point mass): dominated by `4 * T_out * batch * J * D` ≈ **520 GB**. Infeasible at this resolution.
+- Same, but `record_every = 12` (`T_out = 31`): ≈ **44 GB**. Still large; tractable on a big GPU.
+- `collapse_point_no_duration` (`(T_out, batch, J)`): ≈ **1.4 GB**. Comfortable.
+
+Pick `callback` and `record_every` before scaling `batch`.
+
+### Open design questions
+
+The following items are intentionally left open by this spec and tracked in `docs/design/solver.md`:
+
+1. **Discontinuity handling protocol** — see Intensity protocol §Discontinuity handling.
+2. **Per-state duration depth `D_j`** — currently uniform `D = horizon * steps_per_unit`. The pytree state structure allows per-state `D_j` as a future optimisation; Markov states would collapse to `D_j = 1`.
+3. **Heterogeneous `d_0` and `initial_distribution`** — `initial_duration` is a reserved kwarg; a richer `initial_distribution` object encoding state + duration + mass per individual is forward-looking.
+4. **Per-state point mass for non-initial states** — the pytree allows `point_mass` on any state, but initial-condition construction currently seeds only state 0.
 
 ---
 
 ## Callbacks
 
-Callbacks control what is extracted from the solver's internal state at each time step. They determine the shape and content of `result["probability"]`.
+Callbacks control what is extracted from the solver state at each recorded step. They determine the shape and content of `result["probability"]`.
+
+### Signature
+
+```python
+def callback(state: tuple[StateCarry, ...]) -> PyTree:
+    ...
+```
+
+A callback receives the full pytree solver state (one `StateCarry` per reachable state, in `reachable_states` order) and returns an arbitrary PyTree. `lax.scan` stacks the returned PyTree along a new leading axis across time, and **time is always the leading axis of every output leaf**. No rank-dependent transpose is applied; downstream axis moves are the user's responsibility.
 
 ### Built-in callbacks
 
-| Name | Description | Output shape |
+Under uniform `D`, the built-in callbacks produce the following per-step output shapes (the recorded result prepends a time axis of length `T_out` to each leaf):
+
+| Name | Description | Per-step output |
 |---|---|---|
-| `"default"` | Full density and point mass, no reduction | `(p, p_point)` |
-| `"no_duration"` | Marginalize over duration | `(batch, J)`, `(batch,)` |
-| `"collapse_point"` | Collapse point mass into first state's density | `(batch, J, D)` |
-| `"collapse_point_no_duration"` | Collapse + marginalize (most common) | `(batch, J)` |
-| `"point_only"` | Point mass only | `(batch, D)` |
-| `"point_only_no_duration"` | Point mass, marginalized | `(batch,)` |
-| `"no_point"` | Density only | `(batch, J, D)` |
-| `"no_point_no_duration"` | Density, marginalized | `(batch, J)` |
+| `"default"` | Full pytree state, no reduction | `tuple[StateCarry, ...]` — each leaf `(batch, D)` (or `None` for absent point masses) |
+| `"no_duration"` | Marginalise over duration, preserve pytree | Per state: `(density[..., -1], point_mass[..., -1] or None)` — each leaf `(batch,)` |
+| `"collapse_point"` | Fold `point_mass` into `density[..., 0]` per state; drop `point_mass` | Tuple of per-state `density` — each leaf `(batch, D)` |
+| `"collapse_point_no_duration"` | Collapse then marginalise; re-stack across states | Single array `(batch, J)` |
+| `"point_only"` | Per-state `point_mass` (or `None`) | Tuple per state — each leaf `(batch, D)` or `None` |
+| `"point_only_no_duration"` | Per-state `point_mass[..., -1]` (or `None`) | Tuple per state — each leaf `(batch,)` or `None` |
+| `"no_point"` | Per-state `density` | Tuple per state — each leaf `(batch, D)` |
+| `"no_point_no_duration"` | Marginalise density, re-stack across states | Single array `(batch, J)` |
 | `"none"` | Record nothing | `None` |
+
+Convention: callbacks whose names end in `_no_duration` and whose semantics imply a state-indexed vector re-stack into a single `(batch, J)` array for convenience; callbacks that preserve the duration axis keep the per-state pytree structure. `collapse_point_no_duration` is the canonical callback for actuarial transition-probability output; its recorded shape is `(T_out, batch, J)`.
 
 ### Custom callbacks
 
-A callback receives the raw solver state and returns an arbitrary PyTree:
+A callback can return any PyTree; the solver stacks each leaf along a new leading time axis:
 
 ```python
-def my_callback(p, p_point):
-    """
-    p:       shape (batch, n_states, D)  — duration density per state
-    p_point: shape (batch, D)            — point mass for initial state
-    """
-    return jnp.sum(p[:, 0, :], axis=-1) + jnp.sum(p_point, axis=-1)
+def total_mass_per_state(state):
+    """Sum of density + point mass per reachable state, per individual."""
+    totals = []
+    for carry in state:
+        total = jnp.sum(carry.density, axis=-1)                   # (batch,)
+        if carry.point_mass is not None:
+            total = total + jnp.sum(carry.point_mass, axis=-1)
+        totals.append(total)
+    return jnp.stack(totals, axis=-1)                              # (batch, J)
+
+# recorded shape: (T_out, batch, J)
 ```
 
-The callback system is also the extension point for future features like cashflow computation, which involves integral transforms over the duration density.
+The callback system is also the extension point for future features like **cashflow computation** — integral transforms over the duration density for actuarial present values.
 
 ---
 
 ## Full example
+
+> **Note on output layout.** The `StateSpace`, `Model.build()`, and `solve()` call surfaces below are stable. The shape of `result["probability"]` reflects the target layout described in the Solver and Callbacks sections: **time is the leading axis of every leaf**. The current `solver.py` still emits `(batch, J, T_out, ...)` under a rank-dependent transpose; that implementation detail is scheduled to be removed along with the `transpose_result` kwarg.
 
 ```python
 import jax.numpy as jnp
@@ -557,10 +673,16 @@ result["states"]
 
 6. **Batch-first.** The framework is designed for 100K+ individuals in a single pass. Covariates are arrays, not scalars. The solver vectorizes over the batch dimension.
 
+7. **Point mass and continuous density are separate objects.** Per state, the absolutely continuous duration density and the point mass at duration zero are tracked independently. They have different physics (advection-reaction with duration shift vs. scalar exponential decay along a characteristic); co-evolving them cleanly keeps the door open for heterogeneous initial durations, per-state point masses, and analytic or high-order integration for the point mass.
+
 ---
 
 ## Future work
 
+- **Discontinuity handling protocol**: declared break points, piecewise callables, or a left/right-evaluation protocol, resolving the open question in the Intensity protocol section and restoring 2nd-order convergence across jumps.
+- **Per-state duration depth `D_j`**: let each reachable state pick its own duration depth, collapsing Markov states to `D_j = 1`. Enabled by the pytree solver state.
+- **Heterogeneous initial duration `d_0`**: per-individual starting durations via an `initial_duration` kwarg on `solve()`; later, a richer `initial_distribution` object encoding state + duration + mass per individual.
+- **Per-state point masses**: generalise the initial-condition construction so states other than the initial one can carry their own point mass (already supported in the solver state shape, just not in the initialiser).
 - **Pre-computation protocol**: two-phase `prepare`/`evaluate` for intensity models with static covariate contributions.
 - **Built-in parametric hazards**: Gompertz, Weibull, piecewise constant, and other standard forms in `jact.intensity`.
 - **Cashflow computation**: integral transforms over the duration density for actuarial present values, extending the callback system.
