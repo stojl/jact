@@ -18,9 +18,10 @@ All intensity models must be JIT-compatible. The entire pipeline from covariates
 
 ```
 jact/
-├── __init__.py              # Public API: StateSpace, Model, solve, callbacks
+├── __init__.py              # Public API: StateSpace, Model, InitialDistribution, solve, callbacks
 ├── state_space.py           # StateSpace class
 ├── model.py                 # Model, ReducedModel, TransitionInfo
+├── initial_distribution.py  # InitialDistribution class
 ├── solver.py                # Semi-Markov solver (Heun scheme)
 ├── intensity/
 │   ├── __init__.py
@@ -222,17 +223,21 @@ model_nn = state_space.build(
 
 ### Model reduction
 
-When solving from a specific initial state, the `Model` reduces itself to the reachable subgraph. This is handled automatically by `solve()`, but can also be called directly:
+When solving from a given `InitialDistribution` (or the equivalent shortcuts), the `Model` reduces itself to the reachable subgraph. This is handled automatically by `solve()`, but can also be called directly:
 
 ```python
-reduced = model.reduce("disabled")
-reduced.initial            # "disabled"
+reduced = model.reduce("disabled")                       # single initial state
+reduced.initial_states     # ("disabled",)
 reduced.reachable_states   # ("disabled", "dead")
 reduced.n_states           # 2
 reduced.solver_matrix      # 2×2 matrix of callables
+
+reduced = model.reduce({"healthy", "disabled"})           # mixture of initial states
+reduced.initial_states     # ("healthy", "disabled")     — state-space ordering
+reduced.reachable_states   # ("healthy", "disabled", "dead")
 ```
 
-The initial state is always at index 0 in the reduced system. States not reachable from the initial state are excluded entirely, saving computation.
+`Model.reduce` accepts a single state name or an iterable of state names (the initial-state set). Initial states occupy the first `K` reduced indices in state-space ordering; non-initial reachable states follow. States not reachable from any initial state are excluded entirely, saving computation.
 
 ### Inspecting a model
 
@@ -241,6 +246,143 @@ model.info("healthy", "disabled")
 # → TransitionInfo(source="healthy", target="disabled",
 #                   assignment="exits", callable=joint_cause_model, index=0)
 ```
+
+---
+
+## InitialDistribution
+
+The `InitialDistribution` encodes the joint distribution over `(state, duration)` at `t = 0`, per individual. It is the input that tells `solve()` where probability mass starts.
+
+### What it covers
+
+Three usage patterns, increasing in generality:
+
+1. **All individuals start in the same state at duration 0** — the original default.
+2. **All individuals start in the same state, with per-individual duration `d_0`** — common when joining longitudinal data where each individual's time-in-state at observation start is known.
+3. **Mass spread across multiple initial states, with per-individual mass and duration per state** — for heterogeneous populations or epistemic uncertainty about the starting state.
+
+An absolutely continuous starting *density* — a distribution over duration rather than a Dirac at a single point — is forward-looking; the object is designed to grow into it without breaking the v1 API. See **Future work**.
+
+### Construction
+
+Primary constructor:
+
+```python
+dist = jact.InitialDistribution(
+    components={
+        "healthy":  {"mass": mass_h,  "duration": d_h},
+        "disabled": {"mass": mass_d,  "duration": d_d},
+    },
+    normalise=True,   # default
+)
+```
+
+`components` is a mapping from state name to a `(mass, duration)` pair. Each entry contributes a per-individual point mass concentrated at `duration` with weight `mass`. `mass` and `duration` are scalars or `(batch,)` arrays; scalars broadcast over the batch.
+
+### Convenience constructors
+
+```python
+# All individuals: state "healthy", d_0 = 0
+dist = jact.InitialDistribution.at("healthy", duration=0.0)
+
+# Per-individual initial state (and optionally per-individual d_0)
+dist = jact.InitialDistribution.per_individual(
+    states=state_array,         # (batch,) of state names or integer indices
+    duration=d_0_array,         # scalar or (batch,), optional
+)
+```
+
+`per_individual` requires `state_array` to be a **concrete (host-side) array at construction time**, not a traced JAX value. The constructor inspects the array in pure Python to extract the unique state set (which becomes part of the static trace shape — see **Static-topology invariant** below) and re-encodes the per-individual selection as one-hot weights inside the trace. Calling `per_individual` from inside the user's own `jax.jit` / `vmap` is therefore unsupported.
+
+### Shortcuts on `solve()`
+
+The `solve()` `initial` parameter accepts any of three forms; the first two are constructed into an `InitialDistribution` internally:
+
+```python
+model.solve(initial="healthy", ...)                            # str shorthand
+model.solve(initial="healthy", initial_duration=d_0, ...)      # str + scalar or (batch,) d_0
+model.solve(initial=state_array, ...)                          # (batch,) of names/indices
+model.solve(initial=state_array, initial_duration=d_0, ...)    # same + per-individual d_0
+model.solve(initial=jact.InitialDistribution(...), ...)        # full control
+```
+
+`initial_duration` is valid only on the `str` and `(batch,)` paths. Passing it together with an `InitialDistribution` raises `ValueError` — duration is encoded in the object.
+
+### Validation
+
+At `InitialDistribution` construction:
+
+- `mass` and `duration` arrays per component are mutually shape-consistent (all scalar, or all `(batch,)` with matching batch dimension across components).
+- `mass >= 0` pointwise.
+- `duration >= 0` pointwise.
+- If `normalise=True` (default), per-individual `sum(mass)` across components equals 1 within tolerance (`1e-6`). Raises `ValueError` otherwise.
+- If `normalise=False`, the sum-to-1 check is skipped. Output is then linear in the input mass — the user is responsible for downstream interpretation.
+
+At `solve()`:
+
+- Every state name appearing in `components` exists in the model's state space.
+- The batch dimension of the distribution matches the batch dimension of the covariates.
+
+### Interaction with the solver state
+
+Each state declared in the `InitialDistribution` (i.e. present as a key in `components` — *not* conditional on its mass values being non-zero) is seeded with a `StateCarry.point_mass` at `t = 0` representing its per-individual mass concentrated at its per-individual duration. Reachable states *not* declared in the distribution keep `point_mass = None`.
+
+The point mass evolves along its characteristic `(s, d_0 + s)` as a per-individual scalar problem (see **Solver → Solver state** and **Design principles** §7), so per-individual `d_0` need **not** land on the duration grid.
+
+### Static-topology invariant
+
+The set of initial states is a **structural** property of the `InitialDistribution`, fixed at object-construction (or `solve()`-entry, for the convenience shortcuts) and *not* inferred at solver-runtime from mass values. This matters for two reasons:
+
+1. `Model.reduce` runs in pure Python and must know the initial-state set before tracing begins.
+2. The presence/absence of `point_mass` per state is already a static field on the JIT boundary; making "is-initial" data-dependent would be incompatible with the existing trace contract.
+
+A user who declares `{"healthy": ..., "disabled": ...}` and passes all-zero mass for `disabled` still pays the cost of allocating and tracing through a point-mass slot for `disabled`. This is deliberate, and the reason `components` is a structural mapping rather than something inferred from non-zero mass entries.
+
+### Examples
+
+All individuals start healthy at `d_0 = 0` (equivalent to `initial="healthy"`):
+
+```python
+dist = jact.InitialDistribution.at("healthy")
+result = model.solve(initial=dist, horizon=30, steps_per_unit=12, baseline_age=ages)
+```
+
+All individuals start healthy, but with a per-individual duration:
+
+```python
+result = model.solve(
+    initial="healthy",
+    initial_duration=time_in_state_at_observation,   # (batch,)
+    horizon=30, steps_per_unit=12, baseline_age=ages,
+)
+```
+
+Per-individual initial state, derived from data:
+
+```python
+states_at_observation = ...  # (batch,) numpy array of state names
+result = model.solve(
+    initial=states_at_observation,
+    initial_duration=time_in_state_at_observation,
+    horizon=30, steps_per_unit=12, baseline_age=ages,
+)
+```
+
+Mixture across states with per-individual mass and duration:
+
+```python
+dist = jact.InitialDistribution(
+    components={
+        "healthy":  {"mass": p_h,     "duration": jnp.zeros_like(p_h)},
+        "disabled": {"mass": 1 - p_h, "duration": d_disabled},
+    },
+)
+result = model.solve(initial=dist, horizon=30, steps_per_unit=12, baseline_age=ages)
+```
+
+### Open design note
+
+Whether `InitialDistribution` should be constructed *bound to* a `StateSpace` (so state-name validation happens eagerly) or be state-space-agnostic (validated lazily at `solve()`) is an open API choice. This spec assumes **state-space-agnostic construction**: one `InitialDistribution` can be reused across models that share state names, and construction stays free of model dependencies. A binding constructor (`state_space.initial_distribution(...)`) can be added later as sugar without breaking the primary entry point.
 
 ---
 
@@ -352,7 +494,7 @@ For a reduced model rooted at an initial state, the solver advances a probabilit
 Per reachable state, the solver tracks two conceptually separate objects:
 
 - **`density`** — the absolutely continuous duration density for that state, shape `(batch, D)`. Entry `density[b, k]` is the density at batch element `b` at duration slot `k`. Slot 0 is "entered the current state just now"; slot `k` is "entered `k` solver steps ago".
-- **`point_mass`** — a point mass at duration zero, shape `(batch, D)` or `None`. `None` for states that never carry one. For states that do (today: the initial state only), the `(batch, D)` tensor tracks the shifted-along-duration Dirac that seeded at `t=0`.
+- **`point_mass`** — a per-individual point mass at the state's `d_0`, shape `(batch, D)` or `None`. `None` for states that never carry one. For states that do — every state declared in the active `InitialDistribution` — the `(batch, D)` tensor tracks the shifted-along-duration Dirac seeded at `t=0` from that state's `(mass, duration)` component.
 
 The full solver state is a pytree, one entry per reachable state in `reachable_states` order:
 
@@ -364,7 +506,7 @@ class StateCarry(NamedTuple):
     point_mass: jnp.ndarray | None       # (batch, D) or None
 ```
 
-`density` evolves by advection-reaction with a rigid duration shift (mass at duration `k` becomes mass at duration `k+1` each step). `point_mass` evolves by a scalar exponential decay along the characteristic `(s, d_0 + s)` — a 1-D problem, not a 2-D one. They are co-evolved but mathematically distinct; keeping them separate avoids diffusing a Dirac through the finite-difference scheme and makes heterogeneous `d_0` and analytic point-mass integration available as future extensions.
+`density` evolves by advection-reaction with a rigid duration shift (mass at duration `k` becomes mass at duration `k+1` each step). `point_mass` evolves by a scalar exponential decay along the characteristic `(s, d_0 + s)` — a 1-D problem per individual, not a 2-D one. They are co-evolved but mathematically distinct; keeping them separate avoids diffusing a Dirac through the finite-difference scheme. This factorisation is what makes per-individual `d_0` (off-grid) and per-state initial point masses first-class via the `InitialDistribution`; analytic or high-order point-mass integration remains a future extension.
 
 ### Calling the solver
 
@@ -391,21 +533,20 @@ result = jact.solve(model, initial=..., horizon=..., steps_per_unit=..., **covar
 
 | Parameter | Type | Description |
 |---|---|---|
-| `initial` | `str` | Starting state. The reachable subgraph from `initial` is computed; `initial` is always at reduced index 0. |
+| `initial` | `str`, `(batch,)` array, or `InitialDistribution` | Initial condition. `str` = all individuals start in this state at `d_0 = 0`. `(batch,)` array of state names or integer indices = per-individual initial state. `InitialDistribution` = full control (mixtures, per-individual mass and duration). See the **InitialDistribution** section. |
+| `initial_duration` | `float` or `(batch,)` array | Per-individual `d_0` for the `str` and `(batch,)` array forms of `initial`. Default: `0`. Passing this together with an `InitialDistribution` raises `ValueError` — duration is encoded in the object. |
 | `horizon` | `int` | Number of time units to solve over. |
 | `steps_per_unit` | `int` | Discretisation resolution per time unit. `D = horizon * steps_per_unit`. |
 | `callback` | `str`, `callable`, or `None` | Probability callback (default: `"collapse_point_no_duration"`). |
 | `record_every` | `int` | Record the callback output every `record_every`-th step. Must divide `horizon * steps_per_unit` evenly; otherwise `ValueError`. Default: `1`. |
 | `perturbation` | `float` | Grid perturbation for the current discontinuity scheme (default: `1e-12`; see Intensity protocol §Discontinuity handling). |
-| `**kwargs` | `jnp.ndarray` | Covariate arrays, each of shape `(batch, ...)`. |
-
-The name `initial_duration` is **reserved** for a future heterogeneous-`d_0` kwarg; don't use it as a covariate name.
+| `**kwargs` | `jnp.ndarray` | Covariate arrays, each of shape `(batch, ...)`. The names `initial` and `initial_duration` are reserved — don't use them as covariate names. |
 
 ### Result
 
 ```python
 result["probability"]   # callback output, time as the leading axis of every leaf
-result["states"]        # tuple of state names in reachable order, initial first
+result["states"]        # tuple of state names in reachable order, initial states first
 ```
 
 The recorded time axis has length `T_out = (horizon * steps_per_unit) // record_every + 1`, covering `t = 0, record_every * step_size, 2 * record_every * step_size, ..., horizon`.
@@ -418,19 +559,24 @@ result["probability"]   # only 2 states computed, not 3 — per callback shape
 
 ### Reduction to reachable subgraph
 
-Solving from `initial` automatically reduces the model to the reachable subgraph via `Model.reduce(initial)`. Unreachable states are excluded entirely.
+Solving with a given `InitialDistribution` automatically reduces the model to the reachable subgraph via `Model.reduce(initial_states)`, where `initial_states` is the set of state names declared in the distribution. Unreachable states are excluded entirely.
 
-**Load-bearing invariant.** The initial state is **always** at reduced index 0. Several solver internals depend on this — the point-mass initial condition, the heterogeneous-`d_0` hook, future per-state point masses. `result["states"]` records the mapping from reduced index back to state name.
+**Initial-state set is structural.** The set of initial states is determined by the *keys* of `InitialDistribution.components` (or, for the shortcuts, by the unique state names extracted host-side from the inputs). It is part of the static trace shape — not inferred from runtime mass values. Declaring a state with all-zero mass still allocates and traces through that state's point-mass slot (see the **Static-topology invariant** subsection of `InitialDistribution`).
+
+**Reduced-index ordering.** Initial states occupy the first `K` reduced indices in state-space ordering, where `K` is the number of distinct states in the initial-state set; non-initial reachable states follow in their original ordering. For the common case `K = 1` (e.g. `initial="healthy"`), the initial state is at reduced index 0, matching the previous spec exactly. `result["states"]` records the mapping from reduced index back to state name.
+
+Solver internals that were previously keyed on "state 0 is the initial state" — the point-mass initial condition, per-individual `d_0`, future absolutely continuous initial densities — instead iterate over the initial-state set recorded by the `InitialDistribution`.
 
 ### Initial conditions
 
-At `t = 0`, all probability mass lives on the initial state's `point_mass` at duration zero:
+Initial conditions are given by an `InitialDistribution` (see the dedicated section), passed via `solve(initial=...)`. The shorthand `initial="healthy"` is defined as `InitialDistribution.at("healthy", duration=0.0)`; the `(batch,)` array shorthand is defined as `InitialDistribution.per_individual(states=..., duration=...)`.
 
-- `state[0].density = 0`
-- `state[0].point_mass[..., 0] = 1`, zero elsewhere
-- for all `j > 0`: `state[j].density = 0`, `state[j].point_mass = None`
+At `t = 0`:
 
-The point-mass formulation makes per-individual `d_0` a drop-in extension: instead of initialising at slot 0 for everyone, individual `b` initialises at their own duration slot (or, equivalently, phase 1 of a split solve treats `point_mass` as a per-individual scalar ODE along its characteristic). Not yet exposed.
+- For every reachable state `j` declared in the `InitialDistribution`: `state[j].point_mass` is seeded to encode that state's per-individual mass at its per-individual duration. `state[j].density = 0`.
+- For every reachable state `j` *not* declared in the `InitialDistribution`: `state[j].density = 0`, `state[j].point_mass = None`.
+
+Because `point_mass` evolves along its characteristic `(s, d_0 + s)` as a scalar problem per individual, per-individual `d_0` does **not** need to land on the duration grid. v1 seeds only the point-mass component of each declared state; seeding a non-zero `density` at `t = 0` (an absolutely continuous starting distribution over duration) is forward-looking — see **Future work**.
 
 ### Heun scheme
 
@@ -450,10 +596,11 @@ Each scan step advances the state by `step_size = 1 / steps_per_unit`:
 |---|---|
 | Matrix sparsity pattern (positions of `None` cells) | Covariate arrays (`**kwargs`) |
 | Callback function | Fitted parameters captured in closures |
-| Presence/absence of `point_mass` per state | |
+| Presence/absence of `point_mass` per state | `InitialDistribution` mass and duration arrays |
+| Set of initial states (= keys of `InitialDistribution.components`) | |
 | `step_size`, `record_every`, `perturbation` | |
 
-Changing any static field triggers a re-trace. Rebuilding a `Model` with a different sparsity pattern re-traces; changing only parameter values inside existing callables does not.
+Changing any static field triggers a re-trace. Rebuilding a `Model` with a different sparsity pattern re-traces; changing only parameter values inside existing callables does not. Changing the *set* of initial states (e.g. adding `"disabled"` as a possible initial state) re-traces; changing only the per-individual `mass` / `duration` values inside an existing initial-state set does not. This is the reason the spec decides initial-state membership structurally rather than by inspecting mass values at runtime — the latter would be a data-dependent topology change, incompatible with the trace contract.
 
 ### Memory budget
 
@@ -477,8 +624,7 @@ The following items are intentionally left open by this spec and tracked in `doc
 
 1. **Discontinuity handling protocol** — see Intensity protocol §Discontinuity handling.
 2. **Per-state duration depth `D_j`** — currently uniform `D = horizon * steps_per_unit`. The pytree state structure allows per-state `D_j` as a future optimisation; Markov states would collapse to `D_j = 1`.
-3. **Heterogeneous `d_0` and `initial_distribution`** — `initial_duration` is a reserved kwarg; a richer `initial_distribution` object encoding state + duration + mass per individual is forward-looking.
-4. **Per-state point mass for non-initial states** — the pytree allows `point_mass` on any state, but initial-condition construction currently seeds only state 0.
+3. **Absolutely continuous initial component** — `InitialDistribution` v1 carries per-state point masses only. Extending each component with an optional `density: (batch, D)` field (an absolutely continuous starting distribution over duration) is forward-looking; the object is shaped so this can be added without breaking existing constructions.
 
 ---
 
@@ -665,7 +811,7 @@ result["states"]
 
 2. **Uniform callable interface.** The solver doesn't know or care whether an intensity comes from a Gompertz function, a GLM, or a neural network. All it sees is `(t, d, **kwargs) → array`.
 
-3. **Compute only what's needed.** Given an initial state, the solver reduces to the reachable subgraph. Unreachable states are excluded entirely.
+3. **Compute only what's needed.** Given an initial-state set (one or many states declared via the `InitialDistribution`), the solver reduces to the reachable subgraph — the union of reachability from each initial state. Unreachable states are excluded entirely.
 
 4. **Fail early, fail clearly.** Validation happens at `StateSpace` construction and `Model.build()` time, not deep inside the solver. Error messages reference state names and transitions, not matrix indices.
 
@@ -673,7 +819,7 @@ result["states"]
 
 6. **Batch-first.** The framework is designed for 100K+ individuals in a single pass. Covariates are arrays, not scalars. The solver vectorizes over the batch dimension.
 
-7. **Point mass and continuous density are separate objects.** Per state, the absolutely continuous duration density and the point mass at duration zero are tracked independently. They have different physics (advection-reaction with duration shift vs. scalar exponential decay along a characteristic); co-evolving them cleanly keeps the door open for heterogeneous initial durations, per-state point masses, and analytic or high-order integration for the point mass.
+7. **Point mass and continuous density are separate objects.** Per state, the absolutely continuous duration density and the point mass at duration zero are tracked independently. They have different physics (advection-reaction with duration shift vs. scalar exponential decay along a characteristic); co-evolving them cleanly is what makes the `InitialDistribution` first-class — point masses can be carried by any state declared in the distribution, with per-individual mass and per-individual `d_0` (which need not land on the duration grid). The same factorisation keeps the door open for analytic or high-order integration of the point mass and for an absolutely continuous initial-density extension.
 
 ---
 
@@ -681,8 +827,7 @@ result["states"]
 
 - **Discontinuity handling protocol**: declared break points, piecewise callables, or a left/right-evaluation protocol, resolving the open question in the Intensity protocol section and restoring 2nd-order convergence across jumps.
 - **Per-state duration depth `D_j`**: let each reachable state pick its own duration depth, collapsing Markov states to `D_j = 1`. Enabled by the pytree solver state.
-- **Heterogeneous initial duration `d_0`**: per-individual starting durations via an `initial_duration` kwarg on `solve()`; later, a richer `initial_distribution` object encoding state + duration + mass per individual.
-- **Per-state point masses**: generalise the initial-condition construction so states other than the initial one can carry their own point mass (already supported in the solver state shape, just not in the initialiser).
+- **Absolutely continuous initial distribution**: extend `InitialDistribution` so each per-state component can carry an optional `density: (batch, D)` field alongside the point-mass `(mass, duration)` pair. Lets the solver be seeded with a starting distribution over duration, not just a Dirac per individual. Designed so v1 constructions keep working.
 - **Pre-computation protocol**: two-phase `prepare`/`evaluate` for intensity models with static covariate contributions.
 - **Built-in parametric hazards**: Gompertz, Weibull, piecewise constant, and other standard forms in `jact.intensity`.
 - **Cashflow computation**: integral transforms over the duration density for actuarial present values, extending the callback system.
