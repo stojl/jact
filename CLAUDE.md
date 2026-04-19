@@ -5,14 +5,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-pip install -e ".[dev]"           # install with dev deps (pytest)
+pip install -e ".[dev]"           # install with dev deps (pyright, ruff, pytest)
+pyright jact                      # type check public API
+ruff check jact                   # lint (imports, style, unused code)
 pytest                            # run all tests
 pytest tests/test_state_space.py  # run one file
 pytest -k test_reachable_from     # run tests matching a name
 pytest -x                         # stop on first failure
 ```
 
-There is no lint/type-check/build tooling configured beyond `setuptools` + `pytest`.
+**Quality checks:**
+- **pyright** (basic mode) catches type mismatches and undefined names
+- **ruff** enforces import order, detects unused code, and flags common errors
+- Run both before committing: `pyright jact && ruff check jact`
 
 ## Architecture
 

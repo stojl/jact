@@ -19,7 +19,6 @@ import jax.numpy as jnp
 
 from .callbacks import resolve_callback
 
-
 # -------------------------------------------------------------------- #
 # Low-level array operations                                            #
 # -------------------------------------------------------------------- #
@@ -116,14 +115,14 @@ def _compute_core(p_single, p_point_single, mu_plus_matrix, mu_minus_matrix):
 
     final_outflow_plus = jnp.stack(
         [
-            reduce(jax.lax.add, l) if l else jnp.zeros(D_minus_1)
-            for l in outflow_plus_list
+            reduce(jax.lax.add, lst) if lst else jnp.zeros(D_minus_1)
+            for lst in outflow_plus_list
         ]
     )
     final_outflow_avg = jnp.stack(
         [
-            reduce(jax.lax.add, l) if l else jnp.zeros(D_minus_1)
-            for l in outflow_avg_list
+            reduce(jax.lax.add, lst) if lst else jnp.zeros(D_minus_1)
+            for lst in outflow_avg_list
         ]
     )
 
@@ -328,15 +327,15 @@ def _get_reference_function(intensity_matrix):
 
 
 def solve(
-    model,
+    model: Any,
     initial: str,
     horizon: int,
     steps_per_unit: int,
     callback: Union[None, str, Callable] = "collapse_point_no_duration",
     perturbation: float = 1e-12,
     transpose_result: bool = True,
-    **kwargs,
-) -> dict:
+    **kwargs: Any,
+) -> dict[str, Any]:
     """Compute transition probabilities from a given initial state.
 
     The solver reduces the model to the subgraph reachable from

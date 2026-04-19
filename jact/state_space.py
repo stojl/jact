@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
-from typing import Sequence
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+if TYPE_CHECKING:
+    from .model import Model
 
 
 class StateSpace:
@@ -242,7 +245,12 @@ class StateSpace:
     # Model building                                                      #
     # ------------------------------------------------------------------ #
 
-    def build(self, transitions=None, exits=None, groups=None):
+    def build(
+        self,
+        transitions: Optional[Dict[Tuple[str, str], Callable[..., Any]]] = None,
+        exits: Optional[Dict[str, Callable[..., Any]]] = None,
+        groups: Optional[Dict[Callable[..., Any], List[Tuple[str, str]]]] = None,
+    ) -> Model:
         """Create a Model by assigning intensity callables to transitions.
 
         Every transition in this StateSpace must be covered exactly once

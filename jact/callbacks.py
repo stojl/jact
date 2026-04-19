@@ -16,11 +16,10 @@ For most use cases, one of the built-in callbacks that marginalizes
 over duration or collapses the point mass is more convenient.
 """
 
-from typing import Callable, Optional, Union
+from typing import Callable, Union
 
 import jax
 import jax.numpy as jnp
-
 
 # -------------------------------------------------------------------- #
 # Built-in callbacks                                                    #

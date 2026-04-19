@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
-
-import jax
-import jax.numpy as jnp
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from .state_space import StateSpace
 
@@ -166,7 +163,7 @@ class Model:
         """
         J = self._state_space.n_states
 
-        self._full_solver_matrix = [
+        self._full_solver_matrix: list[list[Any]] = [
             [None for _ in range(J)] for _ in range(J)
         ]
 

@@ -28,10 +28,10 @@ Example
 >>> result = model.solve(horizon=10, steps_per_unit=12, age=ages)
 """
 
-from .state_space import StateSpace
+from . import callbacks
 from .model import Model
 from .solver import solve
-from . import callbacks
+from .state_space import StateSpace
 
 __all__ = [
     "StateSpace",
