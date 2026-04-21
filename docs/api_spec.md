@@ -19,7 +19,7 @@ All intensity models must be JIT-compatible. The entire pipeline from covariates
 ```
 jact/
 ├── __init__.py              # Public API: StateSpace, Model, InitialDistribution, solve, callbacks
-├── state_space.py           # StateSpace class
+├── state_space.py           # StateSpace class + InitialDistribution helpers
 ├── model.py                 # Model, ReducedModel, TransitionInfo
 ├── initial_distribution.py  # InitialDistribution class
 ├── solver.py                # Semi-Markov solver (Heun scheme)
@@ -297,7 +297,41 @@ dist = jact.InitialDistribution.per_individual(
 
 `initial_states` is a Python tuple of state names — static, user-declared. When provided, `states` indexes into that tuple and the solver reduces the model to the reachable subgraph from those states. When omitted (`None`, the default), the full model state list is used and **no reduction is performed**: every state is treated as potentially initial.
 
-Users with a `(batch,)` array of state *names* convert to indices host-side before calling, e.g. `jnp.array([state_space.state_index(s) for s in names])`. There is no dedicated name-array constructor — the conversion is cheap, explicit, and keeps the name→index step visible at the call site.
+Users with a `(batch,)` array of state *names* can either convert to indices host-side before calling — `jnp.array([state_space.state_index(s) for s in names])` — or use the `StateSpace.initial_per_individual` helper below, which absorbs the conversion and validates names eagerly. The underlying `InitialDistribution.per_individual` constructor remains index-only to keep the name→index step visible when the user wants it that way.
+
+### Eager-validation helpers on `StateSpace`
+
+The constructors above are **state-space-agnostic**: they accept state names as opaque strings and defer name validation to `solve()`-entry. That is deliberate (see the **Design note** below), but it means a typo like `components={"helthy": ...}` does not surface until the solver runs.
+
+For users who prefer **fail-early** validation, and for users with a `(batch,)` array of state *names* rather than indices, `StateSpace` exposes three thin helpers that wrap the constructors above, validate every state name against `self.states` immediately, and return a plain `InitialDistribution`:
+
+```python
+dist = state_space.initial_at("healthy", duration=0.0)
+
+dist = state_space.initial_per_individual(
+    state_names=name_array,                      # (batch,) host-side array of state names
+    duration=d_0_array,
+    initial_states=("healthy", "disabled"),      # optional; validated eagerly
+)
+
+dist = state_space.initial_per_individual(
+    state_indices=idx_array,                     # (batch,) int32 array of indices (traced)
+    duration=d_0_array,
+    initial_states=None,
+)
+
+dist = state_space.initial_distribution(
+    components={
+        "healthy":  {"mass": mass_h, "duration": d_h},
+        "disabled": {"mass": mass_d, "duration": d_d},
+    },
+    normalise=True,
+)
+```
+
+Exactly one of `state_names` / `state_indices` is required on `initial_per_individual`. When `state_names` is used, the helper does the name→index lookup against `self.states` (or against `initial_states`, if provided) and the resulting `InitialDistribution` is indistinguishable from one built via the index path.
+
+These helpers are **purely ergonomic**. They return plain `InitialDistribution` objects; nothing downstream — `solve()` semantics, the JIT boundary, the reduction rules, the static-topology invariant — is affected. Users who want portability across multiple `StateSpace`s (one distribution reused across models that share state names) stay on the constructors in the previous subsection.
 
 ### Shortcuts on `solve()`
 
@@ -400,6 +434,8 @@ result = model.solve(initial=dist, horizon=30, steps_per_unit=12, baseline_age=a
 ### Design note — state-space-agnostic construction
 
 `InitialDistribution` is state-space-agnostic **deliberately**: one distribution can be reused across models that share state names, and construction stays free of model dependencies. State-name validation happens at `solve()`-entry, not at construction. The key set of the distribution is always **user-declared** — by the keys of `components`, the single name for `at`, or the `initial_states` tuple on `per_individual` — and is never inferred from runtime data.
+
+`StateSpace` additionally exposes convenience constructors (`initial_at`, `initial_per_individual`, `initial_distribution`; see **Eager-validation helpers on `StateSpace`** above) that validate state names immediately against a specific `StateSpace` and return the same `InitialDistribution` object type. They are purely ergonomic — the state-space-agnostic constructors remain the canonical low-level API, the `solve()`-entry check remains the authoritative validation, and the initial-state set is still user-declared in every case.
 
 ---
 
