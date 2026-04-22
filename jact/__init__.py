@@ -29,6 +29,7 @@ Example
 """
 
 from . import callbacks
+from .initial_distribution import InitialDistribution
 from .model import Model
 from .solver import solve
 from .state_space import StateSpace
@@ -36,6 +37,7 @@ from .state_space import StateSpace
 __all__ = [
     "StateSpace",
     "Model",
+    "InitialDistribution",
     "solve",
     "callbacks",
 ]

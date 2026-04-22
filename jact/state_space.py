@@ -5,6 +5,10 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+import jax.numpy as jnp
+
+from .initial_distribution import InitialDistribution
+
 if TYPE_CHECKING:
     from .model import Model
 
@@ -276,6 +280,65 @@ class StateSpace:
             transitions=transitions,
             exits=exits,
             groups=groups,
+        )
+
+    # ------------------------------------------------------------------ #
+    # InitialDistribution helpers                                         #
+    # ------------------------------------------------------------------ #
+
+    def initial_at(
+        self,
+        state: str,
+        duration: Any = 0.0,
+    ) -> InitialDistribution:
+        self._check_state(state)
+        return InitialDistribution.at(state, duration=duration)
+
+    def initial_distribution(
+        self,
+        components: Dict[str, Dict[str, Any]],
+        normalise: bool = True,
+    ) -> InitialDistribution:
+        for state in components:
+            self._check_state(state)
+        return InitialDistribution(components=components, normalise=normalise)
+
+    def initial_per_individual(
+        self,
+        *,
+        state_names: Optional[Sequence[str]] = None,
+        state_indices: Any = None,
+        duration: Any = 0.0,
+        initial_states: Optional[Sequence[str]] = None,
+    ) -> InitialDistribution:
+        if (state_names is None) == (state_indices is None):
+            raise ValueError(
+                "Exactly one of state_names or state_indices must be provided."
+            )
+
+        declared_states = None
+        if initial_states is not None:
+            for state in initial_states:
+                self._check_state(state)
+            declared_states = tuple(initial_states)
+
+        if state_names is not None:
+            lookup_states = declared_states or self.states
+            lookup = {state: i for i, state in enumerate(lookup_states)}
+            indices = []
+            for state in state_names:
+                if state not in lookup:
+                    raise ValueError(
+                        f"'{state}' is not a valid initial state. "
+                        f"Available states: {lookup_states}"
+                    )
+                indices.append(lookup[state])
+            state_indices = jnp.asarray(indices, dtype=jnp.int32)
+
+        return InitialDistribution.per_individual(
+            states=state_indices,
+            duration=duration,
+            initial_states=declared_states,
         )
 
     # ------------------------------------------------------------------ #

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 from .state_space import StateSpace
 
@@ -28,8 +28,8 @@ class ReducedModel:
 
     Attributes
     ----------
-    initial : str
-        The starting state.
+    initial_states : tuple[str, ...]
+        The declared initial-state set.
     reachable_states : tuple[str, ...]
         States reachable from ``initial``, with ``initial`` first.
     solver_matrix : list[list[callable or None]]
@@ -38,9 +38,9 @@ class ReducedModel:
         Number of reachable states.
     """
 
-    initial: str
-    reachable_states: tuple
-    solver_matrix: list
+    initial_states: tuple[str, ...]
+    reachable_states: tuple[str, ...]
+    solver_matrix: list[list[Any]]
     n_states: int
 
 
@@ -182,17 +182,22 @@ class Model:
     # Reduction to reachable states                                       #
     # ------------------------------------------------------------------ #
 
-    def reduce(self, initial: str) -> ReducedModel:
-        """Build a reduced solver matrix for a specific initial state.
+    def reduce(
+        self,
+        initial: Union[str, Iterable[str]],
+    ) -> ReducedModel:
+        """Build a reduced solver matrix for a declared initial-state set.
 
-        Computes the reachable subgraph from ``initial`` and extracts
-        only the relevant rows and columns from the full solver matrix.
-        The initial state is always at index 0 in the reduced matrix.
+        Computes the union of the reachable subgraphs from the declared
+        initial states and extracts only the relevant rows and columns
+        from the full solver matrix. Initial states appear first in
+        state-space ordering, followed by the remaining reachable states
+        in the same ordering.
 
         Parameters
         ----------
-        initial : str
-            The starting state name.
+        initial : str or iterable[str]
+            The starting state name or declared initial-state set.
 
         Returns
         -------
@@ -200,9 +205,30 @@ class Model:
             A solver-ready object with the reduced intensity matrix
             and reachable state metadata.
         """
-        self._state_space._check_state(initial)
+        if isinstance(initial, str):
+            declared_initial = (initial,)
+        else:
+            declared_initial = tuple(initial)
+            if not declared_initial:
+                raise ValueError("initial must contain at least one state.")
+        for state in declared_initial:
+            self._state_space._check_state(state)
+        if len(declared_initial) != len(set(declared_initial)):
+            raise ValueError("initial state set must not contain duplicates.")
 
-        reachable = self._state_space.reachable_from(initial)
+        reachable_set = set()
+        for state in declared_initial:
+            reachable_set.update(self._state_space.reachable_from(state))
+
+        initial_ordered = tuple(
+            state for state in self._state_space.states if state in declared_initial
+        )
+        reachable_tail = tuple(
+            state
+            for state in self._state_space.states
+            if state in reachable_set and state not in declared_initial
+        )
+        reachable = initial_ordered + reachable_tail
         n_reachable = len(reachable)
 
         # Map reachable state names to their indices in the full matrix
@@ -220,7 +246,7 @@ class Model:
         ]
 
         return ReducedModel(
-            initial=initial,
+            initial_states=initial_ordered,
             reachable_states=reachable,
             solver_matrix=reduced_matrix,
             n_states=n_reachable,
