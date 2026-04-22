@@ -46,12 +46,20 @@ result = model.solve(initial="healthy", horizon=30, steps_per_unit=12, age=ages)
 ## Documentation
 
 See [docs/api_spec.md](docs/api_spec.md) for the full API specification.
+For a runnable walkthrough of the main workflow, see
+[docs/example_notebook.ipynb](docs/example_notebook.ipynb).
 
 ## Installation
 
 ```bash
 pip install jax jaxlib
 pip install -e .
+```
+
+To run the example notebook with plotting support:
+
+```bash
+pip install -e '.[notebook]'
 ```
 
 ## Requirements

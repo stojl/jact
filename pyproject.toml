@@ -19,6 +19,9 @@ dev = [
     "pyright>=1.1.0",
     "ruff>=0.4.0",
 ]
+notebook = [
+    "matplotlib>=3.8",
+]
 
 [tool.setuptools.packages.find]
 include = ["jact*"]
