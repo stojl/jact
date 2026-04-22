@@ -121,6 +121,8 @@ jact.InitialDistribution.per_individual(
 
 `per_individual` is index-only; users with a name array convert host-side via `state_space.state_index(...)` or use the `StateSpace.initial_per_individual` helper.
 
+For mixture distributions, `normalise=True` (default) rescales per-individual component masses to sum to 1 before solving. Positive totals are rescaled proportionally; zero-total rows remain zero. `normalise=False` leaves masses unchanged.
+
 ### `solve()` shortcuts
 
 ```python
@@ -139,15 +141,16 @@ State-space-agnostic by design; these are ergonomic wrappers that validate names
 
 - `state_space.initial_at(state, duration=0.0)`
 - `state_space.initial_per_individual(state_names=... | state_indices=..., duration=..., initial_states=None)` — exactly one of `state_names` / `state_indices` required; `state_names` lookup happens against `self.states` (or against `initial_states` if given).
-- `state_space.initial_distribution(components=..., normalise=True)`
+- `state_space.initial_distribution(components=..., normalise=True)` — same constructor, with eager state-name validation
 
 ### Validation
 
 At **construction**:
 - `mass` and `duration` shape-consistent across components (all scalar, or all `(batch,)` with matching batch).
 - `mass >= 0`, `duration >= 0` pointwise.
-- If `normalise=True` (default): per-individual `sum(mass) == 1` within `1e-6`; else `ValueError`.
-- If `normalise=False`: sum check skipped; output linear in input mass.
+- If `normalise=True` (default): per-individual component masses are normalised before use so their sum is 1.
+- If `normalise=True`: rows already summing to 1 are unchanged; positive totals different from 1 are rescaled proportionally; zero-total rows remain zero.
+- If `normalise=False`: no normalisation; output remains linear in input mass.
 
 At **`solve()`-entry**:
 - Every declared state name exists in the model's state space.

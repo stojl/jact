@@ -279,6 +279,8 @@ dist = jact.InitialDistribution(
 
 `components` is a mapping from state name to a `(mass, duration)` pair. Each entry contributes a per-individual point mass concentrated at `duration` with weight `mass`. `mass` and `duration` are scalars or `(batch,)` arrays; scalars broadcast over the batch.
 
+If `normalise=True` (the default), component masses are rescaled per individual so the total mass across declared states is 1 before solving. Rows whose total mass is already 1 are unchanged; rows whose total mass is positive but not 1 are rescaled proportionally; rows whose total mass is 0 remain all zero. If `normalise=False`, masses are used exactly as supplied.
+
 ### Convenience constructors
 
 ```python
@@ -325,7 +327,7 @@ dist = state_space.initial_distribution(
         "healthy":  {"mass": mass_h, "duration": d_h},
         "disabled": {"mass": mass_d, "duration": d_d},
     },
-    normalise=True,
+    normalise=True,                         # rescale per-individual masses to sum to 1
 )
 ```
 
@@ -356,8 +358,11 @@ At `InitialDistribution` construction:
 - `mass` and `duration` arrays per component are mutually shape-consistent (all scalar, or all `(batch,)` with matching batch dimension across components).
 - `mass >= 0` pointwise.
 - `duration >= 0` pointwise.
-- If `normalise=True` (default), per-individual `sum(mass)` across components equals 1 within tolerance (`1e-6`). Raises `ValueError` otherwise.
-- If `normalise=False`, the sum-to-1 check is skipped. Output is then linear in the input mass — the user is responsible for downstream interpretation.
+- If `normalise=True` (default), per-individual component masses are normalised before use so their sum is 1.
+- If `normalise=True` and a row already sums to 1, it is unchanged.
+- If `normalise=True` and a row sums to a positive value different from 1, it is rescaled proportionally.
+- If `normalise=True` and a row sums to 0, it remains all zero.
+- If `normalise=False`, no normalisation is applied. Output is then linear in the input mass scale — the user is responsible for downstream interpretation.
 
 At `solve()`:
 
@@ -430,6 +435,10 @@ dist = jact.InitialDistribution(
 )
 result = model.solve(initial=dist, horizon=30, steps_per_unit=12, baseline_age=ages)
 ```
+
+With `normalise=True`, the example above is unchanged if `p_h + (1 - p_h) == 1` per individual, because those rows already sum to 1.
+
+If instead the same individual-level mixture were supplied on another mass scale, for example `{"healthy": 2 * p_h, "disabled": 2 * (1 - p_h)}`, `normalise=True` would rescale it back to the same proportions before solving, while `normalise=False` would preserve the factor of 2 and therefore preserve linearity in the supplied mass scale.
 
 ### Design note — state-space-agnostic construction
 
