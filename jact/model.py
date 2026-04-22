@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
+from .initial_distribution import InitialDistribution
 from .state_space import StateSpace
 
 
@@ -292,34 +293,52 @@ class Model:
 
     def solve(
         self,
-        initial: str,
+        initial: Union[str, Any, InitialDistribution],
         horizon: int,
         steps_per_unit: int,
+        initial_duration: Any = 0.0,
         callback: Union[None, str, Callable] = "collapse_point_no_duration",
+        record_every: int = 1,
+        perturbation: float = 1e-12,
         **kwargs,
     ):
-        """Compute transition probabilities from a given initial state.
+        """Compute transition probabilities from a documented initial condition.
 
         Parameters
         ----------
-        initial : str
-            The starting state. Only states reachable from this state
-            are included in the computation.
+        initial : str, (batch,) int array, or InitialDistribution
+            Initial condition. ``str`` means all individuals start in
+            that state; a ``(batch,)`` integer array gives per-individual
+            initial-state indices into the full model state list; an
+            ``InitialDistribution`` gives full control over per-state
+            mass and duration and declares the structural initial-state
+            set used for model reduction.
         horizon : int
             Number of time units to solve over.
         steps_per_unit : int
             Discretization resolution per time unit.
+        initial_duration : float or (batch,) array, optional
+            Per-individual ``d_0`` for the ``str`` and ``(batch,)``
+            shorthand forms of ``initial``. Default is ``0.0``.
         callback : str or callable, optional
-            Probability callback. See :mod:`jact.callbacks`.
+            Probability callback. Default is
+            ``"collapse_point_no_duration"``.
+        record_every : int, optional
+            Record the callback output every ``record_every``-th solver
+            step. Must divide ``horizon * steps_per_unit``. Default is
+            ``1``.
+        perturbation : float, optional
+            Grid perturbation used by the current discontinuity
+            handling scheme. Default is ``1e-12``.
         **kwargs
-            Covariate arrays passed to intensity callables.
+            Covariate arrays of shape ``(batch, ...)`` passed to
+            intensity callables.
 
         Returns
         -------
         dict
-            Result dictionary with ``'probability'`` key.
-            State ordering in the result corresponds to
-            ``model.reduce(initial).reachable_states``.
+            Result dictionary with ``"probability"`` and ``"states"``.
+            Time is the leading axis of every probability leaf.
         """
         from .solver import solve
 
@@ -328,7 +347,10 @@ class Model:
             initial=initial,
             horizon=horizon,
             steps_per_unit=steps_per_unit,
+            initial_duration=initial_duration,
             callback=callback,
+            record_every=record_every,
+            perturbation=perturbation,
             **kwargs,
         )
 

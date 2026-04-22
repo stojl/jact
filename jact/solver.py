@@ -1,417 +1,451 @@
-"""Semi-Markov solver with duration-dependent transition intensities.
-
-This module contains the numerical solver that computes transition
-probabilities by stepping through time using a Heun scheme
-(second-order predictor-corrector) inside ``jax.lax.scan``.
-
-The solver operates on a J×J matrix of intensity callables, tracks
-the duration density for each state, and handles the point mass at
-duration zero separately for numerical accuracy.
-"""
+"""Semi-Markov solver with duration-dependent transition intensities."""
 
 from __future__ import annotations
 
-from functools import partial, reduce
+from functools import partial
 from typing import Any, Callable, Dict, Optional, Sequence, Union
 
 import jax
 import jax.numpy as jnp
 
-from .callbacks import resolve_callback
-
-# -------------------------------------------------------------------- #
-# Low-level array operations                                            #
-# -------------------------------------------------------------------- #
+from .callbacks import StateCarry, resolve_callback
+from .initial_distribution import InitialDistribution
 
 
-@jax.jit
-def _update_p(
-    p: jnp.ndarray,
+def _zero_batch_like(state: StateCarry) -> jnp.ndarray:
+    return jnp.zeros(state.density.shape[:-1], dtype=state.density.dtype)
+
+
+def _update_density(
+    density: jnp.ndarray,
     delta: jnp.ndarray,
     next_inflow: jnp.ndarray,
     step_size: float,
 ) -> jnp.ndarray:
-    """Shift duration axis and apply derivative update to density."""
-    p_next = p.at[..., 1:].set(p[..., :-1] + step_size * delta[..., :-1])
-    p_next = p_next.at[..., 0].set(step_size * next_inflow)
-    return p_next
+    if density.shape[-1] == 1:
+        return density.at[..., 0].set(
+            density[..., 0] + step_size * delta[..., 0] + step_size * next_inflow
+        )
 
-
-@jax.jit
-def _update_p_point(
-    p_point: jnp.ndarray,
-    delta: jnp.ndarray,
-    step_size: jnp.ndarray,
-) -> jnp.ndarray:
-    """Shift duration axis and apply derivative update to point mass."""
-    p_next = p_point.at[..., 1:].set(
-        p_point[..., :-1] + step_size * delta[..., :-1]
+    density_next = density.at[..., 1:-1].set(
+        density[..., :-2] + step_size * delta[..., :-2]
     )
-    p_next = p_next.at[..., 0].set(0.0)
-    return p_next
-
-
-# -------------------------------------------------------------------- #
-# Core derivative computation                                           #
-# -------------------------------------------------------------------- #
-
-
-def _compute_core(p_single, p_point_single, mu_plus_matrix, mu_minus_matrix):
-    """Compute inflows, density derivative, and point mass derivative.
-
-    This function operates on a single individual (no batch dimension)
-    and is vmapped over the batch axis by :func:`_compute_derivative`.
-
-    Parameters
-    ----------
-    p_single : jnp.ndarray
-        Density for one individual, shape ``(J, D-1)``.
-    p_point_single : jnp.ndarray
-        Point mass for one individual, shape ``(D-1,)``.
-    mu_plus_matrix : nested list
-        Intensity values evaluated at ``grid + perturbation``.
-    mu_minus_matrix : nested list
-        Intensity values evaluated at ``grid - perturbation``.
-
-    Returns
-    -------
-    next_inflow : jnp.ndarray
-        Inflow to each state at duration zero, shape ``(J,)``.
-    delta_p : jnp.ndarray
-        Derivative of the density, shape ``(J, D-1)``.
-    delta_p_point : jnp.ndarray
-        Derivative of the point mass, shape ``(D-1,)``.
-    """
-    J, D_minus_1 = p_single.shape
-
-    outflow_plus_list = [[] for _ in range(J)]
-    outflow_avg_list = [[] for _ in range(J)]
-    next_inflow_list = []
-
-    for j in range(J):
-        inflow_terms_for_j = []
-        for i in range(J):
-            m_p = mu_plus_matrix[i][j]
-            m_m = mu_minus_matrix[i][j]
-
-            if m_p is not None:
-                m_p_slice = m_p[:-1]
-                m_avg = 0.5 * (m_p_slice + m_m[1:])
-
-                outflow_plus_list[i].append(m_p_slice)
-                outflow_avg_list[i].append(m_avg)
-
-                term_p = jnp.sum(m_avg * p_single[i, :])
-                inflow_terms_for_j.append(term_p)
-
-                if i == 0:
-                    term_p_point = jnp.sum(m_p_slice * p_point_single)
-                    inflow_terms_for_j.append(term_p_point)
-
-        if inflow_terms_for_j:
-            next_inflow_list.append(reduce(jax.lax.add, inflow_terms_for_j))
-        else:
-            next_inflow_list.append(0.0)
-
-    final_outflow_plus = jnp.stack(
-        [
-            reduce(jax.lax.add, lst) if lst else jnp.zeros(D_minus_1)
-            for lst in outflow_plus_list
-        ]
+    density_next = density_next.at[..., -1].set(
+        density[..., -2]
+        + step_size * delta[..., -2]
+        + density[..., -1]
+        + step_size * delta[..., -1]
     )
-    final_outflow_avg = jnp.stack(
-        [
-            reduce(jax.lax.add, lst) if lst else jnp.zeros(D_minus_1)
-            for lst in outflow_avg_list
-        ]
+    density_next = density_next.at[..., 0].set(step_size * next_inflow)
+    return density_next
+
+
+def _update_point_mass(
+    point_mass: jnp.ndarray | None,
+    delta: jnp.ndarray | None,
+    step_size: float,
+) -> jnp.ndarray | None:
+    if point_mass is None or delta is None:
+        return None
+    if point_mass.shape[-1] == 1:
+        return point_mass.at[..., 0].set(
+            point_mass[..., 0] + step_size * delta[..., 0]
+        )
+
+    point_mass_next = point_mass.at[..., 1:-1].set(
+        point_mass[..., :-2] + step_size * delta[..., :-2]
     )
-
-    next_inflow = jnp.array(next_inflow_list)
-
-    delta_p = -p_single * final_outflow_avg
-    delta_p_point = -final_outflow_plus[0, :] * p_point_single
-
-    return next_inflow, delta_p, delta_p_point
-
-
-@jax.jit
-def _compute_derivative(p, p_point, mu_plus_matrix, mu_minus_matrix):
-    """Vmap the core computation over the batch dimension."""
-    mu_axes = tuple(
-        tuple(0 if entry is not None else None for entry in row)
-        for row in mu_plus_matrix
+    point_mass_next = point_mass_next.at[..., -1].set(
+        point_mass[..., -2]
+        + step_size * delta[..., -2]
+        + point_mass[..., -1]
+        + step_size * delta[..., -1]
     )
-    vmap_func = jax.vmap(
-        _compute_core, in_axes=(0, 0, mu_axes, mu_axes)
-    )
-    return vmap_func(p, p_point, mu_plus_matrix, mu_minus_matrix)
+    point_mass_next = point_mass_next.at[..., 0].set(0.0)
+    return point_mass_next
 
 
-# -------------------------------------------------------------------- #
-# Intensity evaluation                                                  #
-# -------------------------------------------------------------------- #
+def _compute_derivative(
+    state: tuple[StateCarry, ...],
+    mu_plus_matrix,
+    mu_minus_matrix,
+):
+    """Compute per-state inflows and derivatives."""
+    outflow_plus = [jnp.zeros_like(carry.density) for carry in state]
+    outflow_avg = [jnp.zeros_like(carry.density) for carry in state]
+    next_inflow = [_zero_batch_like(carry) for carry in state]
+
+    for i, carry_i in enumerate(state):
+        for j, _ in enumerate(state):
+            mu_plus = mu_plus_matrix[i][j]
+            if mu_plus is None:
+                continue
+
+            mu_minus = mu_minus_matrix[i][j]
+            mu_plus_slice = mu_plus[..., :-1]
+            mu_avg = 0.5 * (mu_plus[..., :-1] + mu_minus[..., 1:])
+
+            outflow_plus[i] = outflow_plus[i] + mu_plus_slice
+            outflow_avg[i] = outflow_avg[i] + mu_avg
+            next_inflow[j] = next_inflow[j] + jnp.sum(
+                mu_avg * carry_i.density,
+                axis=-1,
+            )
+
+            if carry_i.point_mass is not None:
+                next_inflow[j] = next_inflow[j] + jnp.sum(
+                    mu_plus_slice * carry_i.point_mass,
+                    axis=-1,
+                )
+
+    delta_state = []
+    for carry, outflow_plus_i, outflow_avg_i in zip(
+        state,
+        outflow_plus,
+        outflow_avg,
+    ):
+        delta_density = -carry.density * outflow_avg_i
+        delta_point_mass = None
+        if carry.point_mass is not None:
+            delta_point_mass = -carry.point_mass * outflow_plus_i
+        delta_state.append(StateCarry(delta_density, delta_point_mass))
+
+    return tuple(next_inflow), tuple(delta_state)
 
 
 def _evaluate_intensities(matrix, *args, **kwargs):
-    """Evaluate all intensity callables in the matrix.
-
-    Parameters
-    ----------
-    matrix : nested list of callables or None
-        The J×J intensity matrix.
-    *args, **kwargs
-        Arguments passed to each callable.
-
-    Returns
-    -------
-    nested list of arrays or None
-    """
-    return jax.tree_util.tree_map(
-        lambda f: f(*args, **kwargs),
-        matrix,
-    )
+    """Evaluate every intensity callable in a solver matrix."""
+    return jax.tree_util.tree_map(lambda f: f(*args, **kwargs), matrix)
 
 
-# -------------------------------------------------------------------- #
-# Heun scheme solver                                                    #
-# -------------------------------------------------------------------- #
-
-
-@partial(
-    jax.jit,
-    static_argnames=["step_size", "intensity", "prob_callback", "perturbation"],
-)
-def _heun_solver(
-    p_0: jnp.ndarray,
-    p_point_0: jnp.ndarray,
+def _heun_step(
+    state: tuple[StateCarry, ...],
+    t: jnp.ndarray,
     grid: jnp.ndarray,
     step_size: float,
     intensity: Sequence[Sequence[Optional[Callable[..., jnp.ndarray]]]],
     intensity_kwargs: Dict[str, jnp.ndarray],
-    prob_callback: Callable[..., jnp.ndarray],
     perturbation: jnp.ndarray,
-):
-    """Run the Heun scheme solver.
-
-    Parameters
-    ----------
-    p_0 : jnp.ndarray
-        Initial density, shape ``(batch, J, D)``.
-    p_point_0 : jnp.ndarray
-        Initial point mass, shape ``(batch, D)``.
-    grid : jnp.ndarray
-        Duration grid, shape ``(1, D+1)``.
-    step_size : float
-        Time step size.
-    intensity : nested list
-        J×J matrix of intensity callables.
-    intensity_kwargs : dict
-        Covariate arrays passed to intensity callables.
-    prob_callback : callable
-        Callback for extracting results at each time step.
-    perturbation : float
-        Small value for finite-difference grid offset.
-
-    Returns
-    -------
-    dict
-        Result dictionary with ``'probability'`` key.
-    """
+) -> tuple[StateCarry, ...]:
+    """Advance the full solver state by one time step."""
     grid_minus = grid - perturbation
     grid_plus = grid + perturbation
+    t_left = t + perturbation
 
-    def heun_scan(carry, t):
-        p, p_point = carry
-
-        t_left = t + perturbation
-
-        mu_plus = _evaluate_intensities(
-            intensity, t_left, grid_plus, **intensity_kwargs
-        )
-        mu_minus = _evaluate_intensities(
-            intensity, t_left, grid_minus, **intensity_kwargs
-        )
-
-        next_inflow, delta_p, delta_p_point = _compute_derivative(
-            p, p_point, mu_plus, mu_minus
-        )
-
-        t += step_size
-
-        p_2 = _update_p(p, delta_p, next_inflow, step_size)
-        p_point_2 = _update_p_point(p_point, delta_p_point, step_size)
-
-        t_right = t - perturbation
-
-        mu_plus = _evaluate_intensities(
-            intensity, t_right, grid_plus, **intensity_kwargs
-        )
-        mu_minus = _evaluate_intensities(
-            intensity, t_right, grid_minus, **intensity_kwargs
-        )
-
-        next_inflow_2, delta_p_2, delta_p_point_2 = _compute_derivative(
-            p_2, p_point_2, mu_plus, mu_minus
-        )
-
-        next_inflow_2 = 0.5 * (
-            next_inflow + next_inflow_2 + delta_p_2[..., 0]
-        )
-        delta_p2 = 0.5 * (delta_p_2[..., 1:] + delta_p[..., :-1])
-        delta_p_point2 = 0.5 * (
-            delta_p_point_2[..., 1:] + delta_p_point[..., :-1]
-        )
-
-        delta_p = delta_p.at[..., :-1].set(delta_p2)
-        delta_p_point = delta_p_point.at[..., :-1].set(delta_p_point2)
-
-        p = _update_p(p, delta_p, next_inflow_2, step_size)
-        p_point = _update_p_point(p_point, delta_p_point, step_size)
-
-        next_carry = (p, p_point)
-
-        history = {
-            "probability": prob_callback(p, p_point),
-        }
-
-        return next_carry, history
-
-    scan_grid = jnp.swapaxes(grid[..., :-1], 0, -1)
-
-    _, result = jax.lax.scan(heun_scan, (p_0, p_point_0), scan_grid)
-
-    init_prob_callback_value = prob_callback(p_0, p_point_0)
-    result["probability"] = jax.tree_util.tree_map(
-        lambda arr, init: jnp.concatenate(
-            [jnp.expand_dims(init, axis=0), arr]
-        ),
-        result["probability"],
-        init_prob_callback_value,
+    mu_plus = _evaluate_intensities(
+        intensity, t_left, grid_plus, **intensity_kwargs
+    )
+    mu_minus = _evaluate_intensities(
+        intensity, t_left, grid_minus, **intensity_kwargs
     )
 
-    return result
+    next_inflow, delta_state = _compute_derivative(state, mu_plus, mu_minus)
+
+    predictor = tuple(
+        StateCarry(
+            density=_update_density(
+                carry.density,
+                delta.density,
+                inflow,
+                step_size,
+            ),
+            point_mass=_update_point_mass(
+                carry.point_mass,
+                delta.point_mass,
+                step_size,
+            ),
+        )
+        for carry, delta, inflow in zip(state, delta_state, next_inflow)
+    )
+
+    t_right = t + step_size - perturbation
+    mu_plus_2 = _evaluate_intensities(
+        intensity, t_right, grid_plus, **intensity_kwargs
+    )
+    mu_minus_2 = _evaluate_intensities(
+        intensity, t_right, grid_minus, **intensity_kwargs
+    )
+
+    next_inflow_2, delta_state_2 = _compute_derivative(
+        predictor, mu_plus_2, mu_minus_2
+    )
+
+    corrected_state = []
+    for inflow_1, inflow_2, delta_1, delta_2, carry in zip(
+        next_inflow,
+        next_inflow_2,
+        delta_state,
+        delta_state_2,
+        state,
+    ):
+        corrected_inflow = 0.5 * (
+            inflow_1 + inflow_2 + delta_2.density[..., 0]
+        )
+        corrected_density = delta_1.density.at[..., :-1].set(
+            0.5 * (
+                delta_2.density[..., 1:] + delta_1.density[..., :-1]
+            )
+        )
+
+        corrected_point_mass = delta_1.point_mass
+        if corrected_point_mass is not None and delta_2.point_mass is not None:
+            corrected_point_mass = corrected_point_mass.at[..., :-1].set(
+                0.5
+                * (
+                    delta_2.point_mass[..., 1:]
+                    + corrected_point_mass[..., :-1]
+                )
+            )
+
+        corrected_state.append(
+            StateCarry(
+                density=_update_density(
+                    carry.density,
+                    corrected_density,
+                    corrected_inflow,
+                    step_size,
+                ),
+                point_mass=_update_point_mass(
+                    carry.point_mass,
+                    corrected_point_mass,
+                    step_size,
+                ),
+            )
+        )
+
+    return tuple(corrected_state)
 
 
-# -------------------------------------------------------------------- #
-# Result transposition                                                  #
-# -------------------------------------------------------------------- #
+@partial(
+    jax.jit,
+    static_argnames=[
+        "step_size",
+        "intensity",
+        "prob_callback",
+        "perturbation",
+        "record_every",
+    ],
+)
+def _heun_solver(
+    state_0: tuple[StateCarry, ...],
+    grid: jnp.ndarray,
+    step_size: float,
+    intensity: Sequence[Sequence[Optional[Callable[..., jnp.ndarray]]]],
+    intensity_kwargs: Dict[str, jnp.ndarray],
+    prob_callback: Callable[..., Any],
+    perturbation: jnp.ndarray,
+    record_every: int,
+):
+    """Run the Heun scheme solver and record callback outputs."""
+    n_steps = grid.shape[-1] - 1
+    n_records = n_steps // record_every
 
+    def block_scan(carry, block_start):
+        offsets = jnp.arange(record_every, dtype=grid.dtype)
 
-@jax.jit
-def _transpose_probability(x):
-    """Move the time axis to a natural position.
+        def step_scan(inner_carry, offset):
+            current_t = block_start + offset * step_size
+            return (
+                _heun_step(
+                    inner_carry,
+                    current_t,
+                    grid,
+                    step_size,
+                    intensity,
+                    intensity_kwargs,
+                    perturbation,
+                ),
+                None,
+            )
 
-    The scan produces time as the leading axis. This moves it so that
-    the result is indexed as ``(batch, ..., time)`` or similar.
-    """
-    N = x.ndim
-    if N == 1:
-        return x
-    if N == 2:
-        return jnp.transpose(x, axes=(1, 0))
-    return jnp.moveaxis(x, 0, -2)
+        carry, _ = jax.lax.scan(step_scan, carry, offsets)
+        return carry, prob_callback(carry)
 
+    initial_probability = prob_callback(state_0)
+    block_starts = jnp.arange(n_records, dtype=grid.dtype) * (
+        record_every * step_size
+    )
+    _, probability = jax.lax.scan(block_scan, state_0, block_starts)
 
-# -------------------------------------------------------------------- #
-# Public solver interface                                               #
-# -------------------------------------------------------------------- #
+    probability = jax.tree_util.tree_map(
+        lambda arr, init: (
+            None
+            if init is None
+            else jnp.concatenate([jnp.expand_dims(init, axis=0), arr], axis=0)
+        ),
+        probability,
+        initial_probability,
+    )
+
+    return {"probability": probability}
 
 
 def _get_reference_function(intensity_matrix):
     """Find the first non-None callable in the intensity matrix."""
     for row in intensity_matrix:
-        for f in row:
-            if f is not None:
-                return f
+        for fn in row:
+            if fn is not None:
+                return fn
     return None
+
+
+def _get_covariate_batch_size(kwargs: Dict[str, Any]) -> int | None:
+    batch_size = None
+    for name, value in kwargs.items():
+        shape = jnp.shape(value)
+        if len(shape) == 0:
+            raise ValueError(
+                f"Covariate '{name}' must have shape (batch, ...), got scalar."
+            )
+        if batch_size is None:
+            batch_size = shape[0]
+        elif batch_size != shape[0]:
+            raise ValueError("Covariate batch dimensions must match.")
+    return batch_size
+
+
+def _broadcast_batch(value: Any, batch_size: int) -> jnp.ndarray:
+    arr = jnp.asarray(value)
+    if arr.ndim == 0:
+        return jnp.broadcast_to(arr, (batch_size,))
+    if arr.ndim == 1 and arr.shape[0] == batch_size:
+        return arr
+    raise ValueError("Expected a scalar or (batch,) array.")
+
+
+def _canonicalize_initial(
+    initial: Union[str, jnp.ndarray, InitialDistribution],
+    initial_duration: Any,
+) -> InitialDistribution:
+    if isinstance(initial, InitialDistribution):
+        try:
+            has_nonzero_duration = bool(jnp.any(jnp.asarray(initial_duration) != 0.0))
+        except Exception:
+            has_nonzero_duration = initial_duration != 0.0
+        if has_nonzero_duration:
+            raise ValueError(
+                "initial_duration is invalid when initial is an "
+                "InitialDistribution."
+            )
+        return initial
+    if isinstance(initial, str):
+        return InitialDistribution.at(initial, duration=initial_duration)
+    return InitialDistribution.per_individual(
+        states=initial,
+        duration=initial_duration,
+        initial_states=None,
+    )
+
+
+def _seed_point_mass(
+    mass: Any,
+    duration: Any,
+    batch_size: int,
+    duration_slots: int,
+    steps_per_unit: int,
+) -> jnp.ndarray:
+    mass_arr = _broadcast_batch(mass, batch_size)
+    duration_arr = _broadcast_batch(duration, batch_size)
+    indices = jnp.rint(duration_arr * steps_per_unit).astype(jnp.int32)
+    indices = jnp.clip(indices, 0, max(duration_slots - 1, 0))
+    return jax.nn.one_hot(indices, duration_slots, dtype=mass_arr.dtype) * (
+        mass_arr[:, None]
+    )
 
 
 def solve(
     model: Any,
-    initial: str,
+    initial: Union[str, jnp.ndarray, InitialDistribution],
     horizon: int,
     steps_per_unit: int,
+    initial_duration: Any = 0.0,
     callback: Union[None, str, Callable] = "collapse_point_no_duration",
+    record_every: int = 1,
     perturbation: float = 1e-12,
-    transpose_result: bool = True,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Compute transition probabilities from a given initial state.
-
-    The solver reduces the model to the subgraph reachable from
-    ``initial``, so only relevant states are computed. The initial
-    state is always at index 0 in the reduced system.
-
-    Parameters
-    ----------
-    model : Model
-        The multi-state model with intensity callables.
-    initial : str
-        The starting state name.
-    horizon : int
-        Number of time units to solve over.
-    steps_per_unit : int
-        Discretization resolution per time unit.
-    callback : None, str, or callable, optional
-        Probability callback. Default is ``'collapse_point_no_duration'``.
-    perturbation : float, optional
-        Grid perturbation for finite differences. Default is ``1e-12``.
-    transpose_result : bool, optional
-        Whether to transpose the time axis in the result. Default is True.
-    **kwargs
-        Covariate arrays, each of shape ``(batch, ...)``.
-
-    Returns
-    -------
-    dict
-        Result dictionary with:
-        - ``'probability'``: transition probabilities at each time step.
-        - ``'states'``: tuple of state names in the order they appear
-          in the probability arrays (initial state first).
-    """
-    # Reduce to reachable subgraph
-    reduced = model.reduce(initial)
-    intensity_matrix = reduced.solver_matrix
-    n_states = reduced.n_states
+    """Compute transition probabilities from a documented initial condition."""
+    reserved = {"initial", "initial_duration"}
+    overlap = reserved.intersection(kwargs)
+    if overlap:
+        names = ", ".join(sorted(overlap))
+        raise ValueError(f"Reserved covariate names are not allowed: {names}")
 
     solver_steps = steps_per_unit * horizon
-    grid = jnp.linspace(0, horizon, solver_steps + 1, endpoint=True)
-    grid = jnp.expand_dims(grid, 0)
-    step_size = 1 / steps_per_unit
+    if record_every <= 0 or solver_steps % record_every != 0:
+        raise ValueError(
+            "record_every must be a positive integer dividing "
+            "horizon * steps_per_unit."
+        )
 
+    initial_distribution = _canonicalize_initial(initial, initial_duration)
+    model_states = model.state_space.states
+    initial_distribution.validate_for_model(model_states)
+    canonical = initial_distribution.canonicalize(model_states)
+
+    reduced = model.reduce(canonical.states)
+    intensity_matrix = tuple(
+        tuple(row) for row in reduced.solver_matrix
+    )
+    grid = jnp.linspace(0, horizon, solver_steps + 1, endpoint=True)[None, :]
+    step_size = 1 / steps_per_unit
     prob_callback = resolve_callback(callback)
 
-    # Determine batch size from a reference callable
+    distribution_batch = canonical.batch_size
+    covariate_batch = _get_covariate_batch_size(kwargs)
+    if (
+        distribution_batch is not None
+        and covariate_batch is not None
+        and distribution_batch != covariate_batch
+    ):
+        raise ValueError(
+            "InitialDistribution batch size must match covariate batch size."
+        )
+
     reference_fn = _get_reference_function(intensity_matrix)
     if reference_fn is None:
         raise ValueError(
-            "The intensity matrix contains no callables. "
-            "Cannot determine batch size."
+            "The intensity matrix contains no callables. Cannot solve."
         )
-    dummy = reference_fn(0, grid, **kwargs)
-    batch_size = dummy.shape[0]
 
-    # Initial conditions: everyone starts in the initial state (index 0)
-    p_point_0 = jnp.zeros((batch_size, solver_steps))
-    p_0 = jnp.zeros((batch_size, n_states, solver_steps))
-    p_point_0 = p_point_0.at[..., 0].set(1)
+    reference_output = reference_fn(0.0, grid, **kwargs)
+    reference_batch = reference_output.shape[0]
+
+    batch_size = distribution_batch
+    if batch_size is None:
+        batch_size = covariate_batch
+    if batch_size is None:
+        batch_size = reference_batch
+    if reference_batch != batch_size:
+        raise ValueError("Intensity batch size must match solver batch size.")
+
+    declared_index = {
+        state: i for i, state in enumerate(canonical.states)
+    }
+    state_0 = []
+    for state_name in reduced.reachable_states:
+        density = jnp.zeros((batch_size, solver_steps), dtype=reference_output.dtype)
+        point_mass = None
+        if state_name in declared_index:
+            idx = declared_index[state_name]
+            point_mass = _seed_point_mass(
+                canonical.masses[idx],
+                canonical.durations[idx],
+                batch_size,
+                solver_steps,
+                steps_per_unit,
+            )
+        state_0.append(StateCarry(density=density, point_mass=point_mass))
 
     result = _heun_solver(
-        p_0,
-        p_point_0,
+        tuple(state_0),
         grid,
         step_size,
         intensity_matrix,
         kwargs,
         prob_callback,
         perturbation,
+        record_every,
     )
-
-    if transpose_result:
-        result["probability"] = jax.tree_util.tree_map(
-            _transpose_probability, result["probability"]
-        )
-
     result["states"] = reduced.reachable_states
-
     return result

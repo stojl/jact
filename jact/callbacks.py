@@ -1,95 +1,102 @@
-"""Probability callbacks for extracting results from the solver state.
+"""Probability callbacks for extracting results from the solver state."""
 
-Callbacks control what is recorded at each time step during the solve.
-Each callback receives the raw solver state and returns an arbitrary
-PyTree that gets stacked across time steps.
+from __future__ import annotations
 
-The solver tracks two objects internally:
-
-- ``p``: the absolutely continuous part of the duration density,
-  shape ``(batch, n_states, D)``.
-- ``p_point``: the point mass at duration zero for the initial state,
-  shape ``(batch, D)``.
-
-Users who need full access to these can use the ``'default'`` callback.
-For most use cases, one of the built-in callbacks that marginalizes
-over duration or collapses the point mass is more convenient.
-"""
-
-from typing import Callable, Union
+from typing import Any, Callable, NamedTuple, Union
 
 import jax
 import jax.numpy as jnp
 
-# -------------------------------------------------------------------- #
-# Built-in callbacks                                                    #
-# -------------------------------------------------------------------- #
+
+class StateCarry(NamedTuple):
+    """Per-state solver carry."""
+
+    density: jnp.ndarray
+    point_mass: jnp.ndarray | None
 
 
 @jax.jit
-def none_callback(p: jnp.ndarray, p_point: jnp.ndarray):
-    """Return nothing. Use when only the final state matters."""
+def none_callback(state: tuple[StateCarry, ...]):
+    """Return nothing. Use when only side effects of the solve matter."""
     return None
 
 
 @jax.jit
-def default(p: jnp.ndarray, p_point: jnp.ndarray):
-    """Return the full density and point mass (no reduction)."""
-    return p, p_point
+def default(state: tuple[StateCarry, ...]):
+    """Return the full pytree state unchanged."""
+    return state
 
 
 @jax.jit
-def no_duration(p: jnp.ndarray, p_point: jnp.ndarray):
-    """Marginalize over duration, keeping density and point mass separate."""
-    return p[..., -1], p_point[..., -1]
+def no_duration(state: tuple[StateCarry, ...]):
+    """Marginalize over duration, preserving the per-state pytree."""
+    return tuple(
+        StateCarry(
+            density=jnp.sum(carry.density, axis=-1),
+            point_mass=(
+                None
+                if carry.point_mass is None
+                else jnp.sum(carry.point_mass, axis=-1)
+            ),
+        )
+        for carry in state
+    )
 
 
 @jax.jit
-def collapse_point(p: jnp.ndarray, p_point: jnp.ndarray):
-    """Collapse point mass into the first state's density."""
-    p_with_point = p[..., 0, :] + p_point
-    p = p.at[..., 0, :].set(p_with_point)
-    return p
+def collapse_point(state: tuple[StateCarry, ...]):
+    """Collapse point mass into density for each state."""
+    return tuple(
+        carry.density
+        if carry.point_mass is None
+        else carry.density + carry.point_mass
+        for carry in state
+    )
 
 
 @jax.jit
-def collapse_point_no_duration(p: jnp.ndarray, p_point: jnp.ndarray):
-    """Collapse point mass and marginalize over duration.
-
-    This is the most common callback for actuarial applications:
-    returns transition probabilities as shape ``(batch, n_states)``.
-    """
-    p = collapse_point(p, p_point)
-    return p[..., -1]
-
-
-@jax.jit
-def point_only(p: jnp.ndarray, p_point: jnp.ndarray):
-    """Return only the point mass."""
-    return p_point
+def collapse_point_no_duration(state: tuple[StateCarry, ...]):
+    """Collapse point mass and marginalize over duration."""
+    return jnp.stack(
+        tuple(
+            jnp.sum(carry.density, axis=-1)
+            if carry.point_mass is None
+            else jnp.sum(carry.density + carry.point_mass, axis=-1)
+            for carry in state
+        ),
+        axis=-1,
+    )
 
 
 @jax.jit
-def point_only_no_duration(p: jnp.ndarray, p_point: jnp.ndarray):
-    """Return only the point mass, marginalized over duration."""
-    return p_point[..., -1]
+def point_only(state: tuple[StateCarry, ...]):
+    """Return only the point-mass component per state."""
+    return tuple(carry.point_mass for carry in state)
 
 
 @jax.jit
-def no_point(p: jnp.ndarray, p_point: jnp.ndarray):
-    """Return only the absolutely continuous density."""
-    return p
+def point_only_no_duration(state: tuple[StateCarry, ...]):
+    """Return only the duration-marginal point mass per state."""
+    return tuple(
+        None if carry.point_mass is None else jnp.sum(carry.point_mass, axis=-1)
+        for carry in state
+    )
 
 
 @jax.jit
-def no_point_no_duration(p: jnp.ndarray, p_point: jnp.ndarray):
-    """Return the density marginalized over duration (no point mass)."""
-    return p[..., -1]
+def no_point(state: tuple[StateCarry, ...]):
+    """Return only the absolutely continuous density per state."""
+    return tuple(carry.density for carry in state)
 
 
-# -------------------------------------------------------------------- #
-# Registry                                                              #
-# -------------------------------------------------------------------- #
+@jax.jit
+def no_point_no_duration(state: tuple[StateCarry, ...]):
+    """Return the duration-marginal density, restacked across states."""
+    return jnp.stack(
+        tuple(jnp.sum(carry.density, axis=-1) for carry in state),
+        axis=-1,
+    )
+
 
 _CALLBACKS = {
     "none": none_callback,
@@ -105,21 +112,9 @@ _CALLBACKS = {
 
 
 def resolve_callback(
-    callback: Union[None, str, Callable],
-) -> Callable:
-    """Resolve a callback specification to a callable.
-
-    Parameters
-    ----------
-    callback : None, str, or callable
-        If None, uses the ``'none'`` callback.
-        If a string, looks up a built-in callback by name.
-        If a callable, returns it directly.
-
-    Returns
-    -------
-    callable
-    """
+    callback: Union[None, str, Callable[[tuple[StateCarry, ...]], Any]],
+) -> Callable[[tuple[StateCarry, ...]], Any]:
+    """Resolve a callback specification to a callable."""
     if callback is None:
         return none_callback
     if callable(callback):
@@ -133,6 +128,6 @@ def resolve_callback(
             )
         return _CALLBACKS[callback]
     raise TypeError(
-        f"callback must be None, a string, or a callable, "
+        "callback must be None, a string, or a callable, "
         f"got {type(callback)}"
     )

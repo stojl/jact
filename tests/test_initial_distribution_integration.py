@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
+import jax.numpy as jnp
 import pytest
-
-jax = pytest.importorskip("jax")
-jnp = pytest.importorskip("jax.numpy")
 
 import jact
 
@@ -81,3 +79,113 @@ class TestModelReduction:
         assert reduced.reachable_states == ("healthy", "disabled", "dead")
         assert reduced.n_states == 3
 
+
+class TestInitialDistributionSolveIntegration:
+    def test_at_flows_through_solver_with_initial_duration(self, illness_death):
+        _, model = illness_death
+
+        result = model.solve(
+            initial=jact.InitialDistribution.at(
+                "healthy", duration=jnp.array([0.0, 1.0])
+            ),
+            horizon=1,
+            steps_per_unit=4,
+            callback="point_only",
+            age=jnp.arange(2, dtype=jnp.float32),
+        )
+
+        healthy_point, disabled_point, dead_point = result["probability"]
+
+        assert result["states"] == ("healthy", "disabled", "dead")
+        assert healthy_point.shape == (5, 2, 4)
+        assert disabled_point is None
+        assert dead_point is None
+        assert jnp.argmax(healthy_point[0], axis=-1).tolist() == [0, 3]
+
+    def test_per_individual_none_initial_states_uses_full_model_for_solver(
+        self, illness_death
+    ):
+        state_space, model = illness_death
+        dist = jact.InitialDistribution.per_individual(
+            states=jnp.array(
+                [
+                    state_space.state_index("healthy"),
+                    state_space.state_index("disabled"),
+                ],
+                dtype=jnp.int32,
+            ),
+            duration=jnp.array([0.0, 0.0]),
+            initial_states=None,
+        )
+
+        result = model.solve(
+            initial=dist,
+            horizon=1,
+            steps_per_unit=4,
+            callback="point_only",
+            age=jnp.arange(2, dtype=jnp.float32),
+        )
+
+        healthy_point, disabled_point, dead_point = result["probability"]
+
+        assert result["states"] == state_space.states
+        assert healthy_point.shape == (5, 2, 4)
+        assert disabled_point.shape == (5, 2, 4)
+        assert dead_point.shape == (5, 2, 4)
+        assert jnp.argmax(healthy_point[0], axis=-1).tolist() == [0, 0]
+        assert jnp.argmax(disabled_point[0], axis=-1).tolist() == [0, 0]
+        assert jnp.allclose(jnp.sum(dead_point[0], axis=-1), jnp.zeros((2,)))
+
+    def test_component_mixture_seeds_only_declared_states(self, illness_death):
+        _, model = illness_death
+        dist = jact.InitialDistribution(
+            components={
+                "healthy": {
+                    "mass": jnp.array([0.25, 0.75]),
+                    "duration": jnp.array([0.0, 0.0]),
+                },
+                "disabled": {
+                    "mass": jnp.array([0.75, 0.25]),
+                    "duration": jnp.array([1.0, 0.0]),
+                },
+            }
+        )
+
+        result = model.solve(
+            initial=dist,
+            horizon=1,
+            steps_per_unit=4,
+            callback="point_only",
+            age=jnp.arange(2, dtype=jnp.float32),
+        )
+
+        healthy_point, disabled_point, dead_point = result["probability"]
+
+        assert result["states"] == ("healthy", "disabled", "dead")
+        assert healthy_point.shape == (5, 2, 4)
+        assert disabled_point.shape == (5, 2, 4)
+        assert dead_point is None
+        assert jnp.allclose(jnp.sum(healthy_point[0], axis=-1), jnp.array([0.25, 0.75]))
+        assert jnp.allclose(jnp.sum(disabled_point[0], axis=-1), jnp.array([0.75, 0.25]))
+        assert jnp.argmax(disabled_point[0], axis=-1).tolist() == [3, 0]
+
+    def test_initial_distribution_batch_mismatch_fails_at_solver_entry(
+        self, illness_death
+    ):
+        _, model = illness_death
+        dist = jact.InitialDistribution(
+            components={
+                "healthy": {
+                    "mass": jnp.ones((3,)),
+                    "duration": jnp.zeros((3,)),
+                }
+            }
+        )
+
+        with pytest.raises(ValueError, match="batch size"):
+            model.solve(
+                initial=dist,
+                horizon=1,
+                steps_per_unit=4,
+                age=jnp.arange(2, dtype=jnp.float32),
+            )
