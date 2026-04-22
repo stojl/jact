@@ -17,13 +17,11 @@ static-vs-traced separation via pytree structure equality.
 
 from __future__ import annotations
 
+import jax
+import jax.numpy as jnp
 import pytest
 
-jax = pytest.importorskip("jax")
-jnp = pytest.importorskip("jax.numpy")
-
 import jact
-
 
 BATCH = 8
 
@@ -126,7 +124,10 @@ class TestStaticVsTracedSeparation:
         not change the pytree structure (⇒ no downstream retrace)."""
         a = jact.InitialDistribution(
             components={
-                "healthy": {"mass": jnp.ones((BATCH,)), "duration": jnp.zeros((BATCH,))},
+                "healthy": {
+                    "mass": jnp.ones((BATCH,)),
+                    "duration": jnp.zeros((BATCH,)),
+                },
             },
             normalise=True,
         )
@@ -146,7 +147,10 @@ class TestStaticVsTracedSeparation:
         pytree structure so a downstream jitted consumer retraces."""
         a = jact.InitialDistribution(
             components={
-                "healthy": {"mass": jnp.ones((BATCH,)), "duration": jnp.zeros((BATCH,))},
+                "healthy": {
+                    "mass": jnp.ones((BATCH,)),
+                    "duration": jnp.zeros((BATCH,)),
+                },
             },
             normalise=True,
         )
@@ -171,7 +175,10 @@ class TestStaticVsTracedSeparation:
         is driven by keys, not by values."""
         dist_zero = jact.InitialDistribution(
             components={
-                "healthy": {"mass": jnp.ones((BATCH,)), "duration": jnp.zeros((BATCH,))},
+                "healthy": {
+                    "mass": jnp.ones((BATCH,)),
+                    "duration": jnp.zeros((BATCH,)),
+                },
                 "disabled": {
                     "mass": jnp.zeros((BATCH,)),
                     "duration": jnp.zeros((BATCH,)),

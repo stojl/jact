@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-jax = pytest.importorskip("jax")
-
 import jact
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
