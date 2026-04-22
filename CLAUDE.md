@@ -99,6 +99,7 @@ Changing the *set* of initial states re-traces; changing only `mass` / `duration
 ## Conventions
 
 - `docs/api_spec.md` is the authoritative API contract — tests reference it explicitly ("per docs/api_spec.md"). Keep it in sync when changing public surface.
+- `docs/api_spec_short.md` is a condensed mirror of the spec — same normative content, stripped of examples and rationale. Prefer it for fast review in a fresh session; fall back to `api_spec.md` for worked examples and design rationale.
 - `docs/original_prototype/prototype_8.py` is the reference numerics the solver was ported from; consult it when debugging solver behavior.
 - Python >= 3.10 is required (uses `X | Y` union syntax and PEP 604 features in places).
 - **Pick `callback` and `record_every` before scaling `batch`.** The `default` callback retains `(time, batch, D)` per state and blows up memory fast; `collapse_point_no_duration` at `(T_out, batch, J)` is the canonical actuarial output and stays compact. See `docs/api_spec.md` §Memory budget for worked examples.
