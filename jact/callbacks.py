@@ -8,11 +8,29 @@ import jax
 import jax.numpy as jnp
 
 
+@jax.tree_util.register_pytree_node_class
+class PointMass:
+    """Per-individual point mass carried along a characteristic."""
+
+    __slots__ = ("value", "d_0")
+
+    def __init__(self, value: jnp.ndarray, d_0: jnp.ndarray):
+        self.value = value
+        self.d_0 = d_0
+
+    def tree_flatten(self):
+        return (self.value, self.d_0), None
+
+    @classmethod
+    def tree_unflatten(cls, _, children):
+        return cls(*children)
+
+
 class StateCarry(NamedTuple):
     """Per-state solver carry."""
 
     density: jnp.ndarray
-    point_mass: jnp.ndarray | None
+    point_mass: PointMass | None
 
 
 @jax.jit
@@ -33,11 +51,7 @@ def no_duration(state: tuple[StateCarry, ...]):
     return tuple(
         StateCarry(
             density=jnp.sum(carry.density, axis=-1),
-            point_mass=(
-                None
-                if carry.point_mass is None
-                else jnp.sum(carry.point_mass, axis=-1)
-            ),
+            point_mass=carry.point_mass,
         )
         for carry in state
     )
@@ -49,7 +63,7 @@ def collapse_point(state: tuple[StateCarry, ...]):
     return tuple(
         carry.density
         if carry.point_mass is None
-        else carry.density + carry.point_mass
+        else carry.density.at[..., 0].add(carry.point_mass.value)
         for carry in state
     )
 
@@ -61,7 +75,7 @@ def collapse_point_no_duration(state: tuple[StateCarry, ...]):
         tuple(
             jnp.sum(carry.density, axis=-1)
             if carry.point_mass is None
-            else jnp.sum(carry.density + carry.point_mass, axis=-1)
+            else jnp.sum(carry.density, axis=-1) + carry.point_mass.value
             for carry in state
         ),
         axis=-1,
@@ -78,7 +92,7 @@ def point_only(state: tuple[StateCarry, ...]):
 def point_only_no_duration(state: tuple[StateCarry, ...]):
     """Return only the duration-marginal point mass per state."""
     return tuple(
-        None if carry.point_mass is None else jnp.sum(carry.point_mass, axis=-1)
+        None if carry.point_mass is None else carry.point_mass.value
         for carry in state
     )
 

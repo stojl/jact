@@ -214,13 +214,18 @@ Heun 2nd-order predictor-corrector inside `jax.lax.scan`, vmapped over the batch
 Per reachable state:
 
 ```python
+@jax.tree_util.register_pytree_node_class
+class PointMass:
+    value: jnp.ndarray              # (batch,)
+    d_0: jnp.ndarray                # (batch,)
+
 class StateCarry(NamedTuple):
     density: jnp.ndarray              # (batch, D)
-    point_mass: jnp.ndarray | None    # (batch, D) or None
+    point_mass: PointMass | None
 ```
 
 - `density[b, k]`: density at batch `b`, duration slot `k` (slot 0 = "entered just now", slot `k` = "entered `k` solver steps ago").
-- `point_mass`: `None` for states not declared in `InitialDistribution`; `(batch, D)` for every declared state.
+- `point_mass`: `None` for states not declared in `InitialDistribution`; `PointMass(value=(batch,), d_0=(batch,))` for every declared state.
 
 Full solver state is `tuple[StateCarry, ...]` in `reachable_states` order.
 
@@ -268,7 +273,7 @@ v1 seeds only the point-mass component; an absolutely continuous starting densit
 
 1. **Predictor** — evaluate intensities at `t` (nudged by `±perturbation`); compute per-state derivatives (outflows from `density` / `point_mass`, inflows to `density`); Euler step.
 2. **Corrector** — evaluate at `t + step_size`; recompute derivatives; average with predictor.
-3. **Duration shift** — slot `k → k+1`; slot 0 of `density` receives fresh inflow; slot 0 of `point_mass` zeroed; mass at final slot truncated.
+3. **Duration shift** — slot `k → k+1` for `density`; slot 0 of `density` receives fresh inflow. `point_mass` has no duration axis to shift; it retains `d_0` and decays only through hazard outflow.
 
 ### Numerical order
 
@@ -280,7 +285,7 @@ v1 seeds only the point-mass component; an absolutely continuous starting densit
 |---|---|
 | Matrix sparsity pattern (positions of `None` cells) | Covariate arrays (`**kwargs`) |
 | Callback function | Fitted parameters captured in closures |
-| Presence/absence of `point_mass` per state | `InitialDistribution` mass and duration arrays |
+| Presence/absence of `point_mass` per state | `PointMass.value` and `PointMass.d_0` arrays from `InitialDistribution` |
 | Set of initial states (declared on the distribution) | |
 | `step_size`, `record_every`, `perturbation` | |
 
@@ -308,12 +313,12 @@ def callback(state: tuple[StateCarry, ...]) -> PyTree: ...
 
 | Name | Description | Per-step output |
 |---|---|---|
-| `"default"` | Full pytree, no reduction | `tuple[StateCarry, ...]` — each leaf `(batch, D)` (or `None`) |
-| `"no_duration"` | Marginalise over duration, keep pytree | Per state: `(density[..., -1], point_mass[..., -1] or None)` — each `(batch,)` |
+| `"default"` | Full pytree, no reduction | `tuple[StateCarry, ...]` — `density: (batch, D)`, `point_mass: PointMass(value=(batch,), d_0=(batch,))` or `None` |
+| `"no_duration"` | Marginalise over duration, keep pytree | Per state: `density = sum over duration`, `point_mass = PointMass(value=(batch,), d_0=(batch,))` or `None` |
 | `"collapse_point"` | Fold `point_mass` into `density[..., 0]`; drop `point_mass` | Tuple of per-state `density` — each `(batch, D)` |
 | `"collapse_point_no_duration"` | Collapse then marginalise; re-stack | Single array `(batch, J)` |
-| `"point_only"` | Per-state `point_mass` (or `None`) | Tuple per state — each `(batch, D)` or `None` |
-| `"point_only_no_duration"` | Per-state `point_mass[..., -1]` (or `None`) | Tuple per state — each `(batch,)` or `None` |
+| `"point_only"` | Per-state `point_mass` (or `None`) | Tuple per state — each `PointMass(value=(batch,), d_0=(batch,))` or `None` |
+| `"point_only_no_duration"` | Per-state point-mass value (or `None`) | Tuple per state — each `(batch,)` or `None` |
 | `"no_point"` | Per-state `density` | Tuple per state — each `(batch, D)` |
 | `"no_point_no_duration"` | Marginalise density, re-stack | Single array `(batch, J)` |
 | `"none"` | Record nothing | `None` |

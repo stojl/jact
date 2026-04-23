@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import Any, Callable, Dict, Optional, Sequence, Union
+from typing import Any, Callable, Dict, NamedTuple, Optional, Sequence, Union
 
 import jax
 import jax.numpy as jnp
 
-from .callbacks import StateCarry, resolve_callback
+from .callbacks import PointMass, StateCarry, resolve_callback
 from .initial_distribution import InitialDistribution
 
 
 def _zero_batch_like(state: StateCarry) -> jnp.ndarray:
     return jnp.zeros(state.density.shape[:-1], dtype=state.density.dtype)
+
+
+class _StateDelta(NamedTuple):
+    density: jnp.ndarray
+    point_mass: jnp.ndarray | None
 
 
 def _update_density(
@@ -41,38 +46,78 @@ def _update_density(
 
 
 def _update_point_mass(
-    point_mass: jnp.ndarray | None,
-    delta: jnp.ndarray | None,
+    point_mass: PointMass | None,
+    delta_value: jnp.ndarray | None,
     step_size: float,
-) -> jnp.ndarray | None:
-    if point_mass is None or delta is None:
+) -> PointMass | None:
+    if point_mass is None or delta_value is None:
         return None
-    if point_mass.shape[-1] == 1:
-        return point_mass.at[..., 0].set(
-            point_mass[..., 0] + step_size * delta[..., 0]
+    return PointMass(
+        value=point_mass.value + step_size * delta_value,
+        d_0=point_mass.d_0,
+    )
+
+
+def _evaluate_intensity_at_point(
+    fn: Callable[..., jnp.ndarray],
+    t: jnp.ndarray,
+    d_per_individual: jnp.ndarray,
+    intensity_kwargs: Dict[str, jnp.ndarray],
+) -> jnp.ndarray:
+    """Evaluate a grid-style intensity callable at per-individual durations."""
+    names = tuple(intensity_kwargs.keys())
+    values = tuple(intensity_kwargs[name] for name in names)
+
+    def eval_one(d_i, *covariates):
+        kwargs = {
+            name: jnp.expand_dims(value, axis=0)
+            for name, value in zip(names, covariates)
+        }
+        return jnp.squeeze(fn(t, d_i[None, None], **kwargs), axis=(0, 1))
+
+    return jax.vmap(eval_one, in_axes=(0,) + (0,) * len(values))(
+        d_per_individual,
+        *values,
+    )
+
+
+def _evaluate_point_intensities(
+    state: tuple[StateCarry, ...],
+    intensity: Sequence[Sequence[Optional[Callable[..., jnp.ndarray]]]],
+    t: jnp.ndarray,
+    intensity_kwargs: Dict[str, jnp.ndarray],
+):
+    """Evaluate point-mass intensities only for states that carry one."""
+    point_matrix = []
+    for carry_i, row in zip(state, intensity):
+        if carry_i.point_mass is None:
+            point_matrix.append(tuple(None for _ in row))
+            continue
+
+        d_per_individual = carry_i.point_mass.d_0 + t
+        point_matrix.append(
+            tuple(
+                None
+                if fn is None
+                else _evaluate_intensity_at_point(
+                    fn, t, d_per_individual, intensity_kwargs
+                )
+                for fn in row
+            )
         )
 
-    point_mass_next = point_mass.at[..., 1:-1].set(
-        point_mass[..., :-2] + step_size * delta[..., :-2]
-    )
-    point_mass_next = point_mass_next.at[..., -1].set(
-        point_mass[..., -2]
-        + step_size * delta[..., -2]
-        + point_mass[..., -1]
-        + step_size * delta[..., -1]
-    )
-    point_mass_next = point_mass_next.at[..., 0].set(0.0)
-    return point_mass_next
+    return tuple(point_matrix)
 
 
 def _compute_derivative(
     state: tuple[StateCarry, ...],
     mu_plus_matrix,
     mu_minus_matrix,
+    mu_plus_at_point,
 ):
     """Compute per-state inflows and derivatives."""
-    outflow_plus = [jnp.zeros_like(carry.density) for carry in state]
     outflow_avg = [jnp.zeros_like(carry.density) for carry in state]
+    outflow_plus_point = [_zero_batch_like(carry) for carry in state]
     next_inflow = [_zero_batch_like(carry) for carry in state]
 
     for i, carry_i in enumerate(state):
@@ -82,10 +127,8 @@ def _compute_derivative(
                 continue
 
             mu_minus = mu_minus_matrix[i][j]
-            mu_plus_slice = mu_plus[..., :-1]
             mu_avg = 0.5 * (mu_plus[..., :-1] + mu_minus[..., 1:])
 
-            outflow_plus[i] = outflow_plus[i] + mu_plus_slice
             outflow_avg[i] = outflow_avg[i] + mu_avg
             next_inflow[j] = next_inflow[j] + jnp.sum(
                 mu_avg * carry_i.density,
@@ -93,22 +136,23 @@ def _compute_derivative(
             )
 
             if carry_i.point_mass is not None:
-                next_inflow[j] = next_inflow[j] + jnp.sum(
-                    mu_plus_slice * carry_i.point_mass,
-                    axis=-1,
+                mu_at_point = mu_plus_at_point[i][j]
+                outflow_plus_point[i] = outflow_plus_point[i] + mu_at_point
+                next_inflow[j] = next_inflow[j] + (
+                    mu_at_point * carry_i.point_mass.value
                 )
 
-    delta_state = []
-    for carry, outflow_plus_i, outflow_avg_i in zip(
+    delta_state: list[_StateDelta] = []
+    for carry, outflow_plus_point_i, outflow_avg_i in zip(
         state,
-        outflow_plus,
+        outflow_plus_point,
         outflow_avg,
     ):
         delta_density = -carry.density * outflow_avg_i
         delta_point_mass = None
         if carry.point_mass is not None:
-            delta_point_mass = -carry.point_mass * outflow_plus_i
-        delta_state.append(StateCarry(delta_density, delta_point_mass))
+            delta_point_mass = -carry.point_mass.value * outflow_plus_point_i
+        delta_state.append(_StateDelta(delta_density, delta_point_mass))
 
     return tuple(next_inflow), tuple(delta_state)
 
@@ -138,8 +182,19 @@ def _heun_step(
     mu_minus = _evaluate_intensities(
         intensity, t_left, grid_minus, **intensity_kwargs
     )
+    mu_plus_at_point = _evaluate_point_intensities(
+        state,
+        intensity,
+        t_left,
+        intensity_kwargs,
+    )
 
-    next_inflow, delta_state = _compute_derivative(state, mu_plus, mu_minus)
+    next_inflow, delta_state = _compute_derivative(
+        state,
+        mu_plus,
+        mu_minus,
+        mu_plus_at_point,
+    )
 
     predictor = tuple(
         StateCarry(
@@ -165,9 +220,18 @@ def _heun_step(
     mu_minus_2 = _evaluate_intensities(
         intensity, t_right, grid_minus, **intensity_kwargs
     )
+    mu_plus_at_point_2 = _evaluate_point_intensities(
+        predictor,
+        intensity,
+        t_right,
+        intensity_kwargs,
+    )
 
     next_inflow_2, delta_state_2 = _compute_derivative(
-        predictor, mu_plus_2, mu_minus_2
+        predictor,
+        mu_plus_2,
+        mu_minus_2,
+        mu_plus_at_point_2,
     )
 
     corrected_state = []
@@ -187,14 +251,10 @@ def _heun_step(
             )
         )
 
-        corrected_point_mass = delta_1.point_mass
-        if corrected_point_mass is not None and delta_2.point_mass is not None:
-            corrected_point_mass = corrected_point_mass.at[..., :-1].set(
-                0.5
-                * (
-                    delta_2.point_mass[..., 1:]
-                    + corrected_point_mass[..., :-1]
-                )
+        corrected_point_mass = None
+        if delta_1.point_mass is not None and delta_2.point_mass is not None:
+            corrected_point_mass = 0.5 * (
+                delta_1.point_mass + delta_2.point_mass
             )
 
         corrected_state.append(
@@ -341,15 +401,10 @@ def _seed_point_mass(
     mass: Any,
     duration: Any,
     batch_size: int,
-    duration_slots: int,
-    steps_per_unit: int,
-) -> jnp.ndarray:
-    mass_arr = _broadcast_batch(mass, batch_size)
-    duration_arr = _broadcast_batch(duration, batch_size)
-    indices = jnp.rint(duration_arr * steps_per_unit).astype(jnp.int32)
-    indices = jnp.clip(indices, 0, max(duration_slots - 1, 0))
-    return jax.nn.one_hot(indices, duration_slots, dtype=mass_arr.dtype) * (
-        mass_arr[:, None]
+) -> PointMass:
+    return PointMass(
+        value=_broadcast_batch(mass, batch_size),
+        d_0=_broadcast_batch(duration, batch_size),
     )
 
 
@@ -432,8 +487,6 @@ def solve(
                 canonical.masses[idx],
                 canonical.durations[idx],
                 batch_size,
-                solver_steps,
-                steps_per_unit,
             )
         state_0.append(StateCarry(density=density, point_mass=point_mass))
 

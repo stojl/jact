@@ -8,7 +8,6 @@ from typing import Any, Iterable, Mapping, Sequence
 import jax
 import jax.numpy as jnp
 
-
 ArrayLike = Any
 
 

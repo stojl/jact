@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import pytest
 
 import jact
+from jact.callbacks import PointMass
 
 
 def _constant_intensity(t, d, **kwargs):
@@ -97,10 +98,12 @@ class TestInitialDistributionSolveIntegration:
         healthy_point, disabled_point, dead_point = result["probability"]
 
         assert result["states"] == ("healthy", "disabled", "dead")
-        assert healthy_point.shape == (5, 2, 4)
+        assert isinstance(healthy_point, PointMass)
+        assert healthy_point.value.shape == (5, 2)
         assert disabled_point is None
         assert dead_point is None
-        assert jnp.argmax(healthy_point[0], axis=-1).tolist() == [0, 3]
+        assert jnp.allclose(healthy_point.value[0], jnp.ones((2,)))
+        assert jnp.allclose(healthy_point.d_0[0], jnp.array([0.0, 1.0]))
 
     def test_per_individual_none_initial_states_uses_full_model_for_solver(
         self, illness_death
@@ -129,12 +132,15 @@ class TestInitialDistributionSolveIntegration:
         healthy_point, disabled_point, dead_point = result["probability"]
 
         assert result["states"] == state_space.states
-        assert healthy_point.shape == (5, 2, 4)
-        assert disabled_point.shape == (5, 2, 4)
-        assert dead_point.shape == (5, 2, 4)
-        assert jnp.argmax(healthy_point[0], axis=-1).tolist() == [0, 0]
-        assert jnp.argmax(disabled_point[0], axis=-1).tolist() == [0, 0]
-        assert jnp.allclose(jnp.sum(dead_point[0], axis=-1), jnp.zeros((2,)))
+        assert isinstance(healthy_point, PointMass)
+        assert isinstance(disabled_point, PointMass)
+        assert isinstance(dead_point, PointMass)
+        assert healthy_point.value.shape == (5, 2)
+        assert disabled_point.value.shape == (5, 2)
+        assert dead_point.value.shape == (5, 2)
+        assert jnp.allclose(healthy_point.value[0], jnp.array([1.0, 0.0]))
+        assert jnp.allclose(disabled_point.value[0], jnp.array([0.0, 1.0]))
+        assert jnp.allclose(dead_point.value[0], jnp.zeros((2,)))
 
     def test_component_mixture_seeds_only_declared_states(self, illness_death):
         _, model = illness_death
@@ -162,12 +168,14 @@ class TestInitialDistributionSolveIntegration:
         healthy_point, disabled_point, dead_point = result["probability"]
 
         assert result["states"] == ("healthy", "disabled", "dead")
-        assert healthy_point.shape == (5, 2, 4)
-        assert disabled_point.shape == (5, 2, 4)
+        assert isinstance(healthy_point, PointMass)
+        assert isinstance(disabled_point, PointMass)
+        assert healthy_point.value.shape == (5, 2)
+        assert disabled_point.value.shape == (5, 2)
         assert dead_point is None
-        assert jnp.allclose(jnp.sum(healthy_point[0], axis=-1), jnp.array([0.25, 0.75]))
-        assert jnp.allclose(jnp.sum(disabled_point[0], axis=-1), jnp.array([0.75, 0.25]))
-        assert jnp.argmax(disabled_point[0], axis=-1).tolist() == [3, 0]
+        assert jnp.allclose(healthy_point.value[0], jnp.array([0.25, 0.75]))
+        assert jnp.allclose(disabled_point.value[0], jnp.array([0.75, 0.25]))
+        assert jnp.allclose(disabled_point.d_0[0], jnp.array([1.0, 0.0]))
 
     def test_initial_distribution_batch_mismatch_fails_at_solver_entry(
         self, illness_death
