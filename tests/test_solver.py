@@ -2,8 +2,18 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+sys.path.insert(
+    0,
+    str(Path(__file__).resolve().parents[1] / "docs" / "original_prototype"),
+)
+
+import jax
 import jax.numpy as jnp
 import pytest
+import prototype_8
 
 import jact
 from jact.callbacks import PointMass, StateCarry
@@ -24,6 +34,38 @@ def _constant_intensity(rate: float):
 def _duration_intensity(t, d, **kwargs):
     batch = kwargs["age"].shape[0]
     return jnp.broadcast_to(d, (batch, d.shape[-1]))
+
+
+def _time_duration_intensity(
+    base: float,
+    time_coef: float,
+    duration_coef: float,
+):
+    def fn(t, d, **kwargs):
+        batch = kwargs["age"].shape[0]
+        level = base + time_coef * t + duration_coef * d
+        return jnp.broadcast_to(level, (batch, d.shape[-1]))
+
+    return fn
+
+
+def _time_duration_covariate_intensity(
+    base: float,
+    time_coef: float,
+    duration_coef: float,
+    age_coef: float,
+):
+    def fn(t, d, **kwargs):
+        age = kwargs["age"][:, None]
+        return base + time_coef * t + duration_coef * d + age_coef * age
+
+    return fn
+
+
+@jax.jit
+def _prototype_collapse_point_no_duration(p, p_point):
+    p = p.at[..., 0, :].add(p_point)
+    return jnp.sum(p, axis=-1)
 
 
 def _illness_death_closed_form_from_healthy(times: jnp.ndarray) -> jnp.ndarray:
@@ -89,6 +131,56 @@ def duration_to_death_model():
     )
 
 
+@pytest.fixture
+def mixed_time_duration_model():
+    state_space = jact.StateSpace(
+        states=["healthy", "disabled", "dead"],
+        transitions=[
+            ("healthy", "disabled"),
+            ("healthy", "dead"),
+            ("disabled", "dead"),
+        ],
+    )
+    return state_space.build(
+        transitions={
+            ("healthy", "disabled"): _time_duration_intensity(
+                0.03, 0.01, 0.02
+            ),
+            ("healthy", "dead"): _time_duration_intensity(
+                0.02, 0.005, 0.01
+            ),
+            ("disabled", "dead"): _time_duration_intensity(
+                0.08, 0.004, 0.015
+            ),
+        }
+    )
+
+
+@pytest.fixture
+def mixed_time_duration_covariate_model():
+    state_space = jact.StateSpace(
+        states=["healthy", "disabled", "dead"],
+        transitions=[
+            ("healthy", "disabled"),
+            ("healthy", "dead"),
+            ("disabled", "dead"),
+        ],
+    )
+    return state_space.build(
+        transitions={
+            ("healthy", "disabled"): _time_duration_covariate_intensity(
+                0.01, 0.008, 0.01, 0.0004
+            ),
+            ("healthy", "dead"): _time_duration_covariate_intensity(
+                0.005, 0.004, 0.006, 0.0002
+            ),
+            ("disabled", "dead"): _time_duration_covariate_intensity(
+                0.03, 0.006, 0.012, 0.0003
+            ),
+        }
+    )
+
+
 class TestSolverAgainstClosedForm:
     def test_solve_matches_closed_form_illness_death_from_healthy(
         self, illness_death_model
@@ -123,6 +215,161 @@ class TestSolverAgainstClosedForm:
             rtol=0.0,
         )
         assert jnp.allclose(probability, expected, atol=5e-3, rtol=0.0)
+
+
+class TestSolverAgainstOriginalPrototype:
+    def test_single_state_start_matches_prototype(self, illness_death_model):
+        horizon = 3
+        steps_per_unit = 4
+        batch_size = 4
+        ages = jnp.arange(batch_size, dtype=jnp.float32)
+
+        current = illness_death_model.solve(
+            initial="healthy",
+            horizon=horizon,
+            steps_per_unit=steps_per_unit,
+            callback="collapse_point_no_duration",
+            age=ages,
+        )
+
+        prototype = prototype_8.semimarkov_solver(
+            units=horizon,
+            discretization_unit=steps_per_unit,
+            intensity=(
+                (None, _constant_intensity(LAMBDA_HD), _constant_intensity(MU_HM)),
+                (None, None, _constant_intensity(NU_DM)),
+                (None, None, None),
+            ),
+            intensity_kwargs={"age": ages},
+            prob_callback=_prototype_collapse_point_no_duration,
+            transpose_result=True,
+        )
+
+        prototype_probability = jnp.swapaxes(
+            prototype["probability"], 0, 1
+        )
+
+        assert current["states"] == ("healthy", "disabled", "dead")
+        assert prototype_probability.shape == current["probability"].shape
+        assert jnp.allclose(
+            current["probability"][:-1],
+            prototype_probability[:-1],
+            atol=1e-6,
+            rtol=0.0,
+        )
+
+    def test_mixed_time_duration_intensity_matches_prototype(
+        self, mixed_time_duration_model
+    ):
+        horizon = 2
+        steps_per_unit = 6
+        ages = jnp.array([40.0, 55.0], dtype=jnp.float32)
+
+        current = mixed_time_duration_model.solve(
+            initial="healthy",
+            horizon=horizon,
+            steps_per_unit=steps_per_unit,
+            callback="collapse_point_no_duration",
+            age=ages,
+        )
+
+        prototype = prototype_8.semimarkov_solver(
+            units=horizon,
+            discretization_unit=steps_per_unit,
+            intensity=(
+                (
+                    None,
+                    _time_duration_intensity(0.03, 0.01, 0.02),
+                    _time_duration_intensity(0.02, 0.005, 0.01),
+                ),
+                (None, None, _time_duration_intensity(0.08, 0.004, 0.015)),
+                (None, None, None),
+            ),
+            intensity_kwargs={"age": ages},
+            prob_callback=_prototype_collapse_point_no_duration,
+            transpose_result=True,
+        )
+
+        prototype_probability = jnp.swapaxes(
+            prototype["probability"], 0, 1
+        )
+
+        assert current["states"] == ("healthy", "disabled", "dead")
+        assert prototype_probability.shape == current["probability"].shape
+        assert jnp.allclose(
+            current["probability"][:-1],
+            prototype_probability[:-1],
+            atol=1e-6,
+            rtol=0.0,
+        )
+        assert jnp.allclose(
+            jnp.sum(current["probability"], axis=-1),
+            jnp.ones(current["probability"].shape[:-1]),
+            atol=1e-6,
+            rtol=0.0,
+        )
+
+    def test_mixed_time_duration_covariate_intensity_matches_prototype(
+        self, mixed_time_duration_covariate_model
+    ):
+        horizon = 2
+        steps_per_unit = 8
+        ages = jnp.array([45.0, 60.0, 75.0], dtype=jnp.float32)
+
+        current = mixed_time_duration_covariate_model.solve(
+            initial="healthy",
+            horizon=horizon,
+            steps_per_unit=steps_per_unit,
+            record_every=2,
+            callback="collapse_point_no_duration",
+            age=ages,
+        )
+
+        prototype = prototype_8.semimarkov_solver(
+            units=horizon,
+            discretization_unit=steps_per_unit,
+            intensity=(
+                (
+                    None,
+                    _time_duration_covariate_intensity(
+                        0.01, 0.008, 0.01, 0.0004
+                    ),
+                    _time_duration_covariate_intensity(
+                        0.005, 0.004, 0.006, 0.0002
+                    ),
+                ),
+                (
+                    None,
+                    None,
+                    _time_duration_covariate_intensity(
+                        0.03, 0.006, 0.012, 0.0003
+                    ),
+                ),
+                (None, None, None),
+            ),
+            intensity_kwargs={"age": ages},
+            prob_callback=_prototype_collapse_point_no_duration,
+            transpose_result=True,
+        )
+
+        prototype_probability = jnp.swapaxes(
+            prototype["probability"], 0, 1
+        )[::2]
+
+        assert current["states"] == ("healthy", "disabled", "dead")
+        assert prototype_probability.shape == current["probability"].shape
+        assert jnp.allclose(
+            current["probability"][:-1],
+            prototype_probability[:-1],
+            atol=1e-6,
+            rtol=0.0,
+        )
+        assert jnp.allclose(
+            jnp.sum(current["probability"], axis=-1),
+            jnp.ones(current["probability"].shape[:-1]),
+            atol=1e-6,
+            rtol=0.0,
+        )
 
     def test_solve_matches_closed_form_from_disabled_on_reduced_subgraph(
         self, illness_death_model
