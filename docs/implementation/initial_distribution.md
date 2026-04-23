@@ -237,6 +237,8 @@ Then solver setup can:
 
 This separation is preferable to letting the solver understand all constructor variants directly.
 
+The downstream side — how the solver should *evolve* those point masses under heterogeneous starts (multiple initial states, per-individual off-grid `d_0`, per-individual mass) — is covered in the companion note [point_mass.md](/home/lucas/Documents/jact/docs/implementation/point_mass.md).
+
 ## Testing considerations
 
 The tests should be structured around invariants, not constructors alone.

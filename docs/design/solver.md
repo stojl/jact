@@ -288,6 +288,11 @@ Open API question: how do we expose `d_0`? Options: optional
 individual. I'd lean toward the richer object eventually, but start
 with the kwarg.
 
+Implementation-side reflections on how the solver should evolve point
+masses once heterogeneous starts reach it (off-grid per-individual
+`d_0`, multi-state declarations, per-individual mass) live in
+[docs/implementation/point_mass.md](/home/lucas/Documents/jact/docs/implementation/point_mass.md).
+
 ---
 
 ## 4. Solver state structure: one big tensor vs. list-of-tensors

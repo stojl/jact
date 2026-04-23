@@ -556,16 +556,21 @@ For a reduced model rooted at an initial state, the solver advances a probabilit
 Per reachable state, the solver tracks two conceptually separate objects:
 
 - **`density`** — the absolutely continuous duration density for that state, shape `(batch, D)`. Entry `density[b, k]` is the density at batch element `b` at duration slot `k`. Slot 0 is "entered the current state just now"; slot `k` is "entered `k` solver steps ago".
-- **`point_mass`** — a per-individual point mass at the state's `d_0`, shape `(batch, D)` or `None`. `None` for states that never carry one. For states that do — every state declared in the active `InitialDistribution` — the `(batch, D)` tensor tracks the shifted-along-duration Dirac seeded at `t=0` from that state's `(mass, duration)` component.
+- **`point_mass`** — a per-individual point mass at the state's `d_0`, stored as `PointMass(value, d_0)` or `None`. `None` for states that never carry one. For states that do — every state declared in the active `InitialDistribution` — `value` has shape `(batch,)` and tracks the current mass, while `d_0` has shape `(batch,)` and stores the per-individual initial duration exactly.
 
 The full solver state is a pytree, one entry per reachable state in `reachable_states` order:
 
 ```python
 state: tuple[StateCarry, ...]            # length = J = reduced.n_states
 
+@jax.tree_util.register_pytree_node_class
+class PointMass:
+    value: jnp.ndarray                   # (batch,)
+    d_0: jnp.ndarray                     # (batch,)
+
 class StateCarry(NamedTuple):
     density: jnp.ndarray                 # (batch, D)
-    point_mass: jnp.ndarray | None       # (batch, D) or None
+    point_mass: PointMass | None
 ```
 
 `density` evolves by advection-reaction with a rigid duration shift (mass at duration `k` becomes mass at duration `k+1` each step). `point_mass` evolves by a scalar exponential decay along the characteristic `(s, d_0 + s)` — a 1-D problem per individual, not a 2-D one. They are co-evolved but mathematically distinct; keeping them separate avoids diffusing a Dirac through the finite-difference scheme. This factorisation is what makes per-individual `d_0` (off-grid) and per-state initial point masses first-class via the `InitialDistribution`; analytic or high-order point-mass integration remains a future extension.
@@ -646,7 +651,7 @@ Each scan step advances the state by `step_size = 1 / steps_per_unit`:
 
 1. **Predictor** — evaluate intensities at clock time `t` (nudged by `±perturbation`; see Intensity protocol §Discontinuity handling), compute per-state derivatives (outflows from `density` and `point_mass`, inflows to `density`), take an Euler step.
 2. **Corrector** — evaluate intensities at `t + step_size`, recompute derivatives, average with the predictor's derivatives.
-3. **Duration shift** — mass at duration `k` becomes mass at duration `k+1`; slot 0 of `density` receives fresh inflow from other states; slot 0 of `point_mass` is zeroed. Mass reaching the final slot is truncated (the grid is sized so this corresponds to "in-state since `t=0`").
+3. **Duration shift** — mass at duration `k` becomes mass at duration `k+1` for `density`; slot 0 of `density` receives fresh inflow from other states. `point_mass` has no duration axis to shift: it keeps its own `d_0` and loses mass only through hazard-driven outflow.
 
 ### Numerical order
 
@@ -658,7 +663,7 @@ Each scan step advances the state by `step_size = 1 / steps_per_unit`:
 |---|---|
 | Matrix sparsity pattern (positions of `None` cells) | Covariate arrays (`**kwargs`) |
 | Callback function | Fitted parameters captured in closures |
-| Presence/absence of `point_mass` per state | `InitialDistribution` mass and duration arrays |
+| Presence/absence of `point_mass` per state | `PointMass.value` and `PointMass.d_0` arrays from `InitialDistribution` |
 | Set of initial states (declared on the distribution) | |
 | `step_size`, `record_every`, `perturbation` | |
 
@@ -676,7 +681,7 @@ bytes ≈ 4 * T_out * product(callback_output_non_time_dims)
 
 where `T_out = (horizon * steps_per_unit) // record_every + 1`. Worked examples at `batch = 100_000`, `J = 10`, `D = 360`, `T_out = 361`:
 
-- `default` (leaves `(time, batch, D)` per state's density + point mass): dominated by `4 * T_out * batch * J * D` ≈ **520 GB**. Infeasible at this resolution.
+- `default` (density leaves `(time, batch, D)` plus point-mass leaves `(time, batch)` for declared states): still dominated by density, ≈ **520 GB** at this resolution. Infeasible.
 - Same, but `record_every = 12` (`T_out = 31`): ≈ **44 GB**. Still large; tractable on a big GPU.
 - `collapse_point_no_duration` (`(T_out, batch, J)`): ≈ **1.4 GB**. Comfortable.
 
@@ -711,12 +716,12 @@ Under uniform `D`, the built-in callbacks produce the following per-step output 
 
 | Name | Description | Per-step output |
 |---|---|---|
-| `"default"` | Full pytree state, no reduction | `tuple[StateCarry, ...]` — each leaf `(batch, D)` (or `None` for absent point masses) |
-| `"no_duration"` | Marginalise over duration, preserve pytree | Per state: `(density[..., -1], point_mass[..., -1] or None)` — each leaf `(batch,)` |
+| `"default"` | Full pytree state, no reduction | `tuple[StateCarry, ...]` — `density: (batch, D)`, `point_mass: PointMass(value=(batch,), d_0=(batch,))` or `None` |
+| `"no_duration"` | Marginalise over duration, preserve pytree | Per state: `density = sum over duration`, `point_mass = PointMass(value=(batch,), d_0=(batch,))` or `None` |
 | `"collapse_point"` | Fold `point_mass` into `density[..., 0]` per state; drop `point_mass` | Tuple of per-state `density` — each leaf `(batch, D)` |
 | `"collapse_point_no_duration"` | Collapse then marginalise; re-stack across states | Single array `(batch, J)` |
-| `"point_only"` | Per-state `point_mass` (or `None`) | Tuple per state — each leaf `(batch, D)` or `None` |
-| `"point_only_no_duration"` | Per-state `point_mass[..., -1]` (or `None`) | Tuple per state — each leaf `(batch,)` or `None` |
+| `"point_only"` | Per-state `point_mass` (or `None`) | Tuple per state — each leaf `PointMass(value=(batch,), d_0=(batch,))` or `None` |
+| `"point_only_no_duration"` | Per-state point-mass value (or `None`) | Tuple per state — each leaf `(batch,)` or `None` |
 | `"no_point"` | Per-state `density` | Tuple per state — each leaf `(batch, D)` |
 | `"no_point_no_duration"` | Marginalise density, re-stack across states | Single array `(batch, J)` |
 | `"none"` | Record nothing | `None` |
@@ -734,7 +739,7 @@ def total_mass_per_state(state):
     for carry in state:
         total = jnp.sum(carry.density, axis=-1)                   # (batch,)
         if carry.point_mass is not None:
-            total = total + jnp.sum(carry.point_mass, axis=-1)
+            total = total + carry.point_mass.value
         totals.append(total)
     return jnp.stack(totals, axis=-1)                              # (batch, J)
 
