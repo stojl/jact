@@ -681,46 +681,35 @@ Each scan step advances the state by `step_size = 1 / steps_per_unit`:
 
 1. **Per-transition integrated hazards** — for each transition `i -> j`, compute `A_ij` along the transported characteristic:
 
-   \[
-   A_{ij}^{(n)}[k] \approx \int_{t_n}^{t_{n+1}} \mu_{ij}(t, d(t))\,dt.
-   \]
+   ```text
+   A_ij^(n)[k] ≈ ∫[t_n, t_(n+1)] μ_ij(t, d(t)) dt
+   ```
 
    If `continuity_t == continuity_d == "continuous"`, use endpoint Heun/trapezoidal:
 
-   \[
-   A_{ij}^{(n)}[k]
-   =
-   \frac{dt}{2}
-   \left[
-   \mu_{ij}(t_n, d_k)
-   +
-   \mu_{ij}(t_{n+1}, d_k + dt)
-   \right].
-   \]
+   ```text
+   A_ij^(n)[k] = (dt / 2) · [μ_ij(t_n, d_k) + μ_ij(t_(n+1), d_k + dt)]
+   ```
 
    Otherwise use midpoint:
 
-   \[
-   A_{ij}^{(n)}[k]
-   =
-   dt \cdot \mu_{ij}(t_n + dt/2, d_k + dt/2).
-   \]
+   ```text
+   A_ij^(n)[k] = dt · μ_ij(t_n + dt / 2, d_k + dt / 2)
+   ```
 
 2. **Shared competing-risks aggregation** — for each source state, aggregate
 
-   \[
-   A_i = \sum_j A_{ij}, \qquad S_i = \exp(-A_i),
-   \]
+   ```text
+   A_i = Σ_j A_ij
+   S_i = exp(-A_i)
+   ```
 
    and transition fractions
 
-   \[
-   T_{ij} =
-   \begin{cases}
-   \dfrac{A_{ij}}{A_i}(1 - S_i), & A_i > 0 \\
-   0, & A_i = 0.
-   \end{cases}
-   \]
+   ```text
+   T_ij = (A_ij / A_i) · (1 - S_i)   if A_i > 0
+   T_ij = 0                          if A_i = 0
+   ```
 
    Mixed models remain coherent because different exits may use different quadrature rules, but all exits from the same source state still feed one shared survival factor.
 
