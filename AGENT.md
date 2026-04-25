@@ -1,6 +1,6 @@
 # AGENT.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to coding agents when working with code in this repository.
 
 ## Commands
 
@@ -27,7 +27,7 @@ The design separates structure, bindings, initial conditions, and numerics:
 
 - **`state_space.py` — `StateSpace`**: topology only (states, allowed transitions). No intensities, no data. All structural validation at construction (no duplicate states, no self-transitions, no duplicate transitions, every referenced state exists). BFS reachability feeds the solver's pruning. Key surface: `states`, `n_states`, `transitions`, `absorbing`, `transient`, `exits()`, `targets()`, `sources()`, `has_transition()`, `state_index()`, `reachable_from()`. Serialisable via `state_space.to_json(path)` / `StateSpace.from_json(path)`.
 
-- **`model.py` — `Model` / `ReducedModel` / `TransitionInfo`**: binds intensity callables to a `StateSpace` via `StateSpace.build(transitions=..., exits=..., groups=...)`. `build()` enforces that every declared transition is covered **exactly once** across the three kwargs. `Model.reduce(initial_states)` accepts a single state name *or* an iterable of state names and extracts the reachable subgraph; initial states occupy the first `K` reduced indices in state-space ordering, with non-initial reachable states following.
+- **`model.py` — `Model` / `ReducedModel` / `TransitionInfo`**: binds intensity callables to a `StateSpace` via `StateSpace.build(transitions=..., exits=..., groups=...)`. Assigned values may be bare callables or `TransitionSpec(fn=..., continuity_t=..., continuity_d=...)`. Bare callables default to `unknown` continuity on both axes. `build()` enforces that every declared transition is covered **exactly once** across the three kwargs. `Model.reduce(initial_states)` accepts a single state name *or* an iterable of state names and extracts the reachable subgraph; initial states occupy the first `K` reduced indices in state-space ordering, with non-initial reachable states following.
 
 - **`initial_distribution.py` — `InitialDistribution`**: encodes the joint `(state, duration)` distribution at `t = 0` per individual. Construction paths:
   - `InitialDistribution(components={state: {"mass": ..., "duration": ...}}, normalise=True)` — primary; `mass` and `duration` are scalar or `(batch,)`.
@@ -41,11 +41,11 @@ The design separates structure, bindings, initial conditions, and numerics:
   - `state_space.initial_per_individual(state_names=... | state_indices=..., duration=..., initial_states=None)` — exactly one of `state_names` / `state_indices` required.
   - `state_space.initial_distribution(components=..., normalise=True)`
 
-- **`solver.py` — `solve()` / Heun scheme**: 2nd-order predictor-corrector inside `jax.lax.scan`, vmapped over the batch axis. Per reachable state, the carry is a `StateCarry` tracking two conceptually separate objects:
+- **`solver.py` — `solve()` / mixed quadrature update**: per-transition quadrature inside `jax.lax.scan`, vmapped over the batch axis. Per reachable state, the carry is a `StateCarry` tracking two conceptually separate objects:
   - `density: (batch, D)` — absolutely continuous duration density.
-  - `point_mass: (batch, D) | None` — per-individual Dirac evolving along the characteristic `(s, d_0 + s)`; `None` for states that never carry one; `(batch, D)` for every state declared in the active `InitialDistribution`.
+  - `point_mass: PointMass(value=(batch,), d_0=(batch,)) | None` — per-individual Dirac evolving along the characteristic `(s, d_0 + s)`; `None` for states that never carry one; populated for every state declared in the active `InitialDistribution`.
 
-  Full solver state is `tuple[StateCarry, ...]` in reachable-state order. `density` evolves by advection-reaction with rigid duration shift (slot `k` → slot `k+1` each step); `point_mass` evolves by scalar exponential decay along its characteristic — a 1-D problem per individual. They're kept separate to avoid diffusing a Dirac through the finite-difference scheme and to let per-individual `d_0` sit off the duration grid. `solve()` parameters: `initial`, `initial_duration`, `horizon`, `steps_per_unit` (so `D = horizon * steps_per_unit`), `callback`, `record_every` (must divide `horizon * steps_per_unit`; else `ValueError`), `perturbation`, plus `**kwargs` covariates. `initial_duration` is valid only on the `str` / `(batch,)` forms of `initial`; passing it with an `InitialDistribution` raises `ValueError`.
+  Full solver state is `tuple[StateCarry, ...]` in reachable-state order. `density` evolves by advection-reaction with rigid duration shift (slot `k` → slot `k+1` each step); `point_mass` evolves by scalar exponential decay along its characteristic — a 1-D problem per individual. They're kept separate to avoid diffusing a Dirac through the finite-difference scheme and to let per-individual `d_0` sit off the duration grid. Each transition first produces an integrated hazard `A_ij` using the quadrature implied by its `TransitionSpec`: endpoint Heun/trapezoidal only when both `continuity_t` and `continuity_d` are `"continuous"`, midpoint otherwise. Exits from the same source state are then aggregated into one shared competing-risks update. `solve()` parameters: `initial`, `initial_duration`, `horizon`, `steps_per_unit` (so `D = horizon * steps_per_unit`), `callback`, `record_every` (must divide `horizon * steps_per_unit`; else `ValueError`), plus `**kwargs` covariates. `initial_duration` is valid only on the `str` / `(batch,)` forms of `initial`; passing it with an `InitialDistribution` raises `ValueError`.
 
 - **`callbacks.py`**: functions `(state: tuple[StateCarry, ...]) → PyTree` that reduce solver state each step. `lax.scan` stacks the returned PyTree along a new leading **time** axis — time is always the leading axis of every output leaf, no rank-dependent transpose. Built-ins: `"default"`, `"no_duration"`, `"collapse_point"`, `"collapse_point_no_duration"` (canonical actuarial output, `(T_out, batch, J)`), `"point_only"`, `"point_only_no_duration"`, `"no_point"`, `"no_point_no_duration"`, `"none"`. This is the extension point for future cashflow / integral-transform features.
 
@@ -55,11 +55,23 @@ The design separates structure, bindings, initial conditions, and numerics:
 
 When calling `state_space.build(...)`, each transition must be assigned **exactly once** via one of:
 
-- `transitions={(src, tgt): fn}` — one callable per transition, returning `(batch, D)`.
-- `exits={src: fn}` — one callable covering *all* exits from `src`, returning `(n_targets, batch, D)` in the order of `state_space.targets(src)`. Always means *all* exits; for partial coverage use `groups`.
-- `groups={fn: [(src, tgt), ...]}` — one callable covering an arbitrary set of transitions, returning `(n_transitions, batch, D)` in the listed order.
+- `transitions={(src, tgt): fn_or_spec}` — one callable per transition, returning `(batch, D)`.
+- `exits={src: fn_or_spec}` — one callable covering *all* exits from `src`, returning `(n_targets, batch, D)` in the order of `state_space.targets(src)`. Always means *all* exits; for partial coverage use `groups`.
+- `groups={fn_or_spec: [(src, tgt), ...]}` — one callable covering an arbitrary set of transitions, returning `(n_transitions, batch, D)` in the listed order.
 
 All three can be used together; `build()` validates no gaps, no overlaps. `exits` and `groups` callables are sliced at matrix-build time so the solver itself only ever sees uniform `(batch, D)` outputs.
+
+### `TransitionSpec`
+
+```python
+@dataclass(frozen=True)
+class TransitionSpec:
+    fn: Callable
+    continuity_t: Literal["unknown", "discontinuous", "continuous"] = "unknown"
+    continuity_d: Literal["unknown", "discontinuous", "continuous"] = "unknown"
+```
+
+Continuity is per assigned callable, not global to the model. `unknown` is treated conservatively like `discontinuous`. A callable must be continuous in both `t` and `d` to use endpoint Heun/trapezoidal; any other combination uses midpoint.
 
 ### Intensity callable contract
 
@@ -74,9 +86,7 @@ def intensity(t, d, **kwargs) -> jnp.ndarray:
 
 Callables must be **pure** and **JIT-compatible** (no data-dependent Python control flow, no non-JAX ops). Fitted parameters are captured via closures and become compile-time constants. `t` is clock time (use `baseline_age + t` for attained age); `d` is duration-in-current-state; a Markov intensity uses only `t`, a pure duration-dependent one only `d`, semi-Markov uses both.
 
-Intensities are assumed **càdlàg** (right-continuous with left limits); default evaluation at a discontinuity is the right limit.
-
-**Discontinuity handling is WIP.** The current scheme perturbs `t` and `d` by `±perturbation` (default `1e-12`) each step. Known limitations: absolute `ε` doesn't scale with the argument (and collapses in float32); the perturbation is invisible to the user; Heun drops from 2nd- to 1st-order across finite jumps regardless of `perturbation`. Until this is resolved, treat intensities as smooth or place jumps well inside `(perturbation, horizon − perturbation)` on cleanly representable values. See `docs/api_spec.md` §Discontinuity handling and `docs/design/solver.md` §1 for the long-term protocol options.
+Continuity metadata lives on `TransitionSpec`, not in the callable signature. `discontinuous` means jumps may occur, but only on user-aligned grid lines.
 
 ### Initial conditions and reachability
 
@@ -97,9 +107,10 @@ At `t = 0`: every state declared in the `InitialDistribution` is seeded with `po
 | Callback function | Fitted parameters captured in closures |
 | Presence/absence of `point_mass` per state | `InitialDistribution` mass and duration arrays |
 | **Set of initial states** (declared on the distribution) | |
-| `step_size`, `record_every`, `perturbation` | |
+| `step_size`, `record_every` | |
+| Assigned `TransitionSpec` continuity metadata | |
 
-Changing the declared *set* of initial states re-traces; changing `mass` / `duration` values or `states`-index values within an existing set does not. Rebuilding a `Model` with a different sparsity pattern re-traces; changing parameter values inside existing callables does not. This is why initial-state membership is decided structurally rather than by inspecting mass at runtime — the latter would be a data-dependent topology change incompatible with the trace contract.
+Changing the declared *set* of initial states re-traces; changing `mass` / `duration` values or `states`-index values within an existing set does not. Rebuilding a `Model` with a different sparsity pattern re-traces; changing parameter values inside existing callables does not. Changing `TransitionSpec` continuity metadata also re-traces, because quadrature choice is structural. This is why initial-state membership is decided structurally rather than by inspecting mass at runtime — the latter would be a data-dependent topology change incompatible with the trace contract.
 
 ## Conventions
 

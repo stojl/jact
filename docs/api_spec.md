@@ -7,7 +7,7 @@
 The framework separates three concerns:
 
 - **StateSpace**: the structural definition of states and allowed transitions (stable, reusable, serializable).
-- **Model**: a StateSpace bound to intensity callables (swappable, experimentable).
+- **Model**: a StateSpace bound to intensity callables and optional `TransitionSpec` metadata (swappable, experimentable).
 - **Solver**: the numerical engine that computes transition probabilities from a given initial state, operating only on the reachable subgraph.
 
 All intensity models must be JIT-compatible. The entire pipeline from covariates to transition probabilities compiles into a single XLA program.
@@ -18,11 +18,11 @@ All intensity models must be JIT-compatible. The entire pipeline from covariates
 
 ```
 jact/
-├── __init__.py              # Public API: StateSpace, Model, InitialDistribution, solve, callbacks
+├── __init__.py              # Public API: StateSpace, Model, TransitionSpec, InitialDistribution, solve, callbacks
 ├── state_space.py           # StateSpace class + InitialDistribution helpers
 ├── model.py                 # Model, ReducedModel, TransitionInfo
 ├── initial_distribution.py  # InitialDistribution class
-├── solver.py                # Semi-Markov solver (Heun scheme)
+├── solver.py                # Semi-Markov solver (per-transition quadrature + shared update)
 ├── intensity/
 │   ├── __init__.py
 │   ├── parametric.py        # Built-in parametric hazards (future)
@@ -110,6 +110,18 @@ A `Model` is a `StateSpace` paired with intensity callables. It is the object pa
 
 Models are created via `StateSpace.build()`. This method accepts three optional keyword arguments for assigning intensity callables to transitions. Every transition declared in the `StateSpace` must be covered exactly once across all arguments.
 
+Each assigned callable may be passed either as a bare callable or wrapped in a `TransitionSpec` carrying solver-relevant metadata:
+
+```python
+@dataclass(frozen=True)
+class TransitionSpec:
+    fn: Callable
+    continuity_t: Literal["unknown", "discontinuous", "continuous"] = "unknown"
+    continuity_d: Literal["unknown", "discontinuous", "continuous"] = "unknown"
+```
+
+Bare callables remain valid and are treated as if wrapped with `continuity_t="unknown"` and `continuity_d="unknown"`.
+
 #### `transitions` — one callable per transition
 
 The simplest case. Each transition gets its own intensity function.
@@ -118,7 +130,11 @@ The simplest case. Each transition gets its own intensity function.
 model = state_space.build(
     transitions={
         ("healthy", "disabled"): onset_fn,
-        ("healthy", "dead"): mortality_fn,
+        ("healthy", "dead"): jact.TransitionSpec(
+            fn=mortality_fn,
+            continuity_t="continuous",
+            continuity_d="continuous",
+        ),
         ("disabled", "dead"): disabled_mortality_fn,
     }
 )
@@ -139,7 +155,7 @@ model = state_space.build(
 )
 ```
 
-The callable assigned via `exits` must return an array whose first axis indexes over the target states in the order given by `state_space.targets(source)`.
+The assigned callable or `TransitionSpec` must return an array whose first axis indexes over the target states in the order given by `state_space.targets(source)`.
 
 `exits` always means *all* exits from that state. For partial coverage, use `groups`.
 
@@ -150,7 +166,11 @@ For models that span an arbitrary subset of the transition matrix, such as share
 ```python
 model = state_space.build(
     groups={
-        shared_frailty_model: [
+        jact.TransitionSpec(
+            fn=shared_frailty_model,
+            continuity_t="discontinuous",
+            continuity_d="continuous",
+        ): [
             ("healthy", "dead"),
             ("disabled", "dead"),
         ],
@@ -161,7 +181,18 @@ model = state_space.build(
 )
 ```
 
-The callable must return an array whose first axis indexes over the listed transitions in the order provided.
+The assigned callable or `TransitionSpec` must return an array whose first axis indexes over the listed transitions in the order provided.
+
+### Continuity metadata on assigned callables
+
+Continuity is a property of the assigned callable, not of the model as a whole. The solver reasons separately about continuity in clock time `t` and continuity in duration `d`:
+
+- `continuity_t="continuous"` means the callable is continuous in clock time along the steps the solver traverses.
+- `continuity_d="continuous"` means the callable is continuous in duration along the transported characteristic.
+- `discontinuous` means jumps may occur, but only on user-aligned grid lines.
+- `unknown` is treated conservatively like `discontinuous` for solver selection.
+
+Both axes matter. A callable that is continuous in time but discontinuous in duration still uses the conservative midpoint rule, because the characteristic moves through duration over the step. The same holds in the opposite direction.
 
 #### Combining all three
 
@@ -450,7 +481,7 @@ If instead the same individual-level mixture were supplied on another mass scale
 
 ## Intensity protocol
 
-Intensity callables are **pure functions** bound to transitions at `Model.build()` time. The solver treats every cell of the (reduced) intensity matrix uniformly; fitted model parameters are captured via closures and become compile-time constants.
+Intensity callables are **pure functions** bound to transitions at `Model.build()` time. The callable interface stays simple; continuity is carried separately on the surrounding `TransitionSpec`.
 
 ### Call signature
 
@@ -465,17 +496,28 @@ def intensity(t, d, **kwargs) -> jnp.ndarray:
 | `d` | `jnp.ndarray`, shape `(1, D)` | Duration grid for the source state. Entry `k` corresponds to a duration of `k / steps_per_unit`. The leading `1` axis broadcasts over the batch dimension. |
 | `**kwargs` | `jnp.ndarray`, shape `(batch, ...)` | Covariate arrays passed through from `solve()`. Each callable consumes the subset it needs; unused kwargs are ignored. |
 
-#### On `t` and `d`
-
-The solver maintains a probability density over duration `d` for each state and advances it in clock time `t`. Per solver step the callable receives the current `t` and the full duration array `d` simultaneously and must return the intensity surface `μ(t, d)` over all `D` duration points in a single call.
+The solver maintains a probability density over duration `d` for each state and advances it in clock time `t`. Per solver step the callable receives the current `t` and the full duration array `d` simultaneously and returns the intensity surface `μ(t, d)` over all `D` duration points in one call.
 
 `t` and `d` play distinct roles. For a population observed at `t=0` with known baseline ages, attained age at clock time `t` is `baseline_age + t` — age advances with clock time, not with duration in state. Duration `d` enters separately when the intensity depends on how long the individual has been in the current state. A Markov intensity uses only `t`; a pure duration-dependent intensity uses only `d`; a semi-Markov intensity uses both.
 
-#### Càdlàg convention
+### `TransitionSpec`
 
-Intensities are assumed **càdlàg** (right-continuous with left limits). At a point of discontinuity, the default evaluation is the right limit. This is the mathematical convention the solver assumes throughout; everything in the discontinuity-handling discussion below inherits it.
+```python
+@dataclass(frozen=True)
+class TransitionSpec:
+    fn: Callable
+    continuity_t: Literal["unknown", "discontinuous", "continuous"] = "unknown"
+    continuity_d: Literal["unknown", "discontinuous", "continuous"] = "unknown"
+```
 
-#### JAX requirements
+The solver uses the continuity metadata on each assigned callable to choose the per-step quadrature rule:
+
+- `continuity_t="continuous"` and `continuity_d="continuous"`: endpoint Heun/trapezoidal along the transported characteristic.
+- Any other combination: midpoint along the transported characteristic.
+
+This requires both axes. A callable continuous in time but discontinuous in duration still uses midpoint, because the characteristic moves through duration over the step. The same holds in the opposite direction.
+
+### JAX requirements
 
 The callable is traced by JAX and compiled into the solver's `lax.scan` body. It must be:
 
@@ -491,7 +533,7 @@ The callable is traced by JAX and compiled into the solver's `lax.scan` body. It
 | `exits` (all exits) | `(n_targets, batch, D)` | One per target state, ordered by `state_space.targets(source)` |
 | `groups` (arbitrary) | `(n_transitions, batch, D)` | One per listed transition, in the order provided to `build()` |
 
-The solver itself only ever sees `(batch, D)`: `exits` and `groups` callables are pre-sliced by `Model._build_full_solver_matrix` at build time.
+The solver itself only ever sees `(batch, D)`: `exits` and `groups` callables are pre-sliced by `Model._build_full_solver_matrix` at build time, while their `TransitionSpec` metadata stays attached to the assigned callable.
 
 ### Examples
 
@@ -525,23 +567,13 @@ def joint_hazard(t, d, baseline_age, bmi, smoking, **kwargs):
     return jnp.exp(log_hazards).T[:, :, None] * baseline(d)          # (n_targets, batch, D)
 ```
 
-### Discontinuity handling (open question, WIP)
+### Continuity policy
 
-Discontinuities along `t` or `d` — benefit entitlement boundaries, policy changes, waiting periods, age cutoffs — are a first-class modelling concern. The current solver handles them by evaluating every intensity at `d ± perturbation` and nudging clock time by `t ± perturbation` on each step, where `perturbation` defaults to `1e-12`. This scheme has three known limitations:
+The solver does not interpret a global "continuous model" flag. Continuity is determined per assigned callable:
 
-1. **Absolute `ε` does not scale with the argument.** In IEEE float64, the ulp at `|d| = 30` is ~`3.6e-15`; `1e-12` leaves very little margin once downstream arithmetic (`exp`, `log`, additions with `baseline_age`) erodes the last few bits. Float32 collapses this entirely.
-2. **The perturbation is invisible to the user.** Whether two evaluations at `tau ± 1e-12` straddle a user-placed jump at `tau` depends on how `tau` was computed inside the callable. There is no knob for the user to declare "my jump is at exactly `tau`".
-3. **Heun is 2nd-order only for smooth right-hand sides.** Through a finite jump, local error is `O(step_size)` regardless of the sampling scheme. Perturbation picks a consistent side to be wrong on; it does not restore the second order.
-
-Options under consideration for the long-term protocol (see `docs/design/solver.md` §1 for the full treatment):
-
-- **(a) Declared break points** — callables advertise a sorted array of jump times/durations; the solver aligns the grid or sub-steps around them.
-- **(b) Piecewise callables** — the intensity is a list of `(interval, fn)` pairs.
-- **(c) Relative perturbation** — replace `1e-12` with `rtol * (1 + |d|)`.
-- **(d) Left/right-evaluation protocol** — callables opt into `fn(t, d, side)` where `side ∈ {left, right}` is a compile-time constant; the solver requests the side it needs, no perturbation required.
-- **(e) Adaptive sub-stepping around declared break points** — composes with (a).
-
-Until this is resolved: treat intensities as smooth, or place jumps well inside `(perturbation, horizon − perturbation)` on cleanly representable values.
+- `unknown` is treated conservatively like `discontinuous`.
+- `discontinuous` means jumps may occur, but only on user-aligned grid lines.
+- The quadrature decision is local to the assigned callable, while the mass update remains shared across all exits from the same source state.
 
 ---
 
@@ -549,7 +581,7 @@ Until this is resolved: treat intensities as smooth, or place jumps well inside 
 
 ### What the solver computes
 
-For a reduced model rooted at an initial state, the solver advances a probability state over `[0, horizon]` using a **Heun (2nd-order predictor-corrector) scheme** inside a single `jax.lax.scan`, vectorised over a batch axis via `jax.vmap`. The full pipeline from covariates to transition probabilities compiles into one XLA program.
+For a reduced model rooted at an initial state, the solver advances a probability state over `[0, horizon]` inside a single `jax.lax.scan`, vectorised over a batch axis via `jax.vmap`. Each scan step computes per-transition integrated hazards using the quadrature rule implied by that transition's `TransitionSpec`, then applies one shared competing-risks update per source state. The full pipeline from covariates to transition probabilities compiles into one XLA program.
 
 ### Solver state
 
@@ -584,7 +616,6 @@ result = model.solve(
     steps_per_unit=12,
     callback="collapse_point_no_duration",
     record_every=1,
-    perturbation=1e-12,
     baseline_age=age_array,
     bmi=bmi_array,
 )
@@ -606,7 +637,6 @@ result = jact.solve(model, initial=..., horizon=..., steps_per_unit=..., **covar
 | `steps_per_unit` | `int` | Discretisation resolution per time unit. `D = horizon * steps_per_unit`. |
 | `callback` | `str`, `callable`, or `None` | Probability callback (default: `"collapse_point_no_duration"`). |
 | `record_every` | `int` | Record the callback output every `record_every`-th step. Must divide `horizon * steps_per_unit` evenly; otherwise `ValueError`. Default: `1`. |
-| `perturbation` | `float` | Grid perturbation for the current discontinuity scheme (default: `1e-12`; see Intensity protocol §Discontinuity handling). |
 | `**kwargs` | `jnp.ndarray` | Covariate arrays, each of shape `(batch, ...)`. The names `initial` and `initial_duration` are reserved — don't use them as covariate names. |
 
 ### Result
@@ -645,17 +675,66 @@ At `t = 0`:
 
 Because `point_mass` evolves along its characteristic `(s, d_0 + s)` as a scalar problem per individual, per-individual `d_0` does **not** need to land on the duration grid. v1 seeds only the point-mass component of each declared state; seeding a non-zero `density` at `t = 0` (an absolutely continuous starting distribution over duration) is forward-looking — see **Future work**.
 
-### Heun scheme
+### Per-step update
 
 Each scan step advances the state by `step_size = 1 / steps_per_unit`:
 
-1. **Predictor** — evaluate intensities at clock time `t` (nudged by `±perturbation`; see Intensity protocol §Discontinuity handling), compute per-state derivatives (outflows from `density` and `point_mass`, inflows to `density`), take an Euler step.
-2. **Corrector** — evaluate intensities at `t + step_size`, recompute derivatives, average with the predictor's derivatives.
-3. **Duration shift** — mass at duration `k` becomes mass at duration `k+1` for `density`; slot 0 of `density` receives fresh inflow from other states. `point_mass` has no duration axis to shift: it keeps its own `d_0` and loses mass only through hazard-driven outflow.
+1. **Per-transition integrated hazards** — for each transition `i -> j`, compute `A_ij` along the transported characteristic:
+
+   \[
+   A_{ij}^{(n)}[k] \approx \int_{t_n}^{t_{n+1}} \mu_{ij}(t, d(t))\,dt.
+   \]
+
+   If `continuity_t == continuity_d == "continuous"`, use endpoint Heun/trapezoidal:
+
+   \[
+   A_{ij}^{(n)}[k]
+   =
+   \frac{dt}{2}
+   \left[
+   \mu_{ij}(t_n, d_k)
+   +
+   \mu_{ij}(t_{n+1}, d_k + dt)
+   \right].
+   \]
+
+   Otherwise use midpoint:
+
+   \[
+   A_{ij}^{(n)}[k]
+   =
+   dt \cdot \mu_{ij}(t_n + dt/2, d_k + dt/2).
+   \]
+
+2. **Shared competing-risks aggregation** — for each source state, aggregate
+
+   \[
+   A_i = \sum_j A_{ij}, \qquad S_i = \exp(-A_i),
+   \]
+
+   and transition fractions
+
+   \[
+   T_{ij} =
+   \begin{cases}
+   \dfrac{A_{ij}}{A_i}(1 - S_i), & A_i > 0 \\
+   0, & A_i = 0.
+   \end{cases}
+   \]
+
+   Mixed models remain coherent because different exits may use different quadrature rules, but all exits from the same source state still feed one shared survival factor.
+
+3. **State transport** — surviving density mass shifts one duration slot to the right with factor `S_i`; transferred mass is injected into duration zero using `T_ij`. Point mass follows the same policy along the characteristic `(t, d_0 + t)`: continuous/continuous uses endpoint Heun/trapezoidal, otherwise midpoint.
 
 ### Numerical order
 
-**Second-order on smooth intensities**; **first-order across finite jumps** regardless of `perturbation`. Resolving the discontinuity protocol to sub-step around declared break points would restore second order everywhere (see Intensity protocol §Discontinuity handling).
+The relevant convergence statements are:
+
+- Midpoint is second-order on a step if the callable is smooth on the interior of the traversed characteristic segment.
+- Midpoint remains globally second-order for a callable if every jump in `t` or `d` lies on a grid line, so no traversed step crosses a jump.
+- Midpoint drops to first order for that callable if a jump in either variable lies inside a traversed cell.
+- Endpoint Heun/trapezoidal is second-order only when the callable is continuous in both `t` and `d` along the characteristic.
+- Mixed models remain second-order provided each callable gets the quadrature rule implied by its own continuity metadata and all discontinuities are grid-aligned.
 
 ### JIT boundary
 
@@ -665,11 +744,12 @@ Each scan step advances the state by `step_size = 1 / steps_per_unit`:
 | Callback function | Fitted parameters captured in closures |
 | Presence/absence of `point_mass` per state | `PointMass.value` and `PointMass.d_0` arrays from `InitialDistribution` |
 | Set of initial states (declared on the distribution) | |
-| `step_size`, `record_every`, `perturbation` | |
+| `step_size`, `record_every` | |
+| Assigned `TransitionSpec` continuity metadata | |
 
 The set of initial states is always **user-declared** on the distribution — by the keys of `InitialDistribution.components`, the single name for `at`, or the `initial_states` tuple on `per_individual` (defaulting to the model's full state list when omitted). It is never inferred from runtime mass or from the contents of an index array.
 
-Changing any static field triggers a re-trace. Rebuilding a `Model` with a different sparsity pattern re-traces; changing only parameter values inside existing callables does not. Changing the *set* of initial states (e.g. adding `"disabled"` as a possible initial state) re-traces; changing only the per-individual `mass` / `duration` / `states`-index values inside an existing initial-state set does not. This is the reason the spec decides initial-state membership structurally rather than by inspecting runtime data — the latter would be a data-dependent topology change, incompatible with the trace contract.
+Changing any static field triggers a re-trace. Rebuilding a `Model` with a different sparsity pattern re-traces; changing only parameter values inside existing callables does not. Changing `TransitionSpec` continuity metadata also re-traces, because quadrature choice is structural. Changing the *set* of initial states (e.g. adding `"disabled"` as a possible initial state) re-traces; changing only the per-individual `mass` / `duration` / `states`-index values inside an existing initial-state set does not. This is the reason the spec decides initial-state membership structurally rather than by inspecting runtime data — the latter would be a data-dependent topology change, incompatible with the trace contract.
 
 ### Memory budget
 
@@ -691,9 +771,8 @@ Pick `callback` and `record_every` before scaling `batch`.
 
 The following items are intentionally left open by this spec and tracked in `docs/design/solver.md`:
 
-1. **Discontinuity handling protocol** — see Intensity protocol §Discontinuity handling.
-2. **Per-state duration depth `D_j`** — currently uniform `D = horizon * steps_per_unit`. The pytree state structure allows per-state `D_j` as a future optimisation; Markov states would collapse to `D_j = 1`.
-3. **Absolutely continuous initial component** — `InitialDistribution` v1 carries per-state point masses only. Extending each component with an optional `density: (batch, D)` field (an absolutely continuous starting distribution over duration) is forward-looking; the object is shaped so this can be added without breaking existing constructions.
+1. **Per-state duration depth `D_j`** — currently uniform `D = horizon * steps_per_unit`. The pytree state structure allows per-state `D_j` as a future optimisation; Markov states would collapse to `D_j = 1`.
+2. **Absolutely continuous initial component** — `InitialDistribution` v1 carries per-state point masses only. Extending each component with an optional `density: (batch, D)` field (an absolutely continuous starting distribution over duration) is forward-looking; the object is shaped so this can be added without breaking existing constructions.
 
 ---
 
@@ -878,7 +957,7 @@ result["states"]
 
 1. **Separation of structure and models.** The `StateSpace` is the stable backbone. Models are swappable experiments bound to the same structure.
 
-2. **Uniform callable interface.** The solver doesn't know or care whether an intensity comes from a Gompertz function, a GLM, or a neural network. All it sees is `(t, d, **kwargs) → array`.
+2. **Uniform callable interface.** The solver doesn't know or care whether an intensity comes from a Gompertz function, a GLM, or a neural network. All it sees is `TransitionSpec(fn=..., ...)` bound to a transition, with `fn(t, d, **kwargs) → array`.
 
 3. **Compute only what's needed.** Given an initial-state set (one or many states declared via the `InitialDistribution`), the solver reduces to the reachable subgraph — the union of reachability from each initial state. Unreachable states are excluded entirely.
 
@@ -894,9 +973,9 @@ result["states"]
 
 ## Future work
 
-- **Discontinuity handling protocol**: declared break points, piecewise callables, or a left/right-evaluation protocol, resolving the open question in the Intensity protocol section and restoring 2nd-order convergence across jumps.
 - **Per-state duration depth `D_j`**: let each reachable state pick its own duration depth, collapsing Markov states to `D_j = 1`. Enabled by the pytree solver state.
 - **Absolutely continuous initial distribution**: extend `InitialDistribution` so each per-state component can carry an optional `density: (batch, D)` field alongside the point-mass `(mass, duration)` pair. Lets the solver be seeded with a starting distribution over duration, not just a Dirac per individual. Designed so v1 constructions keep working.
 - **Pre-computation protocol**: two-phase `prepare`/`evaluate` for intensity models with static covariate contributions.
 - **Built-in parametric hazards**: Gompertz, Weibull, piecewise constant, and other standard forms in `jact.intensity`.
+- **Broader transition metadata**: evolve `TransitionSpec` beyond continuity metadata as cashflow-related transition callables are designed.
 - **Cashflow computation**: integral transforms over the duration density for actuarial present values, extending the callback system.
