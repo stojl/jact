@@ -4,11 +4,15 @@ Condensed mirror of `docs/api_spec.md`. Same normative content with fewer exampl
 
 ## Overview
 
-`jact` has three layers:
+`jact` currently has three implemented layers:
 
 - **StateSpace**: topology only.
 - **Model**: topology plus intensity callables.
 - **Solver**: midpoint quadrature on the reachable subgraph.
+
+This short spec also describes a planned cashflow declaration layer:
+
+- **cashflows**: reusable named cashflow declarations built from a `StateSpace`.
 
 All intensities must be JIT-compatible. The full pipeline from covariates to probabilities compiles into one XLA program.
 
@@ -23,6 +27,8 @@ jact/
 ├── solver.py                # Semi-Markov solver
 └── callbacks.py             # Probability output callbacks
 ```
+
+The planned cashflow API is documentation-only for now and is not yet reflected in the package layout.
 
 ## StateSpace
 
@@ -111,6 +117,70 @@ Return shapes:
 
 JAX requirements: pure, JIT-compatible, and closed over static values only.
 
+## Cashflows (planned)
+
+This is the intended public API, not current implemented behavior.
+
+Construction:
+
+```python
+cashflows = state_space.cashflows(
+    components={...},
+)
+```
+
+The declaration is component-first: each named component defines its kind, its attachment, and its payment callable.
+
+Validation is against the `StateSpace`: states and transitions must be declared there, and component names must be unique.
+
+Example:
+
+```python
+components = {
+    "premium": {
+        "kind": "state_rate",
+        "states": {"healthy": premium_fn},
+    },
+    "death_benefit": {
+        "kind": "transition_lump",
+        "transitions": {("healthy", "dead"): death_fn},
+    },
+    "retirement_bonus": {
+        "kind": "scheduled_event",
+        "when": event_time_fn,
+        "states": {"healthy": bonus_fn},
+    },
+}
+```
+
+Kinds:
+
+- `state_rate`: payment rate while occupying an attached state
+- `transition_lump`: lump amount if an attached transition occurs
+- `scheduled_event`: deterministic event time plus state-conditioned payment
+
+Payment callable protocol for all three kinds:
+
+```python
+def payment(t, d, **kwargs) -> jnp.ndarray: ...
+```
+
+Scheduled-event time rule:
+
+```python
+def when(**kwargs) -> jnp.ndarray: ...
+```
+
+V1 scheduled-event policy:
+
+- `when(**kwargs)` returns shape `(batch,)`
+- one event time per individual
+- event times may depend on solve-time covariates
+- event times must be grid-aligned
+- off-grid times are rejected
+
+Aggregation, valuation, cumulative totals, and terminal totals are not part of the declaration object.
+
 ## Solver
 
 The solver advances the reduced state inside one `jax.lax.scan`. Each step:
@@ -131,6 +201,8 @@ class StateCarry(NamedTuple):
 `density` has shape `(batch, D)`. `PointMass.value` and `PointMass.d_0` have shape `(batch,)`.
 
 ## Calling solve
+
+Current implemented call surface:
 
 ```python
 result = model.solve(
@@ -165,6 +237,37 @@ Result:
 
 ```python
 result["probability"]
+result["states"]
+```
+
+Planned solve extension for cashflows:
+
+```python
+result = model.solve(
+    initial="healthy",
+    horizon=10,
+    steps_per_unit=12,
+    probability="collapse_point_no_duration",
+    cashflows=cashflows,
+    cashflow_groups={"benefits": ["death_benefit", "retirement_bonus"]},
+    record_every=1,
+    age=age_array,
+)
+```
+
+Planned additional solve arguments:
+
+| Parameter | Type | Description |
+|---|---|---|
+| `probability` | `str`, callable, or `None` | Probability reporting control |
+| `cashflows` | cashflow declaration or `None` | Cashflow components to evaluate |
+| `cashflow_groups` | mapping or `None` | Solve-time aggregation of named components |
+
+Planned result extension:
+
+```python
+result["probability"]
+result["cashflows"]
 result["states"]
 ```
 
