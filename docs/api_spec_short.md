@@ -118,7 +118,7 @@ The solver advances the reduced state inside one `jax.lax.scan`. Each step:
 1. Evaluates every transition hazard with midpoint quadrature along the transported characteristic.
 2. Aggregates exits from the same source state into one competing-risks update.
 3. Shifts surviving density one duration slot to the right and injects transferred mass into duration zero.
-4. Evolves point masses along the same midpoint rule on `(t, d_0 + t)`.
+4. Evolves point masses along `(t, d_0 + t)` by default, or keeps them pinned at fixed `d_0` and uses them as persistent sources when `freeze_initial=True`.
 
 Solver state is one `StateCarry` per reachable state:
 
@@ -137,6 +137,7 @@ result = model.solve(
     initial="healthy",
     horizon=10,
     steps_per_unit=12,
+    freeze_initial=True,
     callback="collapse_point_no_duration",
     record_every=1,
     age=age_array,
@@ -155,6 +156,7 @@ Parameters:
 |---|---|---|
 | `initial` | `str`, `(batch,)` int array, or `InitialDistribution` | Initial condition |
 | `initial_duration` | float or `(batch,)` array | Per-individual `d_0` for `str` / `(batch,)` initial forms |
+| `freeze_initial` | bool | Keep seeded point masses pinned and use them as persistent sources |
 | `horizon` | int | Number of time units |
 | `steps_per_unit` | int | Time discretisation resolution |
 | `callback` | `str`, callable, or `None` | Probability callback |
@@ -174,6 +176,7 @@ result["states"]
 - Midpoint remains globally second-order for a callable if all jumps in `t` or `d` are aligned to solver grid lines.
 - If a jump lies strictly inside a traversed cell, convergence for that callable can drop to first order.
 - For tree-based or other piecewise hazards, align split points in `t` and `d` to the solver grid when possible.
+- `freeze_initial=True` adds a persistent source, so outputs that include point mass are no longer constrained to sum to 1.
 
 ## JIT boundary
 
@@ -183,6 +186,7 @@ Static:
 - Callback function
 - Presence or absence of `point_mass` per state
 - Declared set of initial states
+- `freeze_initial`
 - `step_size` and `record_every`
 
 Traced:

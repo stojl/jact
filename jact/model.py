@@ -295,6 +295,7 @@ class Model:
         horizon: int,
         steps_per_unit: int,
         initial_duration: Any = 0.0,
+        freeze_initial: bool = False,
         callback: Union[None, str, Callable] = "collapse_point_no_duration",
         record_every: int = 1,
         **kwargs,
@@ -317,6 +318,10 @@ class Model:
         initial_duration : float or (batch,) array, optional
             Per-individual ``d_0`` for the ``str`` and ``(batch,)``
             shorthand forms of ``initial``. Default is ``0.0``.
+        freeze_initial : bool, optional
+            If ``True``, keep the seeded point masses fixed for the full
+            solve and use them as persistent sources of density inflow.
+            Default is ``False``.
         callback : str or callable, optional
             Probability callback. Default is
             ``"collapse_point_no_duration"``.
@@ -342,6 +347,7 @@ class Model:
             horizon=horizon,
             steps_per_unit=steps_per_unit,
             initial_duration=initial_duration,
+            freeze_initial=freeze_initial,
             callback=callback,
             record_every=record_every,
             **kwargs,

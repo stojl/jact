@@ -105,11 +105,15 @@ def _integrated_point_hazard(
     point_d_0: jnp.ndarray,
     step_size: float,
     intensity_kwargs: Dict[str, jnp.ndarray],
+    freeze_initial: bool,
 ) -> jnp.ndarray:
+    point_duration = point_d_0
+    if not freeze_initial:
+        point_duration = point_duration + t + 0.5 * step_size
     midpoint = _evaluate_intensity_at_point(
         fn,
         t + 0.5 * step_size,
-        point_d_0 + t + 0.5 * step_size,
+        point_duration,
         intensity_kwargs,
     )
     hazard = step_size * midpoint
@@ -149,6 +153,7 @@ def _solver_step(
     step_size: float,
     solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
     intensity_kwargs: Dict[str, jnp.ndarray],
+    freeze_initial: bool,
 ) -> tuple[StateCarry, ...]:
     densities = _stack_state_densities(state)
     point_values, point_d_0, point_mask = _stack_point_masses(state)
@@ -183,6 +188,7 @@ def _solver_step(
                     point_d_0[i],
                     step_size,
                     intensity_kwargs,
+                    freeze_initial,
                 )
                 point_total = point_total + point_hazard
                 point_hazards.append((j, point_hazard))
@@ -196,7 +202,11 @@ def _solver_step(
             )
 
         if point_mask[i]:
-            point_survival = jnp.exp(-point_total)
+            point_survival = (
+                jnp.ones_like(point_values[i])
+                if freeze_initial
+                else jnp.exp(-point_total)
+            )
             point_transfer_factor = _stable_transfer_factor(point_total)
             next_point_values = next_point_values.at[i].set(
                 point_values[i] * point_survival
@@ -225,6 +235,7 @@ def _solver_step(
         "solver_matrix",
         "prob_callback",
         "record_every",
+        "freeze_initial",
     ],
 )
 def _midpoint_solver(
@@ -235,6 +246,7 @@ def _midpoint_solver(
     intensity_kwargs: Dict[str, jnp.ndarray],
     prob_callback: Callable[..., Any],
     record_every: int,
+    freeze_initial: bool,
 ):
     """Run the midpoint solver and record callback outputs."""
     n_steps = duration_mid.shape[-1]
@@ -252,6 +264,7 @@ def _midpoint_solver(
                 step_size,
                 solver_matrix,
                 intensity_kwargs,
+                freeze_initial,
             )
             return next_state, None
 
@@ -355,6 +368,7 @@ def solve(
     horizon: int,
     steps_per_unit: int,
     initial_duration: Any = 0.0,
+    freeze_initial: bool = False,
     callback: Union[None, str, Callable] = "collapse_point_no_duration",
     record_every: int = 1,
     **kwargs: Any,
@@ -437,6 +451,7 @@ def solve(
         kwargs,
         prob_callback,
         record_every,
+        freeze_initial,
     )
     result["states"] = reduced.reachable_states
     return result
