@@ -8,7 +8,6 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 from .initial_distribution import InitialDistribution
 from .state_space import StateSpace
 
-
 @dataclass(frozen=True)
 class TransitionInfo:
     """Metadata about how a transition's intensity is provided."""
@@ -65,9 +64,9 @@ class Model:
     def __init__(
         self,
         state_space: StateSpace,
-        transitions: Optional[Dict[Tuple[str, str], Callable]] = None,
-        exits: Optional[Dict[str, Callable]] = None,
-        groups: Optional[Dict[Callable, List[Tuple[str, str]]]] = None,
+        transitions: Optional[Dict[Tuple[str, str], Any]] = None,
+        exits: Optional[Dict[str, Any]] = None,
+        groups: Optional[Dict[Any, List[Tuple[str, str]]]] = None,
     ):
         self._state_space = state_space
         self._transitions_map = transitions or {}
@@ -129,7 +128,7 @@ class Model:
         src: str,
         tgt: str,
         assignment: str,
-        fn: Callable,
+        fn: Any,
         index: Optional[int],
         covered: Dict[Tuple[str, str], str],
     ) -> None:
@@ -175,9 +174,9 @@ class Model:
             if info.index is None:
                 self._full_solver_matrix[i][j] = info.callable
             else:
-                fn = info.callable
-                idx = info.index
-                self._full_solver_matrix[i][j] = _make_slice_wrapper(fn, idx)
+                self._full_solver_matrix[i][j] = _make_slice_wrapper(
+                    info.callable, info.index
+                )
 
     # ------------------------------------------------------------------ #
     # Reduction to reachable states                                       #
@@ -238,14 +237,13 @@ class Model:
         ]
 
         # Extract the submatrix
-        reduced_matrix = [
-            [
+        reduced_matrix = tuple(
+            tuple(
                 self._full_solver_matrix[full_indices[i]][full_indices[j]]
                 for j in range(n_reachable)
-            ]
+            )
             for i in range(n_reachable)
-        ]
-
+        )
         return ReducedModel(
             initial_states=initial_ordered,
             reachable_states=reachable,
@@ -299,7 +297,6 @@ class Model:
         initial_duration: Any = 0.0,
         callback: Union[None, str, Callable] = "collapse_point_no_duration",
         record_every: int = 1,
-        perturbation: float = 1e-12,
         **kwargs,
     ):
         """Compute transition probabilities from a documented initial condition.
@@ -327,9 +324,6 @@ class Model:
             Record the callback output every ``record_every``-th solver
             step. Must divide ``horizon * steps_per_unit``. Default is
             ``1``.
-        perturbation : float, optional
-            Grid perturbation used by the current discontinuity
-            handling scheme. Default is ``1e-12``.
         **kwargs
             Covariate arrays of shape ``(batch, ...)`` passed to
             intensity callables.
@@ -350,7 +344,6 @@ class Model:
             initial_duration=initial_duration,
             callback=callback,
             record_every=record_every,
-            perturbation=perturbation,
             **kwargs,
         )
 

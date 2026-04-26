@@ -251,9 +251,9 @@ class StateSpace:
 
     def build(
         self,
-        transitions: Optional[Dict[Tuple[str, str], Callable[..., Any]]] = None,
-        exits: Optional[Dict[str, Callable[..., Any]]] = None,
-        groups: Optional[Dict[Callable[..., Any], List[Tuple[str, str]]]] = None,
+        transitions: Optional[Dict[Tuple[str, str], Any]] = None,
+        exits: Optional[Dict[str, Any]] = None,
+        groups: Optional[Dict[Any, List[Tuple[str, str]]]] = None,
     ) -> Model:
         """Create a Model by assigning intensity callables to transitions.
 

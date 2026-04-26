@@ -1,8 +1,16 @@
-jact is a framework for computing transition probabilities in multi-state models where the transition intensities depend on how long someone has been in their current state (semi-Markov models). This is a common setup in actuarial science and biostatistics — for example, modeling how individuals move between states like healthy, disabled, and dead over time, where the risk of transitioning depends on duration in the current state, not just calendar time.
-The core problem it solves is the pipeline from model inference to transition probabilities. In practice, people use all kinds of models to estimate transition intensities — GLMs, neural networks, random forests, parametric hazards — and then need to feed those intensities into a numerical solver to get the actual probabilities. jact standardizes this pipeline: you define a state space, plug in any JIT-compatible intensity model, and get transition probabilities out for 100K+ individuals in one vectorized GPU pass.
-The key design decisions we made are the separation of StateSpace (the topology of states and transitions, reusable and serializable) from Model (the intensity callables bound to that topology, swappable for experimentation), the ability to assign intensity models flexibly — one per transition, one for all competing risks from a state, or one for an arbitrary group of transitions — and automatic reduction to only the states reachable from a given starting state, so computation isn't wasted on irrelevant parts of the model. The solver itself is a Heun scheme stepping through time via jax.lax.scan, faithfully preserving the numerics from your working prototype.
+jact is a framework for computing transition probabilities in multi-state models where transition intensities depend on duration in the current state as well as clock time. It is aimed at the common pipeline where intensities are fitted with arbitrary models and then pushed through a numerical solver to obtain probabilities for large cohorts.
+
+The main design choices are:
+
+- `StateSpace` defines topology only: states and allowed transitions.
+- `Model` binds JIT-compatible intensity callables to that topology.
+- `solve()` automatically reduces work to the reachable subgraph from the declared initial states.
+- The solver always integrates hazards with midpoint quadrature along the transported characteristic.
+
+The midpoint-only kernel is deliberate. It keeps the callable interface simple, avoids asking users to declare continuity metadata they often cannot justify for fitted models, and behaves robustly for irregular hazards such as tree-based or other piecewise models. For smooth hazards the midpoint rule remains second-order. If a hazard has jumps strictly inside traversed grid cells, convergence for that callable can degrade; when possible, align split points in time or duration to the solver grid.
 
 If you want a user-facing walkthrough instead of the API spec, start with
-[example_notebook.ipynb](example_notebook.ipynb).
+[example_notebook.ipynb](example_notebook.ipynb). The historical quadrature comparison that motivated the midpoint-only choice is kept in
+[convergence_notebook.ipynb](convergence_notebook.ipynb) as a design-study notebook.
 
-Future work includes a pre-computation protocol for factorizable intensities (significant speedup for log-link GLMs), built-in parametric hazard functions, and cashflow computation via integral transforms over the duration density.
+Future work includes pre-computation protocols for factorizable intensities, built-in parametric hazard functions, and cashflow computation via integral transforms over the duration density.

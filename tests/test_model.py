@@ -176,6 +176,19 @@ class TestModelInfo:
         with pytest.raises(ValueError, match="No transition 'dead' -> 'healthy'"):
             mixed_assignment_model.info("dead", "healthy")
 
+    def test_info_preserves_original_callable(self, illness_death_state_space):
+        model = illness_death_state_space.build(
+            transitions={
+                ("healthy", "disabled"): _single_transition_fn,
+                ("healthy", "dead"): _single_transition_fn,
+                ("disabled", "dead"): _single_transition_fn,
+            }
+        )
+
+        info = model.info("healthy", "disabled")
+
+        assert info.callable is _single_transition_fn
+
 
 class TestReducedSolverMatrix:
     def test_transition_assignment_preserves_original_callable(
@@ -229,7 +242,6 @@ class TestReducedSolverMatrix:
             jnp.full((batch, 2), 22.0),
         )
 
-
 class TestModelReduction:
     def test_reduce_returns_reduced_model_dataclass(self, mixed_assignment_model):
         reduced = mixed_assignment_model.reduce("healthy")
@@ -280,7 +292,7 @@ class TestModelReduction:
         assert reduced.initial_states == ("archived",)
         assert reduced.reachable_states == ("archived",)
         assert reduced.n_states == 1
-        assert reduced.solver_matrix == [[None]]
+        assert reduced.solver_matrix == ((None,),)
 
     def test_reduce_rejects_empty_initial_iterable(self, mixed_assignment_model):
         with pytest.raises(ValueError, match="at least one state"):

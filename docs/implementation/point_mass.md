@@ -50,7 +50,7 @@ Fixing the bug is representational. Keeping the `(batch, D)` scatter and trying 
 Before switching the representation, it's worth naming an asymmetry in `_compute_derivative` that looks like a bug until you understand it:
 
 - `mu_plus_slice = mu_plus[..., :-1]` — one-sided, used for the point-mass inflow to the target state.
-- `mu_avg = 0.5 * (mu_plus[..., :-1] + mu_minus[..., 1:])` — the two-sided Heun duration corrector, used for the density's own decay and for density-to-density inflow.
+- `mu_avg = 0.5 * (mu_plus[..., :-1] + mu_minus[..., 1:])` — the old two-sided duration corrector from the continuity-aware design. It is historical context, not the current midpoint-only kernel.
 
 The asymmetry is deliberate. Averaging across neighbouring duration slots smears a Dirac; the density is smooth and benefits from the corrector. Under the scalar point-mass representation described below, the whole question dissolves: there is a single duration `d_0 + t` per individual, and you evaluate the intensity there once.
 
@@ -71,7 +71,7 @@ With `t` supplied by the scan, the characteristic `(t, d_0 + t)` is reconstructe
 Concretely:
 
 - **Seeding** stores `mass_arr` and `duration_arr` verbatim. There is nothing to interpolate, round, or one-hot.
-- **Point-mass decay** multiplies `value` by the per-step survival factor along the characteristic — the cumulative-hazard integral over `[t, t + step_size]` evaluated at per-individual duration `d_0 + s`. Any integrator suffices here. A Heun-consistent two-evaluation scheme keeps the order of the density intact; an analytic exponential of the integrated hazard is strictly better when the closed form is available.
+- **Point-mass decay** multiplies `value` by the per-step survival factor along the characteristic — the cumulative-hazard integral over `[t, t + step_size]` evaluated at per-individual duration `d_0 + s`. In the current solver this is approximated with midpoint quadrature, matching the density path.
 - **Density feed-in from point mass** evaluates the outgoing hazard at per-individual `d = d_0 + t`, multiplies by `value`, and drops the resulting per-individual scalar into `next_inflow[j]`, just as today. The `next_inflow[j]` plumbing is unchanged — only its source term differs.
 - **Absorbing-boundary behaviour** of the `D − 1` slot is a density concept only. The point mass never accumulates at a duration boundary because it has no duration axis to run off the end of. Mass leaves only via hazard, not via the grid.
 

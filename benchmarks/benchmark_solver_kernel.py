@@ -59,7 +59,6 @@ class BenchmarkConfig:
     timed_runs: int
     correctness_batch_size: int
     correctness_atol: float
-    perturbation: float
     allow_cpu: bool
     topology: str
     state_count: int
@@ -126,7 +125,6 @@ def _parse_args() -> BenchmarkConfig:
         type=float,
         default=DEFAULT_CORRECTNESS_ATOL,
     )
-    parser.add_argument("--perturbation", type=float, default=1e-12)
     parser.add_argument(
         "--topology",
         choices=TOPOLOGY_CHOICES,
@@ -172,7 +170,6 @@ def _parse_args() -> BenchmarkConfig:
         timed_runs=args.timed_runs,
         correctness_batch_size=args.correctness_batch_size,
         correctness_atol=args.correctness_atol,
-        perturbation=args.perturbation,
         allow_cpu=args.allow_cpu,
         topology=args.topology,
         state_count=args.state_count,
@@ -307,7 +304,6 @@ def _run_prototype_e2e(
     steps_per_unit: int,
     intensity,
     ages: jnp.ndarray,
-    perturbation: float,
 ):
     semimarkov_solver = getattr(
         prototype_8.semimarkov_solver,
@@ -320,7 +316,6 @@ def _run_prototype_e2e(
         intensity=intensity,
         intensity_kwargs={"age": ages},
         prob_callback=_prototype_collapse_point_no_duration,
-        pertubation=perturbation,
         transpose_result=True,
     )
 
@@ -383,7 +378,6 @@ def _benchmark_header(config: BenchmarkConfig, scenarios: list[Scenario]) -> Non
     print(f"intensity_profile: {config.intensity_profile}")
     print(f"warmup_runs: {config.warmup_runs}")
     print(f"timed_runs: {config.timed_runs}")
-    print(f"perturbation: {config.perturbation}")
     print(f"scenarios: {', '.join(scenario.label for scenario in scenarios)}")
     print()
 
@@ -403,46 +397,52 @@ def _run_e2e_correctness_check(
         horizon=config.horizon,
         steps_per_unit=config.steps_per_unit,
         callback="collapse_point_no_duration",
-        perturbation=config.perturbation,
         age=ages,
     )
+
+    _block_until_ready(current_result)
+
+    current_probability = current_result["probability"]
+    if not jnp.all(jnp.isfinite(current_probability)):
+        raise SystemExit(
+            f"Sanity check failed for topology={topology.name}.\n"
+            "Encountered non-finite probabilities."
+        )
+    mass = jnp.sum(current_probability, axis=-1)
+    if not jnp.allclose(
+        mass,
+        jnp.ones_like(mass),
+        atol=config.correctness_atol,
+        rtol=0.0,
+    ):
+        max_abs_diff = float(jnp.max(jnp.abs(mass - 1.0)))
+        raise SystemExit(
+            f"Sanity check failed for topology={topology.name}.\n"
+            f"Probability mass deviated from one by {max_abs_diff:.3e}."
+        )
     prototype_result = _run_prototype_e2e(
         horizon=config.horizon,
         steps_per_unit=config.steps_per_unit,
         intensity=intensity,
         ages=ages,
-        perturbation=config.perturbation,
+    )
+    _block_until_ready(prototype_result)
+    prototype_probability = jnp.swapaxes(prototype_result["probability"], 0, 1)
+    max_abs_diff = float(
+        jnp.max(jnp.abs(current_probability[:-1] - prototype_probability[:-1]))
     )
 
-    _block_until_ready(current_result)
-    _block_until_ready(prototype_result)
-
-    current_probability = current_result["probability"]
-    prototype_probability = jnp.swapaxes(prototype_result["probability"], 0, 1)
-    if not jnp.allclose(
-        current_probability[:-1],
-        prototype_probability[:-1],
-        atol=config.correctness_atol,
-        rtol=0.0,
-    ):
-        max_abs_diff = float(
-            jnp.max(
-                jnp.abs(current_probability[:-1] - prototype_probability[:-1])
-            )
-        )
-        raise SystemExit(
-            f"End-to-end correctness check failed for topology={topology.name}.\n"
-            f"Maximum absolute difference: {max_abs_diff:.3e}"
-        )
-
     print(
-        "correctness passed: "
+        "sanity passed: "
         f"benchmark=e2e topology={topology.name} "
         f"shape={current_probability.shape} "
         f"atol={config.correctness_atol:g}"
     )
-
-
+    print(
+        "prototype consistency: "
+        f"benchmark=e2e topology={topology.name} "
+        f"max_abs_diff={max_abs_diff:.3e}"
+    )
 def _time_runs(name: str, fn: Callable[[], Any], timed_runs: int) -> TimingStats:
     timings_ms = []
     for _ in range(timed_runs):
@@ -502,7 +502,6 @@ def _benchmark_e2e(
             horizon=config.horizon,
             steps_per_unit=config.steps_per_unit,
             callback="collapse_point_no_duration",
-            perturbation=config.perturbation,
             age=ages,
         )
 
@@ -512,7 +511,6 @@ def _benchmark_e2e(
             steps_per_unit=config.steps_per_unit,
             intensity=intensity,
             ages=ages,
-            perturbation=config.perturbation,
         )
 
     _warmup(run_current, config.warmup_runs)
@@ -520,7 +518,11 @@ def _benchmark_e2e(
 
     current_stats = _time_runs("current", run_current, config.timed_runs)
     prototype_stats = _time_runs("prototype", run_prototype, config.timed_runs)
-    _print_timing_summary(current_stats, prototype_stats, topology.name)
+    _print_timing_summary(
+        current_stats,
+        prototype_stats,
+        topology.name,
+    )
 
 
 def main() -> None:

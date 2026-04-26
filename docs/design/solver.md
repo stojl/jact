@@ -1,5 +1,7 @@
 # Solver design reflections
 
+> Historical note: this document discusses an earlier continuity-aware / perturbation-based solver design. The current implementation uses midpoint quadrature only and the normative contract lives in `docs/api_spec.md`.
+
 Notes toward a solver specification. These reflect on the concerns
 raised in conversation plus a few cross-cutting observations. Not a
 spec — a scratchpad for the design discussion.

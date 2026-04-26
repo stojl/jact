@@ -1,18 +1,15 @@
-"""Semi-Markov solver with duration-dependent transition intensities."""
+"""Semi-Markov solver with midpoint quadrature."""
 
 from __future__ import annotations
 
 from functools import partial
-from typing import Any, Callable, Dict, Optional, Sequence, Union
+from typing import Any, Callable, Dict, Sequence, Union
 
 import jax
 import jax.numpy as jnp
 
 from .callbacks import PointMass, StateCarry, resolve_callback
 from .initial_distribution import InitialDistribution
-
-def _state_has_point_masses(state: tuple[StateCarry, ...]) -> bool:
-    return any(carry.point_mass is not None for carry in state)
 
 
 def _stack_state_densities(state: tuple[StateCarry, ...]) -> jnp.ndarray:
@@ -40,8 +37,8 @@ def _stack_point_masses(
 
 def _dense_state_to_tuple(
     densities: jnp.ndarray,
-    point_values: jnp.ndarray | None,
-    point_d_0: jnp.ndarray | None,
+    point_values: jnp.ndarray,
+    point_d_0: jnp.ndarray,
     point_mask: tuple[bool, ...],
 ) -> tuple[StateCarry, ...]:
     state = []
@@ -53,22 +50,6 @@ def _dense_state_to_tuple(
     return tuple(state)
 
 
-def _update_density(
-    density: jnp.ndarray,
-    delta: jnp.ndarray,
-    next_inflow: jnp.ndarray,
-    step_size: float,
-) -> jnp.ndarray:
-    if density.shape[-1] == 1:
-        return density.at[..., 0].set(
-            density[..., 0] + step_size * delta[..., 0] + step_size * next_inflow
-        )
-
-    evolved = density + step_size * delta
-    density_next = evolved.at[..., 1:-1].set(evolved[..., :-2])
-    density_next = density_next.at[..., -1].add(evolved[..., -2])
-    density_next = density_next.at[..., 0].set(step_size * next_inflow)
-    return density_next
 def _evaluate_intensity_at_point(
     fn: Callable[..., jnp.ndarray],
     t: jnp.ndarray,
@@ -77,8 +58,7 @@ def _evaluate_intensity_at_point(
 ) -> jnp.ndarray:
     """Evaluate a point intensity, preferring a batched call shape."""
     d_batched = d_per_individual[:, None]
-    batched_result = fn(t, d_batched, **intensity_kwargs)
-    batched_result = jnp.asarray(batched_result)
+    batched_result = jnp.asarray(fn(t, d_batched, **intensity_kwargs))
 
     if (
         batched_result.ndim >= 2
@@ -103,207 +83,136 @@ def _evaluate_intensity_at_point(
     )(d_per_individual, *values)
 
 
-def _compute_density_derivative_no_points(
-    densities: jnp.ndarray,
-    mu_plus_matrix,
-    mu_minus_matrix,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Compute inflows and density derivatives for the no-point-mass case."""
-    outflow_avg = jnp.zeros_like(densities)
-    next_inflow = jnp.zeros(densities.shape[:-1], dtype=densities.dtype)
-
-    for i, row in enumerate(mu_plus_matrix):
-        for j, mu_plus in enumerate(row):
-            if mu_plus is None:
-                continue
-
-            mu_avg = 0.5 * (mu_plus[..., :-1] + mu_minus_matrix[i][j][..., 1:])
-            outflow_avg = outflow_avg.at[i].add(mu_avg)
-            next_inflow = next_inflow.at[j].add(
-                jnp.sum(mu_avg * densities[i], axis=-1)
-            )
-
-    delta_density = -densities * outflow_avg
-    return next_inflow, delta_density
+def _nonnegative(values: jnp.ndarray) -> jnp.ndarray:
+    return jnp.maximum(values, jnp.zeros_like(values))
 
 
-def _compute_dense_derivative_with_points(
-    densities: jnp.ndarray,
-    point_values: jnp.ndarray,
-    point_d_0: jnp.ndarray,
-    point_mask: tuple[bool, ...],
-    intensity: Sequence[Sequence[Optional[Callable[..., jnp.ndarray]]]],
+def _integrated_density_hazard(
+    fn: Callable[..., jnp.ndarray],
     t: jnp.ndarray,
-    mu_plus_matrix,
-    mu_minus_matrix,
+    duration_mid: jnp.ndarray,
+    step_size: float,
     intensity_kwargs: Dict[str, jnp.ndarray],
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Compute inflows and derivatives for a dense state representation."""
-    outflow_avg = jnp.zeros_like(densities)
-    outflow_plus_point = jnp.zeros_like(point_values)
-    next_inflow = jnp.zeros(densities.shape[:-1], dtype=densities.dtype)
+) -> jnp.ndarray:
+    midpoint = jnp.asarray(fn(t + 0.5 * step_size, duration_mid, **intensity_kwargs))
+    hazard = step_size * midpoint
+    return _nonnegative(hazard)
 
-    for i, row in enumerate(mu_plus_matrix):
-        point_duration = point_d_0[i] + t if point_mask[i] else None
-        for j, mu_plus in enumerate(row):
-            if mu_plus is None:
+
+def _integrated_point_hazard(
+    fn: Callable[..., jnp.ndarray],
+    t: jnp.ndarray,
+    point_d_0: jnp.ndarray,
+    step_size: float,
+    intensity_kwargs: Dict[str, jnp.ndarray],
+) -> jnp.ndarray:
+    midpoint = _evaluate_intensity_at_point(
+        fn,
+        t + 0.5 * step_size,
+        point_d_0 + t + 0.5 * step_size,
+        intensity_kwargs,
+    )
+    hazard = step_size * midpoint
+    return _nonnegative(hazard)
+
+
+def _stable_transfer_factor(total_hazard: jnp.ndarray) -> jnp.ndarray:
+    safe_total = jnp.where(total_hazard > 0, total_hazard, 1.0)
+    factor = -jnp.expm1(-total_hazard) / safe_total
+    return jnp.where(total_hazard > 0, factor, 1.0)
+
+
+def _advance_density(
+    density: jnp.ndarray,
+    survival: jnp.ndarray,
+    inflow: jnp.ndarray,
+) -> jnp.ndarray:
+    if density.shape[-1] == 1:
+        return density.at[..., 0].set(density[..., 0] * survival[..., 0] + inflow)
+
+    next_density = jnp.zeros_like(density)
+    next_density = next_density.at[..., 1:-1].set(
+        density[..., :-2] * survival[..., :-2]
+    )
+    next_density = next_density.at[..., -1].set(
+        density[..., -1] * survival[..., -1]
+        + density[..., -2] * survival[..., -2]
+    )
+    next_density = next_density.at[..., 0].set(inflow)
+    return next_density
+
+
+def _solver_step(
+    state: tuple[StateCarry, ...],
+    t: jnp.ndarray,
+    duration_mid: jnp.ndarray,
+    step_size: float,
+    solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
+    intensity_kwargs: Dict[str, jnp.ndarray],
+) -> tuple[StateCarry, ...]:
+    densities = _stack_state_densities(state)
+    point_values, point_d_0, point_mask = _stack_point_masses(state)
+    next_inflow = jnp.zeros(densities.shape[:-1], dtype=densities.dtype)
+    next_point_values = point_values
+    next_densities = []
+
+    for i, row in enumerate(solver_matrix):
+        density_total = jnp.zeros_like(densities[i])
+        point_total = jnp.zeros_like(point_values[i])
+        density_hazards = []
+        point_hazards = []
+
+        for j, fn in enumerate(row):
+            if fn is None:
                 continue
 
-            mu_avg = 0.5 * (mu_plus[..., :-1] + mu_minus_matrix[i][j][..., 1:])
-            outflow_avg = outflow_avg.at[i].add(mu_avg)
-            next_inflow = next_inflow.at[j].add(
-                jnp.sum(mu_avg * densities[i], axis=-1)
+            density_hazard = _integrated_density_hazard(
+                fn,
+                t,
+                duration_mid,
+                step_size,
+                intensity_kwargs,
             )
+            density_total = density_total + density_hazard
+            density_hazards.append((j, density_hazard))
 
             if point_mask[i]:
-                mu_at_point = _evaluate_intensity_at_point(
-                    intensity[i][j],
+                point_hazard = _integrated_point_hazard(
+                    fn,
                     t,
-                    point_duration,
+                    point_d_0[i],
+                    step_size,
                     intensity_kwargs,
                 )
-                outflow_plus_point = outflow_plus_point.at[i].add(mu_at_point)
-                next_inflow = next_inflow.at[j].add(mu_at_point * point_values[i])
+                point_total = point_total + point_hazard
+                point_hazards.append((j, point_hazard))
 
-    delta_density = -densities * outflow_avg
-    delta_point = -point_values * outflow_plus_point
-    return next_inflow, delta_density, delta_point
-def _evaluate_intensities(matrix, *args, **kwargs):
-    """Evaluate every intensity callable in a solver matrix."""
-    return jax.tree_util.tree_map(lambda f: f(*args, **kwargs), matrix)
-
-
-def _heun_step(
-    state: tuple[StateCarry, ...],
-    t: jnp.ndarray,
-    grid: jnp.ndarray,
-    step_size: float,
-    intensity: Sequence[Sequence[Optional[Callable[..., jnp.ndarray]]]],
-    intensity_kwargs: Dict[str, jnp.ndarray],
-    perturbation: jnp.ndarray,
-) -> tuple[StateCarry, ...]:
-    """Advance the full solver state by one time step."""
-    return _heun_step_dense(
-        state,
-        t,
-        grid,
-        step_size,
-        intensity,
-        intensity_kwargs,
-        perturbation,
-        include_point_masses=_state_has_point_masses(state),
-    )
-
-
-def _heun_step_dense(
-    state: tuple[StateCarry, ...],
-    t: jnp.ndarray,
-    grid: jnp.ndarray,
-    step_size: float,
-    intensity: Sequence[Sequence[Optional[Callable[..., jnp.ndarray]]]],
-    intensity_kwargs: Dict[str, jnp.ndarray],
-    perturbation: jnp.ndarray,
-    include_point_masses: bool,
-) -> tuple[StateCarry, ...]:
-    """Advance a state tuple through a dense stacked representation."""
-    densities = _stack_state_densities(state)
-    point_values = None
-    point_d_0 = None
-    point_mask = tuple(False for _ in state)
-    if include_point_masses:
-        point_values, point_d_0, point_mask = _stack_point_masses(state)
-
-    grid_minus = grid - perturbation
-    grid_plus = grid + perturbation
-    t_left = t + perturbation
-
-    mu_plus = _evaluate_intensities(
-        intensity, t_left, grid_plus, **intensity_kwargs
-    )
-    mu_minus = _evaluate_intensities(
-        intensity, t_left, grid_minus, **intensity_kwargs
-    )
-    if include_point_masses:
-        next_inflow, delta_density, delta_point = (
-            _compute_dense_derivative_with_points(
-                densities,
-                point_values,
-                point_d_0,
-                point_mask,
-                intensity,
-                t_left,
-                mu_plus,
-                mu_minus,
-                intensity_kwargs,
+        density_survival = jnp.exp(-density_total)
+        density_transfer_factor = _stable_transfer_factor(density_total)
+        for j, density_hazard in density_hazards:
+            transferred = density_hazard * density_transfer_factor
+            next_inflow = next_inflow.at[j].add(
+                jnp.sum(densities[i] * transferred, axis=-1)
             )
-        )
-    else:
-        next_inflow, delta_density = _compute_density_derivative_no_points(
-            densities,
-            mu_plus,
-            mu_minus,
-        )
-        delta_point = None
 
-    predictor = _update_density(
-        densities,
-        delta_density,
-        next_inflow,
-        step_size,
-    )
-    predictor_point = None
-    if include_point_masses:
-        predictor_point = point_values + step_size * delta_point
-
-    t_right = t + step_size - perturbation
-    mu_plus_2 = _evaluate_intensities(
-        intensity, t_right, grid_plus, **intensity_kwargs
-    )
-    mu_minus_2 = _evaluate_intensities(
-        intensity, t_right, grid_minus, **intensity_kwargs
-    )
-    if include_point_masses:
-        next_inflow_2, delta_density_2, delta_point_2 = (
-            _compute_dense_derivative_with_points(
-                predictor,
-                predictor_point,
-                point_d_0,
-                point_mask,
-                intensity,
-                t_right,
-                mu_plus_2,
-                mu_minus_2,
-                intensity_kwargs,
+        if point_mask[i]:
+            point_survival = jnp.exp(-point_total)
+            point_transfer_factor = _stable_transfer_factor(point_total)
+            next_point_values = next_point_values.at[i].set(
+                point_values[i] * point_survival
             )
-        )
-    else:
-        next_inflow_2, delta_density_2 = _compute_density_derivative_no_points(
-            predictor,
-            mu_plus_2,
-            mu_minus_2,
-        )
-        delta_point_2 = None
+            for j, point_hazard in point_hazards:
+                next_inflow = next_inflow.at[j].add(
+                    point_values[i] * point_hazard * point_transfer_factor
+                )
 
-    corrected_inflow = 0.5 * (
-        next_inflow + next_inflow_2 + delta_density_2[..., 0]
-    )
-    corrected_density = delta_density.at[..., :-1].set(
-        0.5 * (delta_density_2[..., 1:] + delta_density[..., :-1])
-    )
-    corrected = _update_density(
-        densities,
-        corrected_density,
-        corrected_inflow,
-        step_size,
-    )
-    corrected_point = None
-    if include_point_masses:
-        corrected_point = point_values + step_size * 0.5 * (
-            delta_point + delta_point_2
+        next_densities.append(
+            _advance_density(densities[i], density_survival, next_inflow[i])
         )
+
     return _dense_state_to_tuple(
-        corrected,
-        corrected_point,
+        jnp.stack(tuple(next_densities), axis=0),
+        next_point_values,
         point_d_0,
         point_mask,
     )
@@ -313,52 +222,51 @@ def _heun_step_dense(
     jax.jit,
     static_argnames=[
         "step_size",
-        "intensity",
+        "solver_matrix",
         "prob_callback",
-        "perturbation",
         "record_every",
     ],
 )
-def _heun_solver(
+def _midpoint_solver(
     state_0: tuple[StateCarry, ...],
-    grid: jnp.ndarray,
+    duration_mid: jnp.ndarray,
     step_size: float,
-    intensity: Sequence[Sequence[Optional[Callable[..., jnp.ndarray]]]],
+    solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
     intensity_kwargs: Dict[str, jnp.ndarray],
     prob_callback: Callable[..., Any],
-    perturbation: jnp.ndarray,
     record_every: int,
 ):
-    """Run the Heun scheme solver and record callback outputs."""
-    n_steps = grid.shape[-1] - 1
+    """Run the midpoint solver and record callback outputs."""
+    n_steps = duration_mid.shape[-1]
     n_records = n_steps // record_every
 
     def block_scan(carry, block_start):
-        offsets = jnp.arange(record_every, dtype=grid.dtype)
+        offsets = jnp.arange(record_every, dtype=duration_mid.dtype)
 
         def step_scan(inner_carry, offset):
             current_t = block_start + offset * step_size
-            return (
-                _heun_step(
-                    inner_carry,
-                    current_t,
-                    grid,
-                    step_size,
-                    intensity,
-                    intensity_kwargs,
-                    perturbation,
-                ),
-                None,
+            next_state = _solver_step(
+                inner_carry,
+                current_t,
+                duration_mid,
+                step_size,
+                solver_matrix,
+                intensity_kwargs,
             )
+            return next_state, None
 
         carry, _ = jax.lax.scan(step_scan, carry, offsets)
         return carry, prob_callback(carry)
 
     initial_probability = prob_callback(state_0)
-    block_starts = jnp.arange(n_records, dtype=grid.dtype) * (
+    block_starts = jnp.arange(n_records, dtype=duration_mid.dtype) * (
         record_every * step_size
     )
-    _, probability = jax.lax.scan(block_scan, state_0, block_starts)
+    _, probability = jax.lax.scan(
+        block_scan,
+        state_0,
+        block_starts,
+    )
 
     probability = jax.tree_util.tree_map(
         lambda arr, init: (
@@ -373,9 +281,9 @@ def _heun_solver(
     return {"probability": probability}
 
 
-def _get_reference_function(intensity_matrix):
-    """Find the first non-None callable in the intensity matrix."""
-    for row in intensity_matrix:
+def _get_reference_function(solver_matrix):
+    """Find the first non-None callable in the solver matrix."""
+    for row in solver_matrix:
         for fn in row:
             if fn is not None:
                 return fn
@@ -449,7 +357,6 @@ def solve(
     initial_duration: Any = 0.0,
     callback: Union[None, str, Callable] = "collapse_point_no_duration",
     record_every: int = 1,
-    perturbation: float = 1e-12,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Compute transition probabilities from a documented initial condition."""
@@ -472,10 +379,10 @@ def solve(
     canonical = initial_distribution.canonicalize(model_states)
 
     reduced = model.reduce(canonical.states)
-    intensity_matrix = tuple(
-        tuple(row) for row in reduced.solver_matrix
-    )
+    solver_matrix = reduced.solver_matrix
     grid = jnp.linspace(0, horizon, solver_steps + 1, endpoint=True)[None, :]
+    duration_left = grid[:, :-1]
+    duration_mid = 0.5 * (duration_left + grid[:, 1:])
     step_size = 1 / steps_per_unit
     prob_callback = resolve_callback(callback)
 
@@ -490,13 +397,13 @@ def solve(
             "InitialDistribution batch size must match covariate batch size."
         )
 
-    reference_fn = _get_reference_function(intensity_matrix)
+    reference_fn = _get_reference_function(solver_matrix)
     if reference_fn is None:
         raise ValueError(
             "The intensity matrix contains no callables. Cannot solve."
         )
 
-    reference_output = reference_fn(0.0, grid, **kwargs)
+    reference_output = reference_fn(0.0, duration_left, **kwargs)
     reference_batch = reference_output.shape[0]
 
     batch_size = distribution_batch
@@ -522,15 +429,13 @@ def solve(
                 batch_size,
             )
         state_0.append(StateCarry(density=density, point_mass=point_mass))
-
-    result = _heun_solver(
+    result = _midpoint_solver(
         tuple(state_0),
-        grid,
+        duration_mid,
         step_size,
-        intensity_matrix,
+        solver_matrix,
         kwargs,
         prob_callback,
-        perturbation,
         record_every,
     )
     result["states"] = reduced.reachable_states

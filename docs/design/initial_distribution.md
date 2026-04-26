@@ -21,7 +21,7 @@ Routes 1–3 are lifted into an `InitialDistribution` at `solve()`-entry.
 Then `solve()` calls `Model.reduce(initial_states)`, where
 `initial_states` is the set of keys of
 `InitialDistribution.components`, and threads the reduced subgraph
-through the Heun scan.
+through the midpoint scan.
 
 The spec already commits to an invariant:
 
