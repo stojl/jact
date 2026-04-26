@@ -241,7 +241,6 @@ result = model.solve(
     initial="healthy",
     horizon=10,
     steps_per_unit=12,
-    freeze_initial=True,
     callback="collapse_point_no_duration",
     record_every=1,
     age=age_array,
@@ -260,7 +259,6 @@ Parameters:
 |---|---|---|
 | `initial` | `str`, `(batch,)` int array, or `InitialDistribution` | Initial condition |
 | `initial_duration` | float or `(batch,)` array | Per-individual `d_0` for `str` / `(batch,)` initial forms |
-| `freeze_initial` | bool | Keep seeded point masses pinned at their original `d_0` and use them as persistent sources of density inflow |
 | `horizon` | int | Number of time units |
 | `steps_per_unit` | int | Discretisation resolution per time unit |
 | `callback` | `str`, callable, or `None` | Probability callback |
@@ -284,10 +282,11 @@ A_ij^(n)[k] = dt · μ_ij(t_n + dt / 2, d_k + dt / 2)
 
 for density mass.
 
-Point masses have two modes:
+Point masses follow the same transported characteristic as the density:
 
-- default mode (`freeze_initial=False`): use the analogous midpoint sample on `(t, d_0 + t)` and decay the point mass with the same competing-risks update,
-- frozen-source mode (`freeze_initial=True`): evaluate hazards at fixed duration `d_0`, keep the point-mass value unchanged, and still route its outgoing mass into target densities each step.
+- hazards are evaluated at the midpoint sample `(t + dt / 2, d_0 + t + dt / 2)`,
+- the point-mass value decays by the same competing-risks update used for density survival,
+- outgoing point-mass mass is routed into target densities at duration zero.
 
 The step then:
 
@@ -296,12 +295,12 @@ The step then:
 3. Forms survival `S_i = exp(-Σ_j A_ij)` and stable transfer fractions.
 4. Shifts surviving density one duration slot to the right.
 5. Injects transferred mass into duration zero.
-6. Either decays point masses along `(t, d_0 + t)` or, in frozen-source mode, keeps them pinned while still transferring their outgoing mass.
+6. Decays point masses along `(t, d_0 + t)` and transfers their outgoing mass into target densities.
 
-Built-in callbacks keep their existing names and include frozen point masses exactly where they already include ordinary point masses:
+Built-in callbacks keep their existing names and expose point masses directly from the solver state:
 
-- `collapse_point` and `collapse_point_no_duration` add the pinned point mass to the reported state total,
-- `point_only` and `point_only_no_duration` show the unchanged point mass directly,
+- `collapse_point` and `collapse_point_no_duration` add point-mass value to the reported state total,
+- `point_only` and `point_only_no_duration` show the current point mass directly,
 - `no_point` and `no_point_no_duration` continue to exclude point mass entirely.
 
 ## Numerical contract
@@ -311,7 +310,6 @@ Built-in callbacks keep their existing names and include frozen point masses exa
 - If a jump lies strictly inside a traversed cell, convergence for that callable can drop to first order.
 - This tradeoff is explicit: the solver does not expose split or jump locations through the callable API.
 - For piecewise-constant, tree-based, or other discontinuous hazards, align split points in `t` and `d` to the solver grid when possible.
-- `freeze_initial=True` introduces a persistent exogenous source. In that mode the usual “total probability stays at 1” interpretation no longer applies to callbacks that include point mass or downstream density fed from it.
 
 ## JIT boundary
 
@@ -321,7 +319,6 @@ Static:
 - callback function,
 - presence or absence of `point_mass` per state,
 - declared set of initial states,
-- `freeze_initial`,
 - `step_size`,
 - `record_every`.
 

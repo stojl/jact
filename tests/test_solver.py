@@ -386,131 +386,19 @@ class TestSolverContinuityAndStability:
         assert jnp.allclose(probability[..., 0], 1.0, atol=1e-7, rtol=0.0)
         assert jnp.allclose(probability[..., 1], 0.0, atol=1e-7, rtol=0.0)
 
-    def test_freeze_initial_false_matches_default_behavior(
-        self, illness_death_model
-    ):
-        kwargs = dict(
-            initial="healthy",
-            horizon=2,
-            steps_per_unit=6,
-            callback="collapse_point_no_duration",
-            age=jnp.arange(3, dtype=jnp.float32),
-        )
-
-        default_probability = illness_death_model.solve(**kwargs)["probability"]
-        explicit_probability = illness_death_model.solve(
-            freeze_initial=False,
-            **kwargs,
-        )["probability"]
-
-        assert jnp.allclose(
-            default_probability,
-            explicit_probability,
-            atol=0.0,
-            rtol=0.0,
-        )
-
-    def test_frozen_initial_point_mass_stays_pinned_and_feeds_density(self):
-        state_space = jact.StateSpace(
-            states=["healthy", "dead"],
-            transitions=[("healthy", "dead")],
-        )
-        rate = 0.8
-        model = state_space.build(
-            transitions={("healthy", "dead"): _constant_intensity(rate)}
-        )
-
-        kwargs = dict(
-            initial="healthy",
-            horizon=1,
-            steps_per_unit=4,
-            freeze_initial=True,
-            age=jnp.arange(2, dtype=jnp.float32),
-        )
-
-        point_only = model.solve(
-            callback="point_only_no_duration",
-            **kwargs,
-        )["probability"]
-        no_point = model.solve(
-            callback="no_point_no_duration",
-            **kwargs,
-        )["probability"]
-        collapse = model.solve(
-            callback="collapse_point_no_duration",
-            **kwargs,
-        )["probability"]
-
-        step_transfer = 1.0 - jnp.exp(-rate / 4.0)
-        expected_dead = jnp.arange(5, dtype=jnp.float32)[:, None] * step_transfer
-
-        assert point_only[1] is None
-        assert jnp.allclose(point_only[0], jnp.ones((5, 2)), atol=1e-7, rtol=0.0)
-        assert jnp.allclose(no_point[..., 0], 0.0, atol=1e-7, rtol=0.0)
-        assert jnp.allclose(
-            no_point[..., 1],
-            expected_dead,
-            atol=1e-6,
-            rtol=0.0,
-        )
-        assert jnp.allclose(collapse[..., 0], 1.0, atol=1e-7, rtol=0.0)
-        assert jnp.allclose(
-            collapse[..., 1],
-            expected_dead,
-            atol=1e-6,
-            rtol=0.0,
-        )
-
-    def test_frozen_initial_point_source_uses_fixed_duration(
-        self, duration_to_death_model
-    ):
-        initial_duration = jnp.array([2.0], dtype=jnp.float32)
-
-        point_only = duration_to_death_model.solve(
-            initial="healthy",
-            initial_duration=initial_duration,
-            horizon=1,
-            steps_per_unit=2,
-            freeze_initial=True,
-            callback="point_only",
-            age=jnp.arange(1, dtype=jnp.float32),
-        )["probability"]
-        no_point = duration_to_death_model.solve(
-            initial="healthy",
-            initial_duration=initial_duration,
-            horizon=1,
-            steps_per_unit=2,
-            freeze_initial=True,
-            callback="no_point_no_duration",
-            age=jnp.arange(1, dtype=jnp.float32),
-        )["probability"]
-
-        step_transfer = 1.0 - jnp.exp(-0.5 * initial_duration[0])
-        expected_dead = jnp.array([0.0, step_transfer, 2.0 * step_transfer])[
-            :, None
-        ]
-
-        assert isinstance(point_only[0], PointMass)
-        assert point_only[1] is None
-        assert jnp.allclose(
-            point_only[0].value,
-            jnp.ones((3, 1)),
-            atol=1e-7,
-            rtol=0.0,
-        )
-        assert jnp.allclose(
-            point_only[0].d_0,
-            jnp.full((3, 1), 2.0),
-            atol=1e-7,
-            rtol=0.0,
-        )
-        assert jnp.allclose(no_point[..., 0], 0.0, atol=1e-7, rtol=0.0)
-        assert jnp.allclose(
-            no_point[..., 1],
-            expected_dead,
-            atol=1e-6,
-            rtol=0.0,
-        )
+    def test_freeze_initial_keyword_is_rejected(self, illness_death_model):
+        with pytest.raises(
+            TypeError,
+            match="unexpected keyword argument 'freeze_initial'",
+        ):
+            illness_death_model.solve(
+                initial="healthy",
+                horizon=2,
+                steps_per_unit=6,
+                freeze_initial=False,
+                callback="collapse_point_no_duration",
+                age=jnp.arange(3, dtype=jnp.float32),
+            )
 
     def test_large_hazard_branch_remains_finite_and_nonnegative(self):
         state_space = jact.StateSpace(

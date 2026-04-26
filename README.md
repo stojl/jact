@@ -41,7 +41,7 @@ result = model.solve(initial="healthy", horizon=30, steps_per_unit=12, age=ages)
 - **Plug in any model**: Gompertz, GLM, neural network — anything that's JIT-compatible.
 - **Swap and compare**: Same `StateSpace`, different intensity models. Experiment easily.
 - **Compute only what's needed**: The solver reduces to states reachable from the initial state.
-- **Pinned-source mode**: `solve(..., freeze_initial=True)` keeps seeded point masses fixed and uses them as persistent sources for steady-source analyses.
+- **Exact seeded starts**: Initial point masses preserve per-individual starting duration `d_0` exactly.
 - **Batch-first**: Designed for 100K+ individuals in a single pass.
 
 ## Documentation
@@ -49,8 +49,6 @@ result = model.solve(initial="healthy", horizon=30, steps_per_unit=12, age=ages)
 See [docs/api_spec.md](docs/api_spec.md) for the full API specification.
 For a runnable walkthrough of the main workflow, see
 [docs/example_notebook.ipynb](docs/example_notebook.ipynb).
-The full spec also documents the exact semantics of `freeze_initial=True`,
-including how it changes the usual probability-mass interpretation.
 
 ## Installation
 
