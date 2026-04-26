@@ -121,43 +121,37 @@ JAX requirements: pure, JIT-compatible, and closed over static values only.
 
 This is the intended public API, not current implemented behavior.
 
-Construction:
+Construction takes a flat `name -> component` mapping; the component's Python type is the kind discriminator:
 
 ```python
-cashflows = state_space.cashflows(
-    components={...},
-)
+cashflows = state_space.cashflows({
+    name: component,
+    ...
+})
 ```
 
-The declaration is component-first: each named component defines its kind, its attachment, and its payment callable.
-
-Validation is against the `StateSpace`: states and transitions must be declared there, and component names must be unique.
+Validation is against the `StateSpace`: attachment keys must reference declared states or transitions, and component names must be unique.
 
 Example:
 
 ```python
-components = {
-    "premium": {
-        "kind": "state_rate",
-        "states": {"healthy": premium_fn},
-    },
-    "death_benefit": {
-        "kind": "transition_lump",
-        "transitions": {("healthy", "dead"): death_fn},
-    },
-    "retirement_bonus": {
-        "kind": "scheduled_event",
-        "when": event_time_fn,
-        "states": {"healthy": bonus_fn},
-    },
-}
+cashflows = state_space.cashflows({
+    "premium":          StateRate({"healthy": premium_fn}),
+    "death_benefit":    TransitionLump({("healthy", "dead"): death_fn}),
+    "retirement_bonus": ScheduledEvent(
+        when=event_time_fn,
+        payments={"healthy": bonus_fn},
+    ),
+})
 ```
 
-Kinds:
+Component types:
 
-- `state_rate`: payment rate while occupying an attached state
-- `transition_lump`: lump amount if an attached transition occurs
-- `scheduled_event`: deterministic event time plus state-conditioned payment
+- `StateRate(payments)` — payment rate while occupying an attached state; `payments` keyed by state name.
+- `TransitionLump(payments)` — lump amount if an attached transition occurs; `payments` keyed by `(src, tgt)`.
+- `ScheduledEvent(when=..., payments=...)` — deterministic event time plus state-conditioned payment; `payments` keyed by state name.
+
+`StateRate` and `TransitionLump` take their `payments` dict positionally.
 
 Payment callable protocol for all three kinds:
 

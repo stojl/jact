@@ -230,17 +230,18 @@ This section specifies the intended public cashflow API. It is a documentation-o
 Cashflows are declared from a `StateSpace`, not from a `Model`:
 
 ```python
-cashflows = state_space.cashflows(
-    components={...},
-)
+cashflows = state_space.cashflows({
+    name: component,
+    ...
+})
 ```
 
-The returned object is a reusable cashflow declaration built against the state-space topology. The exact concrete class name is not yet fixed.
+The argument is a single flat mapping from component name to a typed component object (`StateRate`, `TransitionLump`, or `ScheduledEvent`). The returned object is a reusable cashflow declaration built against the state-space topology. The exact concrete class name of the declaration is not yet fixed.
 
 The cashflow declaration answers:
 
 - which named cashflow components exist,
-- what kind of component each is,
+- what kind of component each is (carried by the component's Python type),
 - where each component attaches,
 - what callable defines the payment amount.
 
@@ -248,103 +249,79 @@ Aggregation, valuation, cumulative totals, and terminal totals are not declared 
 
 Validation is structural and uses the `StateSpace` only:
 
-- state-rate attachments must reference declared states,
-- transition-lump attachments must reference declared transitions,
-- scheduled-event state attachments must reference declared states,
+- `StateRate` attachment keys must reference declared states,
+- `TransitionLump` attachment keys must reference declared transitions,
+- `ScheduledEvent.payments` keys must reference declared states,
 - component names must be unique.
 
 ### Component-first grammar
 
-The top-level public grammar is component-first:
+The top-level public grammar is component-first. Each entry maps a component name to a typed component object; the object's Python type discriminates the kind:
 
 ```python
-cashflows = state_space.cashflows(
-    components={
-        "premium": {
-            "kind": "state_rate",
-            "states": {
-                "healthy": premium_fn,
-            },
-        },
-        "death_benefit": {
-            "kind": "transition_lump",
-            "transitions": {
-                ("healthy", "dead"): death_fn,
-            },
-        },
-        "retirement_bonus": {
-            "kind": "scheduled_event",
-            "when": event_time_fn,
-            "states": {
-                "healthy": bonus_fn,
-            },
-        },
-    },
-)
+cashflows = state_space.cashflows({
+    "premium":          StateRate({"healthy": premium_fn}),
+    "death_benefit":    TransitionLump({("healthy", "dead"): death_fn}),
+    "retirement_bonus": ScheduledEvent(
+        when=event_time_fn,
+        payments={"healthy": bonus_fn},
+    ),
+})
 ```
 
 Each component name identifies one raw cashflow stream. Components are the basis for later aggregation and reporting.
+
+`StateRate`, `TransitionLump`, and `ScheduledEvent` are small frozen dataclasses parallel to other typed declaration objects in `jact`. The Python type carries the kind, so no `kind` discriminator string is needed and pyright sees the per-kind required fields.
 
 ### Component kinds
 
 #### State-rate
 
-`"kind": "state_rate"` attaches payment-rate callables to states.
-
-Recommended v1 attachment shape:
+`StateRate` attaches payment-rate callables to states. The attachment dict is the sole positional argument:
 
 ```python
-{
-    "kind": "state_rate",
-    "states": {
-        "healthy": premium_fn,
-        "disabled": waiver_fn,
-    },
-}
+StateRate({
+    "healthy":  premium_fn,
+    "disabled": waiver_fn,
+})
 ```
 
 Interpretation: expected cashflow is generated continuously while the policy occupies the attached state.
 
 #### Transition-lump
 
-`"kind": "transition_lump"` attaches lump-sum payment callables to declared transitions.
-
-Recommended v1 attachment shape:
+`TransitionLump` attaches lump-sum payment callables to declared transitions. The attachment dict is the sole positional argument:
 
 ```python
-{
-    "kind": "transition_lump",
-    "transitions": {
-        ("healthy", "dead"): death_fn,
-        ("healthy", "disabled"): onset_fn,
-    },
-}
+TransitionLump({
+    ("healthy", "dead"):     death_fn,
+    ("healthy", "disabled"): onset_fn,
+})
 ```
 
 Interpretation: expected cashflow is generated when the attached transition occurs.
 
 #### Scheduled-event
 
-`"kind": "scheduled_event"` declares a deterministic event-time rule plus state-conditioned payment callables.
-
-Recommended v1 attachment shape:
+`ScheduledEvent` declares a deterministic event-time rule (`when`) plus state-conditioned payment callables (`payments`):
 
 ```python
-{
-    "kind": "scheduled_event",
-    "when": event_time_fn,
-    "states": {
-        "healthy": bonus_fn,
+ScheduledEvent(
+    when=event_time_fn,
+    payments={
+        "healthy":  bonus_fn,
         "disabled": reduced_bonus_fn,
     },
-}
+)
 ```
 
 Interpretation: expected cashflow is generated at the component's deterministic event time, conditional on the occupied state at that time.
 
+The `payments` field name is consistent with the positional payment dicts on `StateRate` and `TransitionLump`: in every kind the attachment dict is keyed by an attachment point (state or transition) and valued by a payment callable.
+
 ### Callable protocols
 
-Payment functions for `state_rate`, `transition_lump`, and `scheduled_event` share one protocol:
+Payment functions for `StateRate`, `TransitionLump`, and `ScheduledEvent` share one protocol:
 
 ```python
 def payment(t, d, **kwargs) -> jnp.ndarray: ...
@@ -360,9 +337,9 @@ Arguments:
 
 Interpretation depends on component kind:
 
-- for `state_rate`, `payment(t, d, **kwargs)` is a rate while occupying the state,
-- for `transition_lump`, it is a lump amount if the transition occurs at `(t, d)`,
-- for `scheduled_event`, it is a payment amount evaluated only at the declared event time.
+- for `StateRate`, `payment(t, d, **kwargs)` is a rate while occupying the state,
+- for `TransitionLump`, it is a lump amount if the transition occurs at `(t, d)`,
+- for `ScheduledEvent`, it is a payment amount evaluated only at the declared event time.
 
 Scheduled-event time rules use a separate protocol:
 
