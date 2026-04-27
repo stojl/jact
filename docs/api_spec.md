@@ -332,14 +332,18 @@ Arguments:
 | Arg | Type | Meaning |
 |---|---|---|
 | `t` | scalar float | Clock time at which the payment is evaluated |
-| `d` | duration representation | Duration in the current state |
+| `d` | `(1, D)` | Duration grid broadcast over batch |
 | `**kwargs` | `(batch, ...)` arrays | Solve-time covariates |
+
+Return shape:
+
+- `(batch, D)` for every component kind.
 
 Interpretation depends on component kind:
 
 - for `StateRate`, `payment(t, d, **kwargs)` is a rate while occupying the state,
-- for `TransitionLump`, it is a lump amount if the transition occurs at `(t, d)`,
-- for `ScheduledEvent`, it is a payment amount evaluated only at the declared event time.
+- for `TransitionLump`, it is a lump amount if the transition occurs at `(t, d)`; duration dependence is allowed,
+- for `ScheduledEvent`, it is a payment amount evaluated only at the effective event time on the same duration grid.
 
 Scheduled-event time rules use a separate protocol:
 
@@ -360,20 +364,20 @@ The planned first version keeps scheduled deterministic events intentionally nar
 
 - event times may be data-dependent per individual,
 - `when(**kwargs)` returns exactly one event time per individual,
-- event times must be aligned to the solver grid,
-- off-grid event times are rejected,
+- event times are snapped to the solver grid by flooring to the greatest grid time less than or equal to the returned value,
+- snapping is silent and defines the effective event time used by the solver,
+- event times exactly on the solver grid use that grid time unchanged,
+- state occupancy at the effective event time uses the pre-step convention,
 - multiple event times per component are future work.
-
-If an event lands exactly on a solver grid point, the left-versus-right timing convention remains an open design point.
 
 ### Recording semantics
 
 Cashflow streams are recorded with **interval accumulation** semantics. Each entry of a streamed cashflow leaf is the sum of inner-step contributions generated over the record period that the entry indexes:
 
 - state-rate and transition-lump contributions are summed across every inner step spanning the period,
-- a scheduled event lands in the unique record period containing its event time and contributes to that period only.
+- a scheduled event lands in the unique record period containing its effective event time and contributes to that period only.
 
-This differs from the snapshot semantics used for probability output. Cumulative output is `jnp.cumsum(stream, axis=0)` host-side; terminal-from-stream output is `stream.sum(axis=0)`. A separate carry-only terminal mode is available per view via `accumulate=True` (see §"Cashflow views"). Sample semantics are not offered for state-rate or transition-lump cashflows: the instantaneous value is a rate, not a payment, and its meaning is unstable under refinement of `record_every`.
+This differs from the snapshot semantics used for probability output. Cumulative output is `jnp.cumsum(stream, axis=0)` host-side; terminal-from-stream output is `stream.sum(axis=0)`. A separate carry-only terminal mode is available per view via `terminal=True` (see §"Cashflow views"). Sample semantics are not offered for state-rate or transition-lump cashflows: the instantaneous value is a rate, not a payment, and its meaning is unstable under refinement of `record_every`.
 
 ### Cashflow views
 
@@ -395,30 +399,37 @@ The v1 view types are small frozen dataclasses parallel to the typed component o
 
 | View | Constructor | Output leaves |
 |---|---|---|
-| `Raw` | `Raw(name: str | None = None, *, weight=None, accumulate=False)` | `{component_name: stream}` for every declared component when `name is None`; `{name: stream}` for the single named component otherwise |
-| `Group` | `Group(members: Sequence[str], *, weight=None, accumulate=False)` | one stream summing the named components |
-| `Total` | `Total(*, weight=None, accumulate=False)` | one stream summing every declared component |
-| `ByState` | `ByState(*, weight=None, accumulate=False)` | `{state_name: stream}` keyed by attachment state |
-| `ByKind` | `ByKind(*, weight=None, accumulate=False)` | `{kind_name: stream}` keyed by component kind |
+| `Raw` | `Raw(name: str | None = None, *, weight=None, terminal=False)` | `{component_name: stream}` for every declared component when `name is None`; `{name: stream}` for the single named component otherwise |
+| `Group` | `Group(members: Sequence[str], *, weight=None, terminal=False)` | one stream summing the named components |
+| `Total` | `Total(*, weight=None, terminal=False)` | one stream summing every declared component |
+| `ByState` | `ByState(*, weight=None, terminal=False)` | `{state_name: stream}` keyed by every reachable state in the reduced solve |
+| `ByKind` | `ByKind(*, weight=None, terminal=False)` | `{kind_name: stream}` keyed by component kind |
 
 Every view shares two optional fields:
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `weight` | `Callable[[float, ...], jnp.ndarray] | float | None` | `None` | Per-step multiplicative factor applied before recording or accumulation. `None` is unweighted. A scalar is sugar for `lambda t, **kw: scalar`. |
-| `accumulate` | `bool` | `False` | `False` records one entry per `record_every` (interval semantics, see above); `True` collapses the time axis to a single carry-only accumulator per leaf. |
+| `weight` | `Callable[[float, ...], jnp.ndarray] | float | None` | `None` | Per-step multiplicative factor applied before recording or terminal accumulation. `None` is unweighted. A scalar is sugar for `lambda t, **kw: scalar`. |
+| `terminal` | `bool` | `False` | `False` records one entry per `record_every` (interval semantics, see above); `True` collapses the time axis to a single carry-only accumulator per leaf. This is terminal-only output, not cumulative streaming output. |
 
 The `weight` callable returns the per-step factor directly: no implicit exponentiation, no implicit cumulative product. For continuously discounted weights, use the `discount_factor` helper described in §"Cashflow valuation".
 
-Within a single `cashflow_views` mapping, streamed and terminal views can coexist freely; each leaf's shape is decided by that view's `accumulate` setting (see §"Output shape" within §"Planned cashflow solve extension").
+Within a single `cashflow_views` mapping, streamed and terminal views can coexist freely; each leaf's shape is decided by that view's `terminal` setting (see §"Output shape" within §"Planned cashflow solve extension").
 
-`ByState` keys scheduled-event contributions under the state occupied at the event time. `ByKind` keys components under `"state_rate"`, `"transition_lump"`, and `"scheduled_event"`.
+View semantics:
+
+- `Raw(name)` returns the single named component.
+- `Raw()` returns every declared component.
+- `Group(members)` returns the sum of the named components.
+- `Total()` returns the sum of all declared components.
+- `ByState()` returns one key per reachable state in the reduced solve, including zero-valued leaves for reachable states with no contributions. `StateRate` contributes to its attached state, `TransitionLump` contributes to its source state, and `ScheduledEvent` contributes to the state occupied at the effective event time.
+- `ByKind()` returns keys `"state_rate"`, `"transition_lump"`, and `"scheduled_event"`.
 
 Validation is structural and uses the cashflow declaration only:
 
 - view names are unique across the dict,
 - `Group.members` and `Raw(name=...)` reference declared component names,
-- `accumulate` is a `bool`,
+- `terminal` is a `bool`,
 - `weight` is `None`, a Python scalar, or a callable.
 
 Within-component splitting (a `PerAttachment` view exposing one stream per attachment point of a single component) is sketched in `docs/design/cashflow_aggregation.md` §6 and deferred to a future version.
@@ -427,16 +438,16 @@ Within-component splitting (a `PerAttachment` view exposing one stream per attac
 
 Time-only valuation — discounting, indexation, scenario reweighting, deterministic unit-of-account changes — is expressed via the `weight=` field on a view. There is no separate `valuations` dict and no parallel result key: every weighted output lands under `result["cashflows"][view_name]`.
 
-`accumulate=True` is the carry-only mode: the solver maintains a single `(batch,)` accumulator per terminal-mode view and emits no per-step entry, so no `(T_out, batch)` stream is materialised. This is the configuration in which solver-side weighting buys something post-processing cannot.
+`terminal=True` is the carry-only mode: the solver maintains a single `(batch,)` accumulator per terminal-mode view and emits no per-step entry, so no `(T_out, batch)` stream is materialised. This is the configuration in which solver-side weighting buys something post-processing cannot.
 
 ```python
 from jact import discount_factor
 
 cashflow_views = {
-    "pv_total":       Total(weight=discount_factor(rate=r), accumulate=True),
+    "pv_total":       Total(weight=discount_factor(rate=r), terminal=True),
     "pv_total_stream": Total(weight=discount_factor(rate=r)),
     "real":           Group(["death_benefit", "retirement_bonus"], weight=index_curve),
-    "pv_by_state":    ByState(weight=discount_factor(rate=r), accumulate=True),
+    "pv_by_state":    ByState(weight=discount_factor(rate=r), terminal=True),
 }
 ```
 
@@ -526,7 +537,7 @@ result = model.solve(
     cashflows=cashflows,
     cashflow_views={
         "benefits": Group(["death_benefit", "retirement_bonus"]),
-        "pv_total": Total(weight=discount_factor(rate=0.03), accumulate=True),
+        "pv_total": Total(weight=discount_factor(rate=0.03), terminal=True),
     },
     record_every=1,
     age=age_array,
@@ -544,7 +555,7 @@ Planned semantics:
 `probability=None` disables probability output.
 `cashflows=None` disables cashflow output.
 
-When `cashflows` is supplied and `cashflow_views` is `None` (or omitted), the solver returns one streamed leaf per declared component — equivalent to a single implicit `Raw()` view. When `cashflow_views` is supplied, the solver returns exactly the requested views; raw components are not added implicitly.
+When `cashflows` is supplied and `cashflow_views` is `None` (or omitted), the solver behaves exactly as if `cashflow_views={"raw": Raw()}` had been passed. When `cashflow_views` is supplied, the solver returns exactly the requested views; raw components are not added implicitly.
 
 Planned result keys:
 
@@ -558,13 +569,13 @@ result["states"]
 
 #### Output shape
 
-Per leaf, shape depends on the view kind and on `accumulate`:
+Per leaf, shape depends on the view kind and on `terminal`:
 
-| View | `accumulate=False` (streamed) | `accumulate=True` (terminal) |
+| View | `terminal=False` (streamed) | `terminal=True` (terminal) |
 |---|---|---|
 | `Raw(name)`, `Group`, `Total` | `(T_out, batch)` | `(batch,)` |
 | `Raw()` | `{component_name: (T_out, batch)}` for every declared component | `{component_name: (batch,)}` |
-| `ByState` | `{state_name: (T_out, batch)}` | `{state_name: (batch,)}` |
+| `ByState` | `{state_name: (T_out, batch)}` for every reachable state in the reduced solve | `{state_name: (batch,)}` for every reachable state in the reduced solve |
 | `ByKind` | `{kind_name: (T_out, batch)}` | `{kind_name: (batch,)}` |
 
 `T_out = horizon * steps_per_unit / record_every`, matching the probability output. Time is the leading axis of every streamed leaf; terminal leaves drop the time axis. Batch is always preserved.
