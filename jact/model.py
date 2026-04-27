@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 from .initial_distribution import InitialDistribution
+from .solver import _PROBABILITY_UNSET
 from .state_space import StateSpace
+
 
 @dataclass(frozen=True)
 class TransitionInfo:
@@ -32,7 +34,7 @@ class ReducedModel:
         The declared initial-state set.
     reachable_states : tuple[str, ...]
         States reachable from ``initial``, with ``initial`` first.
-    solver_matrix : list[list[callable or None]]
+    solver_matrix : tuple[tuple[callable or None, ...], ...]
         Reduced intensity matrix over reachable states only.
     n_states : int
         Number of reachable states.
@@ -40,7 +42,7 @@ class ReducedModel:
 
     initial_states: tuple[str, ...]
     reachable_states: tuple[str, ...]
-    solver_matrix: list[list[Any]]
+    solver_matrix: tuple[tuple[Any, ...], ...]
     n_states: int
 
 
@@ -296,6 +298,9 @@ class Model:
         steps_per_unit: int,
         initial_duration: Any = 0.0,
         callback: Union[None, str, Callable] = "collapse_point_no_duration",
+        probability: Any = _PROBABILITY_UNSET,
+        cashflows: Any = None,
+        cashflow_views: Any = None,
         record_every: int = 1,
         **kwargs,
     ):
@@ -320,6 +325,13 @@ class Model:
         callback : str or callable, optional
             Probability callback. Default is
             ``"collapse_point_no_duration"``.
+        probability : str, callable, or None, optional
+            Alias for probability reporting. ``None`` disables probability
+            output.
+        cashflows : CashflowDeclaration, optional
+            Cashflow declaration to evaluate.
+        cashflow_views : dict, optional
+            Solve-time cashflow aggregation views.
         record_every : int, optional
             Record the callback output every ``record_every``-th solver
             step. Must divide ``horizon * steps_per_unit``. Default is
@@ -343,6 +355,9 @@ class Model:
             steps_per_unit=steps_per_unit,
             initial_duration=initial_duration,
             callback=callback,
+            probability=probability,
+            cashflows=cashflows,
+            cashflow_views=cashflow_views,
             record_every=record_every,
             **kwargs,
         )

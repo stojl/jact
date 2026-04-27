@@ -29,6 +29,18 @@ Example
 """
 
 from . import callbacks
+from .cashflows import (
+    ByKind,
+    ByState,
+    CashflowDeclaration,
+    Group,
+    Raw,
+    ScheduledEvent,
+    StateRate,
+    Total,
+    TransitionLump,
+    discount_factor,
+)
 from .initial_distribution import InitialDistribution
 from .model import Model
 from .solver import solve
@@ -40,4 +52,14 @@ __all__ = [
     "InitialDistribution",
     "solve",
     "callbacks",
+    "StateRate",
+    "TransitionLump",
+    "ScheduledEvent",
+    "Raw",
+    "Group",
+    "Total",
+    "ByState",
+    "ByKind",
+    "CashflowDeclaration",
+    "discount_factor",
 ]

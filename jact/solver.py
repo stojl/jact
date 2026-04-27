@@ -3,13 +3,38 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import Any, Callable, Dict, Sequence, Union
+from typing import Any, Callable, Dict, Mapping, Sequence, Union
 
 import jax
 import jax.numpy as jnp
 
 from .callbacks import PointMass, StateCarry, resolve_callback
+from .cashflows import (
+    ByKind,
+    ByState,
+    CashflowDeclaration,
+    Group,
+    Raw,
+    Scalar,
+    ScheduledEvent,
+    StateRate,
+    Total,
+    TransitionLump,
+    validate_cashflow_views,
+)
 from .initial_distribution import InitialDistribution
+
+_PROBABILITY_UNSET = object()
+
+_KIND_STATE_RATE = 0
+_KIND_TRANSITION_LUMP = 1
+_KIND_SCHEDULED_EVENT = 2
+
+_SOURCE_COMPONENT = 0
+_SOURCE_COMPONENT_SUM = 1
+_SOURCE_STATE = 2
+_SOURCE_KIND = 3
+_SOURCE_TOTAL = 4
 
 
 def _stack_state_densities(state: tuple[StateCarry, ...]) -> jnp.ndarray:
@@ -218,6 +243,359 @@ def _solver_step(
     )
 
 
+def _zero_leaves(count: int, template: jnp.ndarray) -> tuple[jnp.ndarray, ...]:
+    return tuple(jnp.zeros_like(template) for _ in range(count))
+
+
+def _add_leaf(
+    leaves: tuple[jnp.ndarray, ...],
+    index: int,
+    value: jnp.ndarray,
+) -> tuple[jnp.ndarray, ...]:
+    return tuple(leaf + value if i == index else leaf for i, leaf in enumerate(leaves))
+
+
+def _call_payment(
+    fn: Callable[..., jnp.ndarray],
+    t: jnp.ndarray,
+    d: jnp.ndarray,
+    intensity_kwargs: Dict[str, jnp.ndarray],
+) -> jnp.ndarray:
+    return jnp.asarray(fn(t, d, **intensity_kwargs))
+
+
+def _source_row_hazards(
+    row: Sequence[Callable[..., jnp.ndarray] | None],
+    source_index: int,
+    state: tuple[StateCarry, ...],
+    t: jnp.ndarray,
+    duration_mid: jnp.ndarray,
+    step_size: float,
+    intensity_kwargs: Dict[str, jnp.ndarray],
+) -> tuple[
+    tuple[tuple[int, jnp.ndarray], ...],
+    tuple[tuple[int, jnp.ndarray], ...],
+    jnp.ndarray,
+    jnp.ndarray,
+]:
+    densities = _stack_state_densities(state)
+    point_values, point_d_0, point_mask = _stack_point_masses(state)
+    density_total = jnp.zeros_like(densities[source_index])
+    point_total = jnp.zeros_like(point_values[source_index])
+    density_hazards = []
+    point_hazards = []
+
+    for target_index, fn in enumerate(row):
+        if fn is None:
+            continue
+        density_hazard = _integrated_density_hazard(
+            fn,
+            t,
+            duration_mid,
+            step_size,
+            intensity_kwargs,
+        )
+        density_total = density_total + density_hazard
+        density_hazards.append((target_index, density_hazard))
+        if point_mask[source_index]:
+            point_hazard = _integrated_point_hazard(
+                fn,
+                t,
+                point_d_0[source_index],
+                step_size,
+                intensity_kwargs,
+            )
+            point_total = point_total + point_hazard
+            point_hazards.append((target_index, point_hazard))
+
+    return (
+        tuple(density_hazards),
+        tuple(point_hazards),
+        density_total,
+        point_total,
+    )
+
+
+def _transition_hazard(
+    hazards: tuple[tuple[int, jnp.ndarray], ...],
+    target_index: int,
+    template: jnp.ndarray,
+) -> jnp.ndarray:
+    result = jnp.zeros_like(template)
+    for index, hazard in hazards:
+        if index == target_index:
+            result = hazard
+    return result
+
+
+def _compute_cashflow_step(
+    state: tuple[StateCarry, ...],
+    t: jnp.ndarray,
+    duration_mid: jnp.ndarray,
+    duration_left: jnp.ndarray,
+    step_size: float,
+    solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
+    intensity_kwargs: Dict[str, jnp.ndarray],
+    cashflow_components: tuple[Any, ...],
+) -> tuple[tuple[jnp.ndarray, ...], tuple[jnp.ndarray, ...], tuple[jnp.ndarray, ...]]:
+    densities = _stack_state_densities(state)
+    point_values, point_d_0, point_mask = _stack_point_masses(state)
+    template = densities[0, :, 0]
+    by_component = _zero_leaves(len(cashflow_components), template)
+    by_state = _zero_leaves(len(state), template)
+    by_kind = _zero_leaves(3, template)
+    t_mid = t + 0.5 * step_size
+    n_steps = duration_mid.shape[-1]
+
+    for component_index, component in enumerate(cashflow_components):
+        kind = component[0]
+        component_total = jnp.zeros_like(template)
+
+        if kind == _KIND_STATE_RATE:
+            for state_index, payment_fn in component[1]:
+                (
+                    _density_hazards,
+                    _point_hazards,
+                    density_total,
+                    point_total,
+                ) = _source_row_hazards(
+                    solver_matrix[state_index],
+                    state_index,
+                    state,
+                    t,
+                    duration_mid,
+                    step_size,
+                    intensity_kwargs,
+                )
+                density_midpoint = densities[state_index] * jnp.exp(
+                    -0.5 * density_total
+                )
+                payment = _call_payment(
+                    payment_fn,
+                    t_mid,
+                    duration_mid,
+                    intensity_kwargs,
+                )
+                contribution = step_size * jnp.sum(
+                    density_midpoint * payment,
+                    axis=-1,
+                )
+                if point_mask[state_index]:
+                    point_payment = _evaluate_intensity_at_point(
+                        payment_fn,
+                        t_mid,
+                        point_d_0[state_index] + t_mid,
+                        intensity_kwargs,
+                    )
+                    point_midpoint = point_values[state_index] * jnp.exp(
+                        -0.5 * point_total
+                    )
+                    contribution = contribution + (
+                        step_size * point_midpoint * point_payment
+                    )
+                component_total = component_total + contribution
+                by_state = _add_leaf(by_state, state_index, contribution)
+                by_kind = _add_leaf(by_kind, _KIND_STATE_RATE, contribution)
+
+        elif kind == _KIND_TRANSITION_LUMP:
+            for source_index, target_index, payment_fn in component[1]:
+                (
+                    density_hazards,
+                    point_hazards,
+                    density_total,
+                    point_total,
+                ) = _source_row_hazards(
+                    solver_matrix[source_index],
+                    source_index,
+                    state,
+                    t,
+                    duration_mid,
+                    step_size,
+                    intensity_kwargs,
+                )
+                density_hazard = _transition_hazard(
+                    density_hazards,
+                    target_index,
+                    densities[source_index],
+                )
+                density_transfer_factor = _stable_transfer_factor(density_total)
+                payment = _call_payment(
+                    payment_fn,
+                    t_mid,
+                    duration_mid,
+                    intensity_kwargs,
+                )
+                contribution = jnp.sum(
+                    densities[source_index]
+                    * density_hazard
+                    * density_transfer_factor
+                    * payment,
+                    axis=-1,
+                )
+                if point_mask[source_index]:
+                    point_hazard = _transition_hazard(
+                        point_hazards,
+                        target_index,
+                        point_values[source_index],
+                    )
+                    point_transfer_factor = _stable_transfer_factor(point_total)
+                    point_payment = _evaluate_intensity_at_point(
+                        payment_fn,
+                        t_mid,
+                        point_d_0[source_index] + t_mid,
+                        intensity_kwargs,
+                    )
+                    contribution = contribution + (
+                        point_values[source_index]
+                        * point_hazard
+                        * point_transfer_factor
+                        * point_payment
+                    )
+                component_total = component_total + contribution
+                by_state = _add_leaf(by_state, source_index, contribution)
+                by_kind = _add_leaf(by_kind, _KIND_TRANSITION_LUMP, contribution)
+
+        elif kind == _KIND_SCHEDULED_EVENT:
+            when_fn = component[1]
+            event_time = jnp.asarray(when_fn(**intensity_kwargs))
+            event_index = jnp.floor(event_time / step_size).astype(jnp.int32)
+            current_index = jnp.round(t / step_size).astype(jnp.int32)
+            active = (
+                (event_index == current_index)
+                & (event_time >= 0)
+                & (event_index < n_steps)
+            )
+            active = active.astype(template.dtype)
+            for state_index, payment_fn in component[2]:
+                payment = _call_payment(
+                    payment_fn,
+                    t,
+                    duration_left,
+                    intensity_kwargs,
+                )
+                contribution = active * jnp.sum(
+                    densities[state_index] * payment,
+                    axis=-1,
+                )
+                if point_mask[state_index]:
+                    point_payment = _evaluate_intensity_at_point(
+                        payment_fn,
+                        t,
+                        point_d_0[state_index] + t,
+                        intensity_kwargs,
+                    )
+                    contribution = contribution + (
+                        active * point_values[state_index] * point_payment
+                    )
+                component_total = component_total + contribution
+                by_state = _add_leaf(by_state, state_index, contribution)
+                by_kind = _add_leaf(by_kind, _KIND_SCHEDULED_EVENT, contribution)
+
+        by_component = _add_leaf(by_component, component_index, component_total)
+
+    return by_component, by_state, by_kind
+
+
+def _source_value(
+    source: tuple[Any, ...],
+    by_component: tuple[jnp.ndarray, ...],
+    by_state: tuple[jnp.ndarray, ...],
+    by_kind: tuple[jnp.ndarray, ...],
+) -> jnp.ndarray:
+    source_kind = source[0]
+    if source_kind == _SOURCE_COMPONENT:
+        return by_component[source[1]]
+    if source_kind == _SOURCE_COMPONENT_SUM:
+        value = jnp.zeros_like(by_component[0])
+        for index in source[1]:
+            value = value + by_component[index]
+        return value
+    if source_kind == _SOURCE_STATE:
+        return by_state[source[1]]
+    if source_kind == _SOURCE_KIND:
+        return by_kind[source[1]]
+    value = jnp.zeros_like(by_component[0])
+    for component_value in by_component:
+        value = value + component_value
+    return value
+
+
+def _evaluate_weight(
+    weight: Callable[..., jnp.ndarray] | Scalar | None,
+    t: jnp.ndarray,
+    intensity_kwargs: Dict[str, jnp.ndarray],
+    template: jnp.ndarray,
+) -> jnp.ndarray:
+    if weight is None:
+        return jnp.ones_like(template)
+    value = weight(t, **intensity_kwargs) if callable(weight) else weight
+    arr = jnp.asarray(value, dtype=template.dtype)
+    if arr.ndim == 0:
+        return jnp.broadcast_to(arr, template.shape)
+    return arr
+
+
+def _compute_cashflow_views(
+    by_component: tuple[jnp.ndarray, ...],
+    by_state: tuple[jnp.ndarray, ...],
+    by_kind: tuple[jnp.ndarray, ...],
+    t: jnp.ndarray,
+    step_size: float,
+    intensity_kwargs: Dict[str, jnp.ndarray],
+    cashflow_views: tuple[Any, ...],
+) -> tuple[tuple[jnp.ndarray, ...], ...]:
+    template = by_component[0]
+    view_values = []
+    for (
+        _view_name,
+        _terminal,
+        weight,
+        leaf_sources,
+        _leaf_names,
+        _view_kind,
+    ) in cashflow_views:
+        factor = _evaluate_weight(
+            weight,
+            t + 0.5 * step_size,
+            intensity_kwargs,
+            template,
+        )
+        view_values.append(
+            tuple(
+                _source_value(source, by_component, by_state, by_kind) * factor
+                for source in leaf_sources
+            )
+        )
+    return tuple(view_values)
+
+
+def _zero_view_values(
+    cashflow_views: tuple[Any, ...],
+    template: jnp.ndarray,
+) -> tuple[tuple[jnp.ndarray, ...], ...]:
+    return tuple(
+        tuple(jnp.zeros_like(template) for _source in leaf_sources)
+        for (
+            _view_name,
+            _terminal,
+            _weight,
+            leaf_sources,
+            _leaf_names,
+            _view_kind,
+        ) in cashflow_views
+    )
+
+
+def _add_view_values(
+    left: tuple[tuple[jnp.ndarray, ...], ...],
+    right: tuple[tuple[jnp.ndarray, ...], ...],
+) -> tuple[tuple[jnp.ndarray, ...], ...]:
+    return tuple(
+        tuple(left_leaf + right_leaf for left_leaf, right_leaf in zip(a, b))
+        for a, b in zip(left, right)
+    )
+
+
 @partial(
     jax.jit,
     static_argnames=[
@@ -225,48 +603,115 @@ def _solver_step(
         "solver_matrix",
         "prob_callback",
         "record_every",
+        "cashflow_components",
+        "cashflow_views",
     ],
 )
 def _midpoint_solver(
     state_0: tuple[StateCarry, ...],
     duration_mid: jnp.ndarray,
+    duration_left: jnp.ndarray,
     step_size: float,
     solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
     intensity_kwargs: Dict[str, jnp.ndarray],
     prob_callback: Callable[..., Any],
     record_every: int,
+    cashflow_components: tuple[Any, ...] = (),
+    cashflow_views: tuple[Any, ...] = (),
 ):
     """Run the midpoint solver and record callback outputs."""
     n_steps = duration_mid.shape[-1]
     n_records = n_steps // record_every
+    has_cashflows = bool(cashflow_components)
+    value_template = state_0[0].density[:, 0]
+    terminal_0 = _zero_view_values(cashflow_views, value_template)
 
     def block_scan(carry, block_start):
+        if has_cashflows:
+            state_carry, terminal_carry = carry
+        else:
+            state_carry = carry
+            terminal_carry = terminal_0
         offsets = jnp.arange(record_every, dtype=duration_mid.dtype)
+        block_0 = _zero_view_values(cashflow_views, value_template)
 
         def step_scan(inner_carry, offset):
+            if has_cashflows:
+                inner_state, block_cashflows, terminal_cashflows = inner_carry
+            else:
+                inner_state = inner_carry
+                block_cashflows = block_0
+                terminal_cashflows = terminal_0
             current_t = block_start + offset * step_size
+            if has_cashflows:
+                raw_component, raw_state, raw_kind = _compute_cashflow_step(
+                    inner_state,
+                    current_t,
+                    duration_mid,
+                    duration_left,
+                    step_size,
+                    solver_matrix,
+                    intensity_kwargs,
+                    cashflow_components,
+                )
+                step_cashflows = _compute_cashflow_views(
+                    raw_component,
+                    raw_state,
+                    raw_kind,
+                    current_t,
+                    step_size,
+                    intensity_kwargs,
+                    cashflow_views,
+                )
+                block_cashflows = _add_view_values(block_cashflows, step_cashflows)
+                terminal_cashflows = _add_view_values(
+                    terminal_cashflows,
+                    step_cashflows,
+                )
             next_state = _solver_step(
-                inner_carry,
+                inner_state,
                 current_t,
                 duration_mid,
                 step_size,
                 solver_matrix,
                 intensity_kwargs,
             )
+            if has_cashflows:
+                return (next_state, block_cashflows, terminal_cashflows), None
             return next_state, None
 
-        carry, _ = jax.lax.scan(step_scan, carry, offsets)
-        return carry, prob_callback(carry)
+        if has_cashflows:
+            (state_carry, block_cashflows, terminal_carry), _ = jax.lax.scan(
+                step_scan,
+                (state_carry, block_0, terminal_carry),
+                offsets,
+            )
+            stream_output = tuple(
+                None if terminal else values
+                for (_view_name, terminal, *_), values in zip(
+                    cashflow_views,
+                    block_cashflows,
+                )
+            )
+            return (state_carry, terminal_carry), (
+                prob_callback(state_carry),
+                stream_output,
+            )
+
+        state_carry, _ = jax.lax.scan(step_scan, state_carry, offsets)
+        return state_carry, (prob_callback(state_carry), ())
 
     initial_probability = prob_callback(state_0)
     block_starts = jnp.arange(n_records, dtype=duration_mid.dtype) * (
         record_every * step_size
     )
-    _, probability = jax.lax.scan(
+    initial_carry = (state_0, terminal_0) if has_cashflows else state_0
+    final_carry, scan_output = jax.lax.scan(
         block_scan,
-        state_0,
+        initial_carry,
         block_starts,
     )
+    probability, cashflow_streams = scan_output
 
     probability = jax.tree_util.tree_map(
         lambda arr, init: (
@@ -278,7 +723,11 @@ def _midpoint_solver(
         initial_probability,
     )
 
-    return {"probability": probability}
+    result = {"probability": probability}
+    if has_cashflows:
+        result["cashflow_streams"] = cashflow_streams
+        result["cashflow_terminal"] = final_carry[1]
+    return result
 
 
 def _get_reference_function(solver_matrix):
@@ -349,6 +798,142 @@ def _seed_point_mass(
     )
 
 
+def _prepare_cashflow_components(
+    declaration: CashflowDeclaration | None,
+    reachable_states: tuple[str, ...],
+) -> tuple[tuple[Any, ...], ...]:
+    if declaration is None:
+        return ()
+
+    state_index = {state: i for i, state in enumerate(reachable_states)}
+    prepared = []
+    for _name, component in declaration.components:
+        if isinstance(component, StateRate):
+            attachments = tuple(
+                (state_index[state], fn)
+                for state, fn in component.payments.items()
+                if state in state_index
+            )
+            prepared.append((_KIND_STATE_RATE, attachments))
+        elif isinstance(component, TransitionLump):
+            attachments = tuple(
+                (state_index[source], state_index[target], fn)
+                for (source, target), fn in component.payments.items()
+                if source in state_index and target in state_index
+            )
+            prepared.append((_KIND_TRANSITION_LUMP, attachments))
+        elif isinstance(component, ScheduledEvent):
+            attachments = tuple(
+                (state_index[state], fn)
+                for state, fn in component.payments.items()
+                if state in state_index
+            )
+            prepared.append((_KIND_SCHEDULED_EVENT, component.when, attachments))
+    return tuple(prepared)
+
+
+def _prepare_cashflow_views(
+    declaration: CashflowDeclaration,
+    views: Mapping[str, Raw | Group | Total | ByState | ByKind] | None,
+    reachable_states: tuple[str, ...],
+) -> tuple[tuple[Any, ...], ...]:
+    frozen_views = validate_cashflow_views(declaration, views)
+    component_index = {
+        name: i for i, (name, _component) in enumerate(declaration.components)
+    }
+    prepared = []
+    for view_name, view in frozen_views:
+        if isinstance(view, Raw):
+            if view.name is None:
+                leaf_names = declaration.names
+                sources = tuple(
+                    (_SOURCE_COMPONENT, component_index[name]) for name in leaf_names
+                )
+                view_kind = "mapping"
+            else:
+                leaf_names = (view.name,)
+                sources = ((_SOURCE_COMPONENT, component_index[view.name]),)
+                view_kind = "single"
+        elif isinstance(view, Group):
+            leaf_names = (view_name,)
+            sources = (
+                (
+                    _SOURCE_COMPONENT_SUM,
+                    tuple(component_index[member] for member in view.members),
+                ),
+            )
+            view_kind = "single"
+        elif isinstance(view, Total):
+            leaf_names = (view_name,)
+            sources = ((_SOURCE_TOTAL,),)
+            view_kind = "single"
+        elif isinstance(view, ByState):
+            leaf_names = reachable_states
+            sources = tuple(
+                (_SOURCE_STATE, index) for index, _state in enumerate(reachable_states)
+            )
+            view_kind = "mapping"
+        elif isinstance(view, ByKind):
+            leaf_names = ("state_rate", "transition_lump", "scheduled_event")
+            sources = tuple((_SOURCE_KIND, index) for index in range(3))
+            view_kind = "mapping"
+        prepared.append(
+            (
+                view_name,
+                view.terminal,
+                view.weight,
+                sources,
+                tuple(leaf_names),
+                view_kind,
+            )
+        )
+    return tuple(prepared)
+
+
+def _format_cashflow_view_values(
+    raw_result: dict[str, Any],
+    prepared_views: tuple[tuple[Any, ...], ...],
+) -> dict[str, Any]:
+    streams = raw_result["cashflow_streams"]
+    terminals = raw_result["cashflow_terminal"]
+    formatted = {}
+    for index, (
+        view_name,
+        terminal,
+        _weight,
+        _sources,
+        leaf_names,
+        view_kind,
+    ) in enumerate(prepared_views):
+        view_values = terminals[index] if terminal else streams[index]
+        if view_kind == "single":
+            formatted[view_name] = view_values[0]
+        else:
+            formatted[view_name] = {
+                leaf_name: value for leaf_name, value in zip(leaf_names, view_values)
+            }
+    return formatted
+
+
+def _cashflow_reference_function(
+    declaration: CashflowDeclaration | None,
+) -> Callable[..., jnp.ndarray] | None:
+    if declaration is None:
+        return None
+    for _name, component in declaration.components:
+        for fn in component.payments.values():
+            return fn
+    return None
+
+
+def _resolve_probability(callback: Any, probability: Any) -> Any:
+    if probability is _PROBABILITY_UNSET:
+        return callback
+    if callback != "collapse_point_no_duration" and callback != probability:
+        raise ValueError("callback and probability specify conflicting outputs.")
+    return probability
+
+
 def solve(
     model: Any,
     initial: Union[str, jnp.ndarray, InitialDistribution],
@@ -356,6 +941,9 @@ def solve(
     steps_per_unit: int,
     initial_duration: Any = 0.0,
     callback: Union[None, str, Callable] = "collapse_point_no_duration",
+    probability: Union[None, str, Callable, object] = _PROBABILITY_UNSET,
+    cashflows: CashflowDeclaration | None = None,
+    cashflow_views: Mapping[str, Raw | Group | Total | ByState | ByKind] | None = None,
     record_every: int = 1,
     **kwargs: Any,
 ) -> dict[str, Any]:
@@ -378,6 +966,15 @@ def solve(
             "horizon * steps_per_unit."
         )
 
+    probability_disabled = probability is None
+    probability_spec: Any = _resolve_probability(callback, probability)
+    if cashflow_views is not None and cashflows is None:
+        raise ValueError("cashflow_views requires cashflows.")
+    if cashflows is not None and not isinstance(cashflows, CashflowDeclaration):
+        raise TypeError("cashflows must be a CashflowDeclaration or None.")
+    if cashflows is not None and cashflows.state_space is not model.state_space:
+        raise ValueError("cashflows must be declared from model.state_space.")
+
     initial_distribution = _canonicalize_initial(initial, initial_duration)
     model_states = model.state_space.states
     initial_distribution.validate_for_model(model_states)
@@ -389,7 +986,16 @@ def solve(
     duration_left = grid[:, :-1]
     duration_mid = 0.5 * (duration_left + grid[:, 1:])
     step_size = 1 / steps_per_unit
-    prob_callback = resolve_callback(callback)
+    prob_callback = resolve_callback(probability_spec)
+    prepared_cashflow_components = _prepare_cashflow_components(
+        cashflows,
+        reduced.reachable_states,
+    )
+    prepared_cashflow_views = (
+        _prepare_cashflow_views(cashflows, cashflow_views, reduced.reachable_states)
+        if cashflows is not None
+        else ()
+    )
 
     distribution_batch = canonical.batch_size
     covariate_batch = _get_covariate_batch_size(kwargs)
@@ -403,6 +1009,8 @@ def solve(
         )
 
     reference_fn = _get_reference_function(solver_matrix)
+    if reference_fn is None:
+        reference_fn = _cashflow_reference_function(cashflows)
     if reference_fn is None:
         raise ValueError(
             "The intensity matrix contains no callables. Cannot solve."
@@ -437,11 +1045,23 @@ def solve(
     result = _midpoint_solver(
         tuple(state_0),
         duration_mid,
+        duration_left,
         step_size,
         solver_matrix,
         kwargs,
         prob_callback,
         record_every,
+        prepared_cashflow_components,
+        prepared_cashflow_views,
     )
+    if probability_disabled:
+        result.pop("probability", None)
+    if cashflows is not None:
+        result["cashflows"] = _format_cashflow_view_values(
+            result,
+            prepared_cashflow_views,
+        )
+        result.pop("cashflow_streams", None)
+        result.pop("cashflow_terminal", None)
     result["states"] = reduced.reachable_states
     return result

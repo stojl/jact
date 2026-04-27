@@ -1,4 +1,5 @@
 """Analytical and API-level tests for the public solver entrypoint."""
+# ruff: noqa: I001
 
 from __future__ import annotations
 

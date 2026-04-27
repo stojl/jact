@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
 import jax.numpy as jnp
 
@@ -281,6 +281,12 @@ class StateSpace:
             exits=exits,
             groups=groups,
         )
+
+    def cashflows(self, components: Dict[str, Any]):
+        """Create a validated cashflow declaration for this state space."""
+        from .cashflows import validate_cashflow_components
+
+        return validate_cashflow_components(self, components)
 
     # ------------------------------------------------------------------ #
     # InitialDistribution helpers                                         #
