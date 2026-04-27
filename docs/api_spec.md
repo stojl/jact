@@ -600,7 +600,7 @@ The step then:
 
 1. Computes all per-transition integrated hazards `A_ij`.
 2. Aggregates exits from each source state into one competing-risks update.
-3. Forms survival `S_i = exp(-Σ_j A_ij)` and stable transfer fractions.
+3. Forms survival `S_i = exp(-Σ_j A_ij)` and transfer fractions `A_ij / (Σ_j A_ij) * (1 - exp(-Σ_j A_ij))` using `expm1` for numerical accuracy.
 4. Shifts surviving density one duration slot to the right.
 5. Injects transferred mass into duration zero.
 6. Decays point masses along `(t, d_0 + t)` and transfers their outgoing mass into target densities.
