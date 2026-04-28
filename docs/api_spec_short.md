@@ -177,7 +177,8 @@ Scheduled-event policy:
 
 - one event time per individual
 - event times may depend on solve-time covariates
-- event times are snapped to the solver grid by flooring (silent); on-grid times are used unchanged
+- event times within numerical tolerance of a solver grid point snap to that grid point; other off-grid times are floored silently
+- the tolerance is only for floating-point representation noise, not a business grace period
 - state occupancy at the effective event time uses the pre-step convention
 
 Out of scope: multiple event times per component (future work).

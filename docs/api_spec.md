@@ -380,10 +380,15 @@ Scheduled deterministic events are intentionally narrow:
 
 - event times may be data-dependent per individual,
 - `when(**kwargs)` returns exactly one event time per individual,
-- event times are snapped to the solver grid by flooring to the greatest grid time less than or equal to the returned value,
+- event times within a small numerical tolerance of a solver grid point are first snapped to that grid point,
+- otherwise, the effective solver step is `floor(event_time / dt)`, where `dt = 1 / steps_per_unit`,
 - snapping is silent and defines the effective event time used by the solver,
+- the snapping tolerance is only for floating-point representation noise, not a business grace period,
 - event times exactly on the solver grid use that grid time unchanged,
-- state occupancy at the effective event time uses the pre-step convention.
+- events with `event_time < 0` or an effective step outside the solver grid do not pay,
+- a grid-aligned event at `t_n` is evaluated in the step that starts at `t_n`,
+- the payment callable is evaluated at the left endpoint `t_n` and the left duration grid, not at the midpoint sample,
+- state occupancy at the effective event time uses the pre-step convention, before transitions for that step are applied.
 
 Out of scope: multiple event times per component (future work).
 
@@ -412,6 +417,8 @@ cashflow_views = {
 
 Each entry maps a user-facing view name to one self-describing object; the Python type carries the kind of view. Each declared view name becomes one entry in `result["cashflows"]`.
 
+If `cashflows` is supplied and `cashflow_views` is omitted or explicitly passed as `None`, the solver uses `{"raw": Raw()}`. If `cashflows is None`, passing any non-`None` `cashflow_views` is rejected. Passing an empty mapping is not the default path and produces no cashflow views rather than being treated as `Raw()`.
+
 The view types are small frozen dataclasses parallel to the typed component objects:
 
 | View | Constructor | Output leaves |
@@ -439,7 +446,7 @@ View semantics:
 - `Raw()` returns every declared component.
 - `Group(members)` returns the sum of the named components.
 - `Total()` returns the sum of all declared components.
-- `ByState()` returns one key per reachable state in the reduced solve, including zero-valued leaves for reachable states with no contributions. `StateRate` contributes to its attached state, `TransitionLump` contributes to its source state, and `ScheduledEvent` contributes to the state occupied at the effective event time.
+- `ByState()` returns one key per reachable state in the reduced solve, including zero-valued leaves for reachable states with no contributions. `StateRate` contributes to the occupied state whose rate generated the interval contribution, `TransitionLump` contributes to the transition source state, and `ScheduledEvent` contributes to the state occupied at the pre-step effective event time. A scheduled event is not credited to states reached by transitions during that same step.
 - `ByKind()` returns keys `"state_rate"`, `"transition_lump"`, and `"scheduled_event"`.
 
 Validation is structural and uses the cashflow declaration only:
@@ -551,7 +558,7 @@ Parameters:
 | `callback` | `str`, callable, or `None` | Probability callback. Defaults to `"collapse_point_no_duration"` |
 | `probability` | `str`, callable, or `None` | Alias for `callback`. `None` disables probability output. Passing both `callback` (non-default) and `probability` is rejected when they specify conflicting outputs |
 | `cashflows` | `CashflowDeclaration` or `None` | Named cashflow components to evaluate. `None` disables cashflow output |
-| `cashflow_views` | `dict[str, View]` or `None` | Solve-time aggregation and time-only valuation declared per view. Requires `cashflows`. When omitted with `cashflows` supplied, defaults to `{"raw": Raw()}` |
+| `cashflow_views` | `dict[str, View]` or `None` | Solve-time aggregation and time-only valuation declared per view. Requires `cashflows`. When omitted or explicitly `None` with `cashflows` supplied, defaults to `{"raw": Raw()}` |
 | `record_every` | int | Must divide `horizon * steps_per_unit` |
 | `**kwargs` | arrays | Covariates with a shared leading batch dimension |
 
@@ -576,7 +583,7 @@ Per leaf, shape depends on the view kind and on `terminal`:
 | `ByState` | `{state_name: (T_out, batch)}` for every reachable state in the reduced solve | `{state_name: (batch,)}` for every reachable state in the reduced solve |
 | `ByKind` | `{kind_name: (T_out, batch)}` | `{kind_name: (batch,)}` |
 
-`T_out = horizon * steps_per_unit / record_every`, matching the probability output. Time is the leading axis of every streamed leaf; terminal leaves drop the time axis. Batch is always preserved.
+For cashflows, `T_out = horizon * steps_per_unit / record_every`: each streamed leaf has one record per completed record interval. Probability output uses snapshot semantics and includes the initial state at time zero, so its leading time axis has `T_out + 1` entries. Time is the leading axis of every streamed cashflow leaf; terminal leaves drop the time axis. Batch is always preserved.
 
 ### Per-step update
 

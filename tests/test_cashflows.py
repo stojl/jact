@@ -248,6 +248,42 @@ def test_scheduled_event_snapping_individual_times_outside_horizon_and_pre_step(
     assert jnp.allclose(result["state"]["dead"], 0.0)
 
 
+def test_scheduled_event_snaps_near_grid_before_flooring():
+    ss = jact.StateSpace(["active"], [])
+    model = ss.build(transitions={})
+
+    def when(**kwargs):
+        return kwargs["event_time"]
+
+    cashflows = ss.cashflows({"bonus": jact.ScheduledEvent(
+        when=when,
+        payments={"active": _constant_payment(7.0, 5)},
+    )})
+
+    result = model.solve(
+        initial="active",
+        horizon=3,
+        steps_per_unit=1,
+        probability=None,
+        cashflows=cashflows,
+        cashflow_views={"bonus": jact.Raw("bonus")},
+        event_time=jnp.array([
+            1.0 - 1e-4,
+            1.0 + 1e-4,
+            1.0 - 1e-3,
+            -1e-4,
+            3.0 - 1e-4,
+        ], dtype=jnp.float32),
+    )["cashflows"]["bonus"]
+
+    expected = jnp.array([
+        [0.0, 0.0, 7.0, 0.0, 0.0],
+        [7.0, 7.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0],
+    ])
+    assert jnp.allclose(result, expected)
+
+
 def test_probability_alias_and_callback_conflict():
     ss = jact.StateSpace(["active"], [])
     model = ss.build(transitions={})

@@ -264,6 +264,18 @@ def _call_payment(
     return jnp.asarray(fn(t, d, **intensity_kwargs))
 
 
+def _scheduled_event_index(
+    event_time: jnp.ndarray,
+    step_size: float,
+) -> jnp.ndarray:
+    dtype = jnp.result_type(event_time, 1.0)
+    x = jnp.asarray(event_time, dtype=dtype) / jnp.asarray(step_size, dtype=dtype)
+    nearest = jnp.round(x)
+    tol = jnp.sqrt(jnp.asarray(jnp.finfo(x.dtype).eps, dtype=x.dtype))
+    snapped = jnp.where(jnp.abs(x - nearest) <= tol, nearest, jnp.floor(x))
+    return snapped.astype(jnp.int32)
+
+
 def _source_row_hazards(
     row: Sequence[Callable[..., jnp.ndarray] | None],
     source_index: int,
@@ -458,7 +470,7 @@ def _compute_cashflow_step(
         elif kind == _KIND_SCHEDULED_EVENT:
             when_fn = component[1]
             event_time = jnp.asarray(when_fn(**intensity_kwargs))
-            event_index = jnp.floor(event_time / step_size).astype(jnp.int32)
+            event_index = _scheduled_event_index(event_time, step_size)
             current_index = jnp.round(t / step_size).astype(jnp.int32)
             active = (
                 (event_index == current_index)
