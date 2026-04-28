@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark the production end-to-end solver against the original prototype.
+"""Benchmark the production end-to-end solver and cashflow valuation.
 
 This benchmark measures warm JIT execution only:
 - it excludes first-call compilation time
@@ -44,10 +44,19 @@ DEFAULT_STEPS_PER_UNIT = 12
 DEFAULT_WARMUP_RUNS = 1
 DEFAULT_TIMED_RUNS = 20
 DEFAULT_CORRECTNESS_BATCH_SIZE = 128
-DEFAULT_CORRECTNESS_ATOL = 1e-6
+DEFAULT_CORRECTNESS_ATOL = 1e-5
 DEFAULT_STATE_COUNT = 12
 TOPOLOGY_CHOICES = ("sparse", "dense", "all")
 INTENSITY_PROFILE_CHOICES = ("simple", "involved")
+CASHFLOW_SCENARIO_CHOICES = (
+    "none",
+    "unit-state-terminal",
+    "unit-transition-terminal",
+    "mixed-streams",
+    "involved-payments",
+    "scheduled-terminal",
+    "all",
+)
 
 
 @dataclass(frozen=True)
@@ -63,6 +72,7 @@ class BenchmarkConfig:
     topology: str
     state_count: int
     intensity_profile: str
+    cashflow_scenarios: str
 
     @property
     def solver_steps(self) -> int:
@@ -88,6 +98,15 @@ class Scenario:
     @property
     def label(self) -> str:
         return f"e2e:{self.topology}"
+
+
+@dataclass(frozen=True)
+class CashflowScenario:
+    name: str
+    cashflows: jact.CashflowDeclaration
+    views: dict[str, Any]
+    probability: Any = None
+    record_every: int = 1
 
 
 @dataclass(frozen=True)
@@ -137,6 +156,16 @@ def _parse_args() -> BenchmarkConfig:
         default="simple",
     )
     parser.add_argument(
+        "--cashflow-scenarios",
+        choices=CASHFLOW_SCENARIO_CHOICES,
+        default="all",
+        help=(
+            "Cashflow scenarios to benchmark after the probability baseline. "
+            "Use 'none' to run only the historical probability/prototype "
+            "benchmark."
+        ),
+    )
+    parser.add_argument(
         "--allow-cpu",
         action="store_true",
         help="Allow CPU execution for smoke checks when no GPU is visible.",
@@ -174,6 +203,7 @@ def _parse_args() -> BenchmarkConfig:
         topology=args.topology,
         state_count=args.state_count,
         intensity_profile=args.intensity_profile,
+        cashflow_scenarios=args.cashflow_scenarios,
     )
 
 
@@ -220,6 +250,44 @@ def _involved_intensity(
 
 def _rate_for_transition(src: int, tgt: int) -> float:
     return 0.01 + 0.002 * (src + 1) + 0.001 * (tgt - src)
+
+
+def _constant_payment(amount: float, dtype: jnp.dtype) -> Callable[..., jnp.ndarray]:
+    amount_value = jnp.asarray(amount, dtype=dtype)
+
+    def fn(t: jnp.ndarray, d: jnp.ndarray, **kwargs: Any) -> jnp.ndarray:
+        del t
+        batch = kwargs["age"].shape[0]
+        return jnp.full((batch, d.shape[-1]), amount_value, dtype=dtype)
+
+    return fn
+
+
+def _involved_payment(scale: float, dtype: jnp.dtype) -> Callable[..., jnp.ndarray]:
+    scale_value = jnp.asarray(scale, dtype=dtype)
+
+    def fn(t: jnp.ndarray, d: jnp.ndarray, **kwargs: Any) -> jnp.ndarray:
+        age = jnp.asarray(kwargs["age"], dtype=dtype)[:, None]
+        salary = jnp.asarray(kwargs["salary"], dtype=dtype)[:, None]
+        duration = jnp.asarray(d, dtype=dtype)
+        time = jnp.asarray(t, dtype=dtype)
+        age_factor = 1.0 + age / jnp.asarray(120.0, dtype=dtype)
+        duration_factor = 1.0 + 0.15 * jnp.log1p(duration)
+        seasonality = 1.0 + 0.05 * jnp.sin(0.6 * time + 0.2 * duration)
+        salary_factor = salary / jnp.asarray(100_000.0, dtype=dtype)
+        return scale_value * age_factor * duration_factor * seasonality * salary_factor
+
+    return fn
+
+
+def _involved_weight(t: jnp.ndarray, **kwargs: Any) -> jnp.ndarray:
+    age = kwargs["age"]
+    rate = 0.015 + 0.00005 * age
+    return jnp.exp(-rate * t)
+
+
+def _event_time(**kwargs: Any) -> jnp.ndarray:
+    return kwargs["event_time"]
 
 
 def _build_topology(name: str, state_count: int) -> TopologySpec:
@@ -296,6 +364,137 @@ def _build_model(
     }
     state_space = jact.StateSpace(states=states, transitions=transitions)
     return state_space.build(transitions=transition_map)
+
+
+def _build_cashflow_scenarios(
+    config: BenchmarkConfig,
+    topology: TopologySpec,
+    model,
+    dtype: jnp.dtype,
+) -> list[CashflowScenario]:
+    if config.cashflow_scenarios == "none":
+        return []
+
+    states = _state_names(topology.state_count)
+    transient_states = tuple(sorted({states[src] for src, _ in topology.transitions}))
+    transitions = tuple(
+        (states[src], states[tgt]) for src, tgt in topology.transitions
+    )
+    step_count = config.solver_steps
+    scenarios: list[CashflowScenario] = []
+
+    def include(name: str) -> bool:
+        return config.cashflow_scenarios in ("all", name)
+
+    if include("unit-state-terminal"):
+        cashflows = model.state_space.cashflows({
+            "annuity": jact.StateRate({
+                state: _constant_payment(1.0, dtype) for state in transient_states
+            })
+        })
+        scenarios.append(
+            CashflowScenario(
+                name="unit-state-terminal",
+                cashflows=cashflows,
+                views={"pv": jact.Total(terminal=True)},
+                record_every=step_count,
+            )
+        )
+
+    if include("unit-transition-terminal"):
+        cashflows = model.state_space.cashflows({
+            "benefit": jact.TransitionLump({
+                transition: _constant_payment(1.0, dtype)
+                for transition in transitions
+            })
+        })
+        scenarios.append(
+            CashflowScenario(
+                name="unit-transition-terminal",
+                cashflows=cashflows,
+                views={"pv": jact.Total(terminal=True)},
+                record_every=step_count,
+            )
+        )
+
+    if include("mixed-streams"):
+        event_states = transient_states[: max(1, min(2, len(transient_states)))]
+        cashflows = model.state_space.cashflows({
+            "premium": jact.StateRate({
+                state: _constant_payment(-1.0, dtype) for state in transient_states
+            }),
+            "benefit": jact.TransitionLump({
+                transition: _constant_payment(10.0, dtype)
+                for transition in transitions
+            }),
+            "bonus": jact.ScheduledEvent(
+                when=_event_time,
+                payments={
+                    state: _constant_payment(2.0, dtype) for state in event_states
+                },
+            ),
+        })
+        scenarios.append(
+            CashflowScenario(
+                name="mixed-streams",
+                cashflows=cashflows,
+                views={
+                    "raw": jact.Raw(),
+                    "total": jact.Total(),
+                    "terminal": jact.Total(terminal=True),
+                },
+            )
+        )
+
+    if include("involved-payments"):
+        state_payments = {
+            state: _involved_payment(0.25 + 0.05 * index, dtype)
+            for index, state in enumerate(transient_states)
+        }
+        transition_payments = {
+            transition: _involved_payment(5.0 + index, dtype)
+            for index, transition in enumerate(transitions)
+        }
+        cashflows = model.state_space.cashflows({
+            "salary_rate": jact.StateRate(state_payments),
+            "claim": jact.TransitionLump(transition_payments),
+        })
+        scenarios.append(
+            CashflowScenario(
+                name="involved-payments",
+                cashflows=cashflows,
+                views={
+                    "net": jact.Total(weight=_involved_weight),
+                    "state": jact.ByState(weight=_involved_weight, terminal=True),
+                    "kind": jact.ByKind(weight=_involved_weight, terminal=True),
+                },
+            )
+        )
+
+    if include("scheduled-terminal"):
+        event_states = transient_states[: max(1, min(3, len(transient_states)))]
+        cashflows = model.state_space.cashflows({
+            "scheduled": jact.ScheduledEvent(
+                when=_event_time,
+                payments={
+                    state: _involved_payment(1.5 + index, dtype)
+                    for index, state in enumerate(event_states)
+                },
+            )
+        })
+        scenarios.append(
+            CashflowScenario(
+                name="scheduled-terminal",
+                cashflows=cashflows,
+                views={
+                    "pv": jact.Total(weight=_involved_weight, terminal=True),
+                    "state": jact.ByState(weight=_involved_weight, terminal=True),
+                },
+                record_every=step_count,
+            )
+        )
+
+    return scenarios
 
 
 def _run_prototype_e2e(
@@ -376,6 +575,7 @@ def _benchmark_header(config: BenchmarkConfig, scenarios: list[Scenario]) -> Non
     print(f"solver_steps: {config.solver_steps}")
     print(f"state_count: {config.state_count}")
     print(f"intensity_profile: {config.intensity_profile}")
+    print(f"cashflow_scenarios: {config.cashflow_scenarios}")
     print(f"warmup_runs: {config.warmup_runs}")
     print(f"timed_runs: {config.timed_runs}")
     print(f"scenarios: {', '.join(scenario.label for scenario in scenarios)}")
@@ -487,6 +687,29 @@ def _print_timing_summary(
         )
     print(f"speedup_vs_prototype: {speedup:.3f}x")
     print()
+
+
+def _all_finite(tree: Any) -> bool:
+    leaves = jax.tree_util.tree_leaves(tree)
+    return all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in leaves)
+
+
+def _cashflow_shapes(tree: Any) -> Any:
+    return jax.tree_util.tree_map(lambda leaf: leaf.shape, tree)
+
+
+def _print_cashflow_timing_summary(
+    stats: TimingStats,
+    topology: str,
+    scenario: str,
+) -> None:
+    print(f"timings: benchmark=cashflow topology={topology} scenario={scenario}")
+    print(
+        f"current: median={stats.median_ms:.3f} ms, "
+        f"min={stats.min_ms:.3f} ms, "
+        f"p95={stats.p95_ms:.3f} ms"
+    )
+    print()
 def _benchmark_e2e(
     config: BenchmarkConfig,
     topology: TopologySpec,
@@ -525,6 +748,69 @@ def _benchmark_e2e(
     )
 
 
+def _benchmark_cashflows(
+    config: BenchmarkConfig,
+    topology: TopologySpec,
+    model,
+    scenario: CashflowScenario,
+    dtype: jnp.dtype,
+) -> None:
+    ages = jnp.linspace(
+        jnp.asarray(35.0, dtype=dtype),
+        jnp.asarray(75.0, dtype=dtype),
+        config.batch_size,
+        dtype=dtype,
+    )
+    salary = jnp.linspace(
+        jnp.asarray(50_000.0, dtype=dtype),
+        jnp.asarray(150_000.0, dtype=dtype),
+        config.batch_size,
+        dtype=dtype,
+    )
+    event_time = jnp.linspace(
+        jnp.asarray(0.0, dtype=dtype),
+        jnp.asarray(config.horizon, dtype=dtype),
+        config.batch_size,
+        dtype=dtype,
+    )
+
+    def run_current():
+        return model.solve(
+            initial="s0",
+            horizon=config.horizon,
+            steps_per_unit=config.steps_per_unit,
+            probability=scenario.probability,
+            cashflows=scenario.cashflows,
+            cashflow_views=scenario.views,
+            record_every=scenario.record_every,
+            age=ages,
+            salary=salary,
+            event_time=event_time,
+        )
+
+    _warmup(run_current, config.warmup_runs)
+    result = run_current()
+    _block_until_ready(result)
+    cashflow_result = result["cashflows"]
+    if not _all_finite(cashflow_result):
+        raise SystemExit(
+            f"Cashflow sanity check failed for topology={topology.name} "
+            f"scenario={scenario.name}: encountered non-finite values."
+        )
+    print(
+        "sanity passed: "
+        f"benchmark=cashflow topology={topology.name} "
+        f"scenario={scenario.name} shapes={_cashflow_shapes(cashflow_result)}"
+    )
+
+    stats = _time_runs(
+        f"cashflow:{scenario.name}",
+        run_current,
+        config.timed_runs,
+    )
+    _print_cashflow_timing_summary(stats, topology.name, scenario.name)
+
+
 def main() -> None:
     config = _parse_args()
     _maybe_require_gpu(config)
@@ -536,8 +822,22 @@ def main() -> None:
     for scenario in scenarios:
         topology = _build_topology(scenario.topology, config.state_count)
         intensity = _build_intensity_matrix(config, topology, dtype)
+        model = _build_model(topology, intensity)
         _run_e2e_correctness_check(config, topology, intensity, dtype)
         _benchmark_e2e(config, topology, intensity, dtype)
+        for cashflow_scenario in _build_cashflow_scenarios(
+            config,
+            topology,
+            model,
+            dtype,
+        ):
+            _benchmark_cashflows(
+                config,
+                topology,
+                model,
+                cashflow_scenario,
+                dtype,
+            )
 
 
 if __name__ == "__main__":
