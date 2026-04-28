@@ -51,6 +51,9 @@ INTENSITY_PROFILE_CHOICES = ("simple", "involved")
 CASHFLOW_SCENARIO_CHOICES = (
     "none",
     "unit-state-terminal",
+    "unit-state-terminal-with-probability",
+    "unit-state-stream",
+    "unit-state-stream-with-probability",
     "unit-transition-terminal",
     "mixed-streams",
     "involved-payments",
@@ -386,18 +389,50 @@ def _build_cashflow_scenarios(
     def include(name: str) -> bool:
         return config.cashflow_scenarios in ("all", name)
 
-    if include("unit-state-terminal"):
-        cashflows = model.state_space.cashflows({
+    def unit_state_cashflows():
+        return model.state_space.cashflows({
             "annuity": jact.StateRate({
                 state: _constant_payment(1.0, dtype) for state in transient_states
             })
         })
+
+    if include("unit-state-terminal"):
         scenarios.append(
             CashflowScenario(
                 name="unit-state-terminal",
-                cashflows=cashflows,
+                cashflows=unit_state_cashflows(),
                 views={"pv": jact.Total(terminal=True)},
                 record_every=step_count,
+            )
+        )
+
+    if include("unit-state-terminal-with-probability"):
+        scenarios.append(
+            CashflowScenario(
+                name="unit-state-terminal-with-probability",
+                cashflows=unit_state_cashflows(),
+                views={"pv": jact.Total(terminal=True)},
+                probability="collapse_point_no_duration",
+                record_every=step_count,
+            )
+        )
+
+    if include("unit-state-stream"):
+        scenarios.append(
+            CashflowScenario(
+                name="unit-state-stream",
+                cashflows=unit_state_cashflows(),
+                views={"pv": jact.Total()},
+            )
+        )
+
+    if include("unit-state-stream-with-probability"):
+        scenarios.append(
+            CashflowScenario(
+                name="unit-state-stream-with-probability",
+                cashflows=unit_state_cashflows(),
+                views={"pv": jact.Total()},
+                probability="collapse_point_no_duration",
             )
         )
 
@@ -710,6 +745,8 @@ def _print_cashflow_timing_summary(
         f"p95={stats.p95_ms:.3f} ms"
     )
     print()
+
+
 def _benchmark_e2e(
     config: BenchmarkConfig,
     topology: TopologySpec,
@@ -728,6 +765,15 @@ def _benchmark_e2e(
             age=ages,
         )
 
+    def run_current_no_probability():
+        return model.solve(
+            initial="s0",
+            horizon=config.horizon,
+            steps_per_unit=config.steps_per_unit,
+            probability=None,
+            age=ages,
+        )
+
     def run_prototype():
         return _run_prototype_e2e(
             horizon=config.horizon,
@@ -737,15 +783,29 @@ def _benchmark_e2e(
         )
 
     _warmup(run_current, config.warmup_runs)
+    _warmup(run_current_no_probability, config.warmup_runs)
     _warmup(run_prototype, config.warmup_runs)
 
     current_stats = _time_runs("current", run_current, config.timed_runs)
+    current_no_probability_stats = _time_runs(
+        "current_probability_none",
+        run_current_no_probability,
+        config.timed_runs,
+    )
     prototype_stats = _time_runs("prototype", run_prototype, config.timed_runs)
     _print_timing_summary(
         current_stats,
         prototype_stats,
         topology.name,
     )
+    print(f"timings: benchmark=e2e-probability-none topology={topology.name}")
+    print(
+        f"{current_no_probability_stats.name}: "
+        f"median={current_no_probability_stats.median_ms:.3f} ms, "
+        f"min={current_no_probability_stats.min_ms:.3f} ms, "
+        f"p95={current_no_probability_stats.p95_ms:.3f} ms"
+    )
+    print()
 
 
 def _benchmark_cashflows(

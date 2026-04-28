@@ -141,12 +141,6 @@ def _integrated_point_hazard(
     return _nonnegative(hazard)
 
 
-def _stable_transfer_factor(total_hazard: jnp.ndarray) -> jnp.ndarray:
-    safe_total = jnp.where(total_hazard > 0, total_hazard, 1.0)
-    factor = -jnp.expm1(-total_hazard) / safe_total
-    return jnp.where(total_hazard > 0, factor, 1.0)
-
-
 def _survival_and_transfer_factor(
     total_hazard: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -176,6 +170,18 @@ def _advance_density(
     )
     next_density = next_density.at[..., 0].set(inflow)
     return next_density
+
+
+def _zero_leaves(count: int, template: jnp.ndarray) -> tuple[jnp.ndarray, ...]:
+    return tuple(jnp.zeros_like(template) for _ in range(count))
+
+
+def _add_leaf(
+    leaves: tuple[jnp.ndarray, ...],
+    index: int,
+    value: jnp.ndarray,
+) -> tuple[jnp.ndarray, ...]:
+    return tuple(leaf + value if i == index else leaf for i, leaf in enumerate(leaves))
 
 
 def _solver_step(
@@ -256,18 +262,6 @@ def _solver_step(
     )
 
 
-def _zero_leaves(count: int, template: jnp.ndarray) -> tuple[jnp.ndarray, ...]:
-    return tuple(jnp.zeros_like(template) for _ in range(count))
-
-
-def _add_leaf(
-    leaves: tuple[jnp.ndarray, ...],
-    index: int,
-    value: jnp.ndarray,
-) -> tuple[jnp.ndarray, ...]:
-    return tuple(leaf + value if i == index else leaf for i, leaf in enumerate(leaves))
-
-
 def _call_payment(
     fn: Callable[..., jnp.ndarray],
     t: jnp.ndarray,
@@ -289,58 +283,6 @@ def _scheduled_event_index(
     return snapped.astype(jnp.int32)
 
 
-def _source_row_hazards(
-    row: Sequence[Callable[..., jnp.ndarray] | None],
-    source_index: int,
-    state: tuple[StateCarry, ...],
-    t: jnp.ndarray,
-    duration_mid: jnp.ndarray,
-    step_size: float,
-    intensity_kwargs: Dict[str, jnp.ndarray],
-) -> tuple[
-    tuple[tuple[int, jnp.ndarray], ...],
-    tuple[tuple[int, jnp.ndarray], ...],
-    jnp.ndarray,
-    jnp.ndarray,
-]:
-    densities = _stack_state_densities(state)
-    point_values, point_d_0, point_mask = _stack_point_masses(state)
-    density_total = jnp.zeros_like(densities[source_index])
-    point_total = jnp.zeros_like(point_values[source_index])
-    density_hazards = []
-    point_hazards = []
-
-    for target_index, fn in enumerate(row):
-        if fn is None:
-            continue
-        density_hazard = _integrated_density_hazard(
-            fn,
-            t,
-            duration_mid,
-            step_size,
-            intensity_kwargs,
-        )
-        density_total = density_total + density_hazard
-        density_hazards.append((target_index, density_hazard))
-        if point_mask[source_index]:
-            point_hazard = _integrated_point_hazard(
-                fn,
-                t,
-                point_d_0[source_index],
-                step_size,
-                intensity_kwargs,
-            )
-            point_total = point_total + point_hazard
-            point_hazards.append((target_index, point_hazard))
-
-    return (
-        tuple(density_hazards),
-        tuple(point_hazards),
-        density_total,
-        point_total,
-    )
-
-
 def _solver_step_dynamics(
     state: tuple[StateCarry, ...],
     t: jnp.ndarray,
@@ -357,6 +299,10 @@ def _solver_step_dynamics(
         tuple[
             tuple[tuple[int, jnp.ndarray], ...],
             tuple[tuple[int, jnp.ndarray], ...],
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
+            jnp.ndarray,
             jnp.ndarray,
             jnp.ndarray,
         ],
@@ -402,8 +348,10 @@ def _solver_step_dynamics(
             (
                 tuple(density_hazards),
                 tuple(point_hazards),
-                density_total,
-                point_total,
+                *_survival_and_transfer_factor(density_total),
+                *_survival_and_transfer_factor(point_total),
+                jnp.exp(-0.5 * density_total),
+                jnp.exp(-0.5 * point_total),
             )
         )
 
@@ -424,12 +372,13 @@ def _advance_solver_step_from_dynamics(
     for i, (
         density_hazards,
         point_hazards,
-        density_total,
-        point_total,
+        density_survival,
+        density_transfer_factor,
+        point_survival,
+        point_transfer_factor,
+        _density_midpoint_factor,
+        _point_midpoint_factor,
     ) in enumerate(row_hazards):
-        density_survival, density_transfer_factor = _survival_and_transfer_factor(
-            density_total
-        )
         for j, density_hazard in density_hazards:
             transferred = density_hazard * density_transfer_factor
             next_inflow = next_inflow.at[j].add(
@@ -437,9 +386,6 @@ def _advance_solver_step_from_dynamics(
             )
 
         if point_mask[i]:
-            point_survival, point_transfer_factor = _survival_and_transfer_factor(
-                point_total
-            )
             next_point_values = next_point_values.at[i].set(
                 point_values[i] * point_survival
             )
@@ -458,18 +404,6 @@ def _advance_solver_step_from_dynamics(
         point_d_0,
         point_mask,
     )
-
-
-def _transition_hazard(
-    hazards: tuple[tuple[int, jnp.ndarray], ...],
-    target_index: int,
-    template: jnp.ndarray,
-) -> jnp.ndarray:
-    result = jnp.zeros_like(template)
-    for index, hazard in hazards:
-        if index == target_index:
-            result = hazard
-    return result
 
 
 def _compute_cashflow_step(
@@ -502,12 +436,14 @@ def _compute_cashflow_step(
                 (
                     _density_hazards,
                     _point_hazards,
-                    density_total,
-                    point_total,
+                    _density_survival,
+                    _density_transfer_factor,
+                    _point_survival,
+                    _point_transfer_factor,
+                    density_midpoint_factor,
+                    point_midpoint_factor,
                 ) = row_hazards[state_index]
-                density_midpoint = densities[state_index] * jnp.exp(
-                    -0.5 * density_total
-                )
+                density_midpoint = densities[state_index] * density_midpoint_factor
                 payment = _call_payment(
                     payment_fn,
                     t_mid,
@@ -525,9 +461,7 @@ def _compute_cashflow_step(
                         point_d_0[state_index] + t_mid,
                         intensity_kwargs,
                     )
-                    point_midpoint = point_values[state_index] * jnp.exp(
-                        -0.5 * point_total
-                    )
+                    point_midpoint = point_values[state_index] * point_midpoint_factor
                     contribution = contribution + (
                         step_size * point_midpoint * point_payment
                     )
@@ -536,19 +470,18 @@ def _compute_cashflow_step(
                 by_kind = _add_leaf(by_kind, _KIND_STATE_RATE, contribution)
 
         elif kind == _KIND_TRANSITION_LUMP:
-            for source_index, target_index, payment_fn in component[1]:
+            for source_index, hazard_slot, payment_fn in component[1]:
                 (
                     density_hazards,
                     point_hazards,
-                    density_total,
-                    point_total,
+                    _density_survival,
+                    density_transfer_factor,
+                    _point_survival,
+                    point_transfer_factor,
+                    _density_midpoint_factor,
+                    _point_midpoint_factor,
                 ) = row_hazards[source_index]
-                density_hazard = _transition_hazard(
-                    density_hazards,
-                    target_index,
-                    densities[source_index],
-                )
-                density_transfer_factor = _stable_transfer_factor(density_total)
+                _target_index, density_hazard = density_hazards[hazard_slot]
                 payment = _call_payment(
                     payment_fn,
                     t_mid,
@@ -563,12 +496,7 @@ def _compute_cashflow_step(
                     axis=-1,
                 )
                 if point_mask[source_index]:
-                    point_hazard = _transition_hazard(
-                        point_hazards,
-                        target_index,
-                        point_values[source_index],
-                    )
-                    point_transfer_factor = _stable_transfer_factor(point_total)
+                    _target_index, point_hazard = point_hazards[hazard_slot]
                     point_payment = _evaluate_intensity_at_point(
                         payment_fn,
                         t_mid,
@@ -741,6 +669,26 @@ def _add_view_values(
     )
 
 
+def _add_selected_view_values(
+    left: tuple[tuple[jnp.ndarray, ...], ...],
+    right: tuple[tuple[jnp.ndarray, ...], ...],
+    cashflow_views: tuple[Any, ...],
+    *,
+    terminal: bool,
+) -> tuple[tuple[jnp.ndarray, ...], ...]:
+    return tuple(
+        tuple(
+            left_leaf + right_leaf if view_terminal is terminal else left_leaf
+            for left_leaf, right_leaf in zip(left_values, right_values)
+        )
+        for (
+            (_view_name, view_terminal, *_),
+            left_values,
+            right_values,
+        ) in zip(cashflow_views, left, right)
+    )
+
+
 @partial(
     jax.jit,
     static_argnames=[
@@ -768,6 +716,8 @@ def _midpoint_solver(
     n_steps = duration_mid.shape[-1]
     n_records = n_steps // record_every
     has_cashflows = bool(cashflow_components)
+    has_stream_cashflows = any(not terminal for _name, terminal, *_ in cashflow_views)
+    has_terminal_cashflows = any(terminal for _name, terminal, *_ in cashflow_views)
     value_template = state_0[0].density[:, 0]
     terminal_0 = _zero_view_values(cashflow_views, value_template)
     scheduled_events = _compute_scheduled_events(
@@ -777,7 +727,7 @@ def _midpoint_solver(
     )
 
     def block_scan(carry, block_start):
-        if has_cashflows:
+        if has_cashflows and has_terminal_cashflows:
             state_carry, terminal_carry = carry
         else:
             state_carry = carry
@@ -786,8 +736,14 @@ def _midpoint_solver(
         block_0 = _zero_view_values(cashflow_views, value_template)
 
         def step_scan(inner_carry, offset):
-            if has_cashflows:
+            if has_cashflows and has_stream_cashflows and has_terminal_cashflows:
                 inner_state, block_cashflows, terminal_cashflows = inner_carry
+            elif has_cashflows and has_stream_cashflows:
+                inner_state, block_cashflows = inner_carry
+                terminal_cashflows = terminal_0
+            elif has_cashflows and has_terminal_cashflows:
+                inner_state, terminal_cashflows = inner_carry
+                block_cashflows = block_0
             else:
                 inner_state = inner_carry
                 block_cashflows = block_0
@@ -831,11 +787,29 @@ def _midpoint_solver(
                     intensity_kwargs,
                     cashflow_views,
                 )
-                block_cashflows = _add_view_values(block_cashflows, step_cashflows)
-                terminal_cashflows = _add_view_values(
-                    terminal_cashflows,
-                    step_cashflows,
-                )
+                if has_stream_cashflows and has_terminal_cashflows:
+                    block_cashflows = _add_selected_view_values(
+                        block_cashflows,
+                        step_cashflows,
+                        cashflow_views,
+                        terminal=False,
+                    )
+                    terminal_cashflows = _add_selected_view_values(
+                        terminal_cashflows,
+                        step_cashflows,
+                        cashflow_views,
+                        terminal=True,
+                    )
+                elif has_stream_cashflows:
+                    block_cashflows = _add_view_values(
+                        block_cashflows,
+                        step_cashflows,
+                    )
+                elif has_terminal_cashflows:
+                    terminal_cashflows = _add_view_values(
+                        terminal_cashflows,
+                        step_cashflows,
+                    )
                 next_state = _advance_solver_step_from_dynamics(
                     densities,
                     point_values,
@@ -853,15 +827,33 @@ def _midpoint_solver(
                     intensity_kwargs,
                 )
             if has_cashflows:
-                return (next_state, block_cashflows, terminal_cashflows), None
+                if has_stream_cashflows and has_terminal_cashflows:
+                    return (next_state, block_cashflows, terminal_cashflows), None
+                if has_stream_cashflows:
+                    return (next_state, block_cashflows), None
+                return (next_state, terminal_cashflows), None
             return next_state, None
 
         if has_cashflows:
-            (state_carry, block_cashflows, terminal_carry), _ = jax.lax.scan(
-                step_scan,
-                (state_carry, block_0, terminal_carry),
-                offsets,
-            )
+            if has_stream_cashflows and has_terminal_cashflows:
+                (state_carry, block_cashflows, terminal_carry), _ = jax.lax.scan(
+                    step_scan,
+                    (state_carry, block_0, terminal_carry),
+                    offsets,
+                )
+            elif has_stream_cashflows:
+                (state_carry, block_cashflows), _ = jax.lax.scan(
+                    step_scan,
+                    (state_carry, block_0),
+                    offsets,
+                )
+            else:
+                (state_carry, terminal_carry), _ = jax.lax.scan(
+                    step_scan,
+                    (state_carry, terminal_carry),
+                    offsets,
+                )
+                block_cashflows = block_0
             stream_output = tuple(
                 None if terminal else values
                 for (_view_name, terminal, *_), values in zip(
@@ -869,7 +861,12 @@ def _midpoint_solver(
                     block_cashflows,
                 )
             )
-            return (state_carry, terminal_carry), (
+            next_carry = (
+                (state_carry, terminal_carry)
+                if has_terminal_cashflows
+                else state_carry
+            )
+            return next_carry, (
                 prob_callback(state_carry),
                 stream_output,
             )
@@ -881,7 +878,11 @@ def _midpoint_solver(
     block_starts = jnp.arange(n_records, dtype=duration_mid.dtype) * (
         record_every * step_size
     )
-    initial_carry = (state_0, terminal_0) if has_cashflows else state_0
+    initial_carry = (
+        (state_0, terminal_0)
+        if has_cashflows and has_terminal_cashflows
+        else state_0
+    )
     final_carry, scan_output = jax.lax.scan(
         block_scan,
         initial_carry,
@@ -902,7 +903,9 @@ def _midpoint_solver(
     result = {"probability": probability}
     if has_cashflows:
         result["cashflow_streams"] = cashflow_streams
-        result["cashflow_terminal"] = final_carry[1]
+        result["cashflow_terminal"] = (
+            final_carry[1] if has_terminal_cashflows else terminal_0
+        )
     return result
 
 
@@ -977,11 +980,20 @@ def _seed_point_mass(
 def _prepare_cashflow_components(
     declaration: CashflowDeclaration | None,
     reachable_states: tuple[str, ...],
+    solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
 ) -> tuple[tuple[Any, ...], ...]:
     if declaration is None:
         return ()
 
     state_index = {state: i for i, state in enumerate(reachable_states)}
+    transition_slot = {}
+    for source_index, row in enumerate(solver_matrix):
+        slot = 0
+        for target_index, fn in enumerate(row):
+            if fn is not None:
+                transition_slot[(source_index, target_index)] = slot
+                slot += 1
+
     prepared = []
     for _name, component in declaration.components:
         if isinstance(component, StateRate):
@@ -993,7 +1005,11 @@ def _prepare_cashflow_components(
             prepared.append((_KIND_STATE_RATE, attachments))
         elif isinstance(component, TransitionLump):
             attachments = tuple(
-                (state_index[source], state_index[target], fn)
+                (
+                    state_index[source],
+                    transition_slot[(state_index[source], state_index[target])],
+                    fn,
+                )
                 for (source, target), fn in component.payments.items()
                 if source in state_index and target in state_index
             )
@@ -1166,6 +1182,7 @@ def solve(
     prepared_cashflow_components = _prepare_cashflow_components(
         cashflows,
         reduced.reachable_states,
+        solver_matrix,
     )
     prepared_cashflow_views = (
         _prepare_cashflow_views(cashflows, cashflow_views, reduced.reachable_states)
