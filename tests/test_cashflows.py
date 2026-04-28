@@ -554,7 +554,7 @@ def test_scheduled_event_snaps_near_grid_before_flooring():
     assert jnp.allclose(result, expected)
 
 
-def test_probability_alias_and_callback_conflict():
+def test_probability_none_omits_probability_and_callback_is_rejected():
     ss = jact.StateSpace(["active"], [])
     model = ss.build(transitions={})
     cashflows = ss.cashflows({"premium": jact.StateRate({
@@ -570,12 +570,21 @@ def test_probability_alias_and_callback_conflict():
     )
     assert "probability" not in result
 
-    with pytest.raises(ValueError, match="conflicting"):
+    with pytest.raises(TypeError, match="unexpected keyword argument 'callback'"):
         model.solve(
             initial="active",
             horizon=1,
             steps_per_unit=1,
             callback="default",
-            probability="collapse_point_no_duration",
+            cashflows=cashflows,
+        )
+
+    with pytest.raises(TypeError, match="unexpected keyword argument 'callback'"):
+        jact.solve(
+            model,
+            initial="active",
+            horizon=1,
+            steps_per_unit=1,
+            callback="default",
             cashflows=cashflows,
         )

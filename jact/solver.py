@@ -26,8 +26,6 @@ from .initial_distribution import InitialDistribution
 
 __all__ = ["solve"]
 
-_PROBABILITY_UNSET = object()
-
 _KIND_STATE_RATE = 0
 _KIND_TRANSITION_LUMP = 1
 _KIND_SCHEDULED_EVENT = 2
@@ -714,7 +712,7 @@ def _midpoint_solver(
     cashflow_components: tuple[Any, ...] = (),
     cashflow_views: tuple[Any, ...] = (),
 ):
-    """Run the midpoint solver and record callback outputs."""
+    """Run the midpoint solver and record probability outputs."""
     n_steps = duration_mid.shape[-1]
     n_records = n_steps // record_every
     has_cashflows = bool(cashflow_components)
@@ -1120,22 +1118,13 @@ def _cashflow_reference_function(
     return None
 
 
-def _resolve_probability(callback: Any, probability: Any) -> Any:
-    if probability is _PROBABILITY_UNSET:
-        return callback
-    if callback != "collapse_point_no_duration" and callback != probability:
-        raise ValueError("callback and probability specify conflicting outputs.")
-    return probability
-
-
 def solve(
     model: Any,
     initial: Union[str, jnp.ndarray, InitialDistribution],
     horizon: int,
     steps_per_unit: int,
     initial_duration: Any = 0.0,
-    callback: Union[None, str, Callable] = "collapse_point_no_duration",
-    probability: Union[None, str, Callable, object] = _PROBABILITY_UNSET,
+    probability: Union[None, str, Callable] = "collapse_point_no_duration",
     cashflows: CashflowDeclaration | None = None,
     cashflow_views: Mapping[str, Raw | Group | Total | ByState | ByKind] | None = None,
     record_every: int = 1,
@@ -1146,6 +1135,8 @@ def solve(
         raise TypeError(
             "solve() got an unexpected keyword argument 'freeze_initial'"
         )
+    if "callback" in kwargs:
+        raise TypeError("solve() got an unexpected keyword argument 'callback'")
 
     reserved = {"initial", "initial_duration"}
     overlap = reserved.intersection(kwargs)
@@ -1161,7 +1152,6 @@ def solve(
         )
 
     probability_disabled = probability is None
-    probability_spec: Any = _resolve_probability(callback, probability)
     if cashflow_views is not None and cashflows is None:
         raise ValueError("cashflow_views requires cashflows.")
     if cashflows is not None and not isinstance(cashflows, CashflowDeclaration):
@@ -1180,7 +1170,7 @@ def solve(
     duration_left = grid[:, :-1]
     duration_mid = 0.5 * (duration_left + grid[:, 1:])
     step_size = 1 / steps_per_unit
-    prob_callback = resolve_callback(probability_spec)
+    prob_callback = resolve_callback(probability)
     prepared_cashflow_components = _prepare_cashflow_components(
         cashflows,
         reduced.reachable_states,

@@ -121,7 +121,7 @@ probability.
 For probability, the current meaning of `record_every` is naturally:
 
 - perform `record_every` inner steps,
-- record the callback at the resulting endpoint.
+- record probability output at the resulting endpoint.
 
 That is a **snapshot** interpretation. It fits probability because the
 user usually wants the state at specific times.

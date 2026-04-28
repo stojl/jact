@@ -292,8 +292,7 @@ Parameters:
 | `initial_duration` | float or `(batch,)` array | Per-individual `d_0` for `str` / `(batch,)` initial forms |
 | `horizon` | int | Number of time units |
 | `steps_per_unit` | int | Time discretisation resolution |
-| `callback` | `str`, callable, or `None` | Probability callback. Defaults to `"collapse_point_no_duration"` |
-| `probability` | `str`, callable, or `None` | Alias for `callback`. `None` disables probability output. Conflicting non-default values are rejected |
+| `probability` | `str`, callable, or `None` | Probability output reducer. Defaults to `"collapse_point_no_duration"`. `None` disables probability output |
 | `cashflows` | `CashflowDeclaration` or `None` | Cashflow components to evaluate. `None` disables cashflow output |
 | `cashflow_views` | `dict[str, View]` or `None` | Solve-time aggregation and time-only valuation declared per view. Requires `cashflows`. When omitted with `cashflows` supplied, defaults to `{"raw": Raw()}` |
 | `record_every` | int | Must divide `horizon * steps_per_unit` |
@@ -309,7 +308,7 @@ result["states"]        # always present: tuple of reachable-state names in redu
 
 Disabled outputs are dropped from the result dict — no `None` placeholder is emitted. `result["cashflows"]` is a flat mapping from view name to that view's output. Streamed leaves carry `(T_out, batch)`; terminal (`terminal=True`) leaves carry `(batch,)`. Dict-valued views (`Raw()`, `ByState`, `ByKind`) drop the time axis on each leaf when terminal. Streamed and terminal views can coexist within one result.
 
-Built-in callbacks: `default`, `no_duration`, `collapse_point`, `collapse_point_no_duration`, `point_only`, `point_only_no_duration`, `no_point`, `no_point_no_duration`, `none` (the `none` string and `callback=None` / `probability=None` are equivalent).
+Built-in callbacks: `default`, `no_duration`, `collapse_point`, `collapse_point_no_duration`, `point_only`, `point_only_no_duration`, `no_point`, `no_point_no_duration`, `none`. `probability=None` disables probability output entirely and omits the result key.
 
 ## Numerical contract
 
@@ -323,7 +322,7 @@ Built-in callbacks: `default`, `no_duration`, `collapse_point`, `collapse_point_
 Static:
 
 - Matrix sparsity pattern
-- Callback / `probability` callable identity
+- Probability reducer callable identity
 - Presence or absence of `point_mass` per state
 - Declared set of initial states
 - `step_size` and `record_every`

@@ -192,7 +192,7 @@ class TestSolverAgainstClosedForm:
             initial="healthy",
             horizon=horizon,
             steps_per_unit=steps_per_unit,
-            callback="collapse_point_no_duration",
+            probability="collapse_point_no_duration",
             age=jnp.arange(batch_size, dtype=jnp.float32),
         )
 
@@ -219,7 +219,7 @@ class TestSolverContinuityAndStability:
             initial="healthy",
             horizon=3,
             steps_per_unit=4,
-            callback="collapse_point_no_duration",
+            probability="collapse_point_no_duration",
             age=ages,
         )
         prototype = prototype_8.semimarkov_solver(
@@ -253,7 +253,7 @@ class TestSolverContinuityAndStability:
             initial="healthy",
             horizon=2,
             steps_per_unit=6,
-            callback="collapse_point_no_duration",
+            probability="collapse_point_no_duration",
             age=ages,
         )
         prototype = prototype_8.semimarkov_solver(
@@ -292,7 +292,7 @@ class TestSolverContinuityAndStability:
             horizon=2,
             steps_per_unit=8,
             record_every=2,
-            callback="collapse_point_no_duration",
+            probability="collapse_point_no_duration",
             age=ages,
         )
         prototype = prototype_8.semimarkov_solver(
@@ -350,7 +350,7 @@ class TestSolverContinuityAndStability:
             initial="healthy",
             horizon=1,
             steps_per_unit=4,
-            callback="collapse_point_no_duration",
+            probability="collapse_point_no_duration",
             age=jnp.arange(2, dtype=jnp.float32),
         )["probability"]
 
@@ -379,7 +379,7 @@ class TestSolverContinuityAndStability:
             initial="healthy",
             horizon=2,
             steps_per_unit=6,
-            callback="collapse_point_no_duration",
+            probability="collapse_point_no_duration",
             age=jnp.arange(3, dtype=jnp.float32),
         )["probability"]
 
@@ -397,7 +397,7 @@ class TestSolverContinuityAndStability:
                 horizon=2,
                 steps_per_unit=6,
                 freeze_initial=False,
-                callback="collapse_point_no_duration",
+                probability="collapse_point_no_duration",
                 age=jnp.arange(3, dtype=jnp.float32),
             )
 
@@ -414,7 +414,7 @@ class TestSolverContinuityAndStability:
             initial="healthy",
             horizon=1,
             steps_per_unit=4,
-            callback="collapse_point_no_duration",
+            probability="collapse_point_no_duration",
             age=jnp.arange(2, dtype=jnp.float32),
         )["probability"]
 
@@ -446,7 +446,7 @@ class TestSolverContinuityAndStability:
             initial="disabled",
             horizon=horizon,
             steps_per_unit=steps_per_unit,
-            callback="collapse_point_no_duration",
+            probability="collapse_point_no_duration",
             age=jnp.arange(batch_size, dtype=jnp.float32),
         )
 
@@ -472,7 +472,7 @@ class TestSolverEntry:
             initial_duration=2.0,
             horizon=1,
             steps_per_unit=8,
-            callback="point_only",
+            probability="point_only",
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
@@ -494,7 +494,7 @@ class TestSolverEntry:
             initial_duration=jnp.array([0.0, 0.37]),
             horizon=1,
             steps_per_unit=8,
-            callback="point_only",
+            probability="point_only",
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
@@ -512,7 +512,7 @@ class TestSolverEntry:
             initial=initial,
             horizon=1,
             steps_per_unit=8,
-            callback="point_only",
+            probability="point_only",
             age=jnp.arange(3, dtype=jnp.float32),
         )
 
@@ -539,7 +539,7 @@ class TestSolverEntry:
             initial=dist,
             horizon=1,
             steps_per_unit=8,
-            callback="point_only",
+            probability="point_only",
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
@@ -564,7 +564,7 @@ class TestSolverEntry:
             initial=dist,
             horizon=1,
             steps_per_unit=8,
-            callback="collapse_point_no_duration",
+            probability="collapse_point_no_duration",
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
@@ -648,7 +648,7 @@ class TestSolverEntry:
             initial_duration=d_0,
             horizon=horizon,
             steps_per_unit=steps_per_unit,
-            callback="collapse_point_no_duration",
+            probability="collapse_point_no_duration",
             age=jnp.arange(1, dtype=jnp.float32),
         )
 
@@ -700,7 +700,7 @@ class TestSolverEntry:
             ),
             horizon=horizon,
             steps_per_unit=steps_per_unit,
-            callback="collapse_point_no_duration",
+            probability="collapse_point_no_duration",
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
@@ -730,7 +730,7 @@ class TestBuiltInCallbacks:
         )
 
         default_result = illness_death_model.solve(
-            callback="default", **kwargs
+            probability="default", **kwargs
         )["probability"]
         assert len(default_result) == 3
         assert isinstance(default_result[0], StateCarry)
@@ -740,7 +740,7 @@ class TestBuiltInCallbacks:
         assert default_result[0].point_mass.d_0.shape == (5, 2)
 
         no_duration_result = illness_death_model.solve(
-            callback="no_duration", **kwargs
+            probability="no_duration", **kwargs
         )["probability"]
         assert isinstance(no_duration_result[0], StateCarry)
         assert no_duration_result[0].density.shape == (5, 2)
@@ -749,18 +749,18 @@ class TestBuiltInCallbacks:
         assert no_duration_result[0].point_mass.d_0.shape == (5, 2)
 
         collapse_result = illness_death_model.solve(
-            callback="collapse_point", **kwargs
+            probability="collapse_point", **kwargs
         )["probability"]
         assert len(collapse_result) == 3
         assert collapse_result[0].shape == (5, 2, 8)
 
         collapse_no_duration_result = illness_death_model.solve(
-            callback="collapse_point_no_duration", **kwargs
+            probability="collapse_point_no_duration", **kwargs
         )["probability"]
         assert collapse_no_duration_result.shape == (5, 2, 3)
 
         point_only_result = illness_death_model.solve(
-            callback="point_only", **kwargs
+            probability="point_only", **kwargs
         )["probability"]
         assert isinstance(point_only_result[0], PointMass)
         assert point_only_result[0].value.shape == (5, 2)
@@ -768,22 +768,25 @@ class TestBuiltInCallbacks:
         assert point_only_result[1] is None
 
         point_only_no_duration_result = illness_death_model.solve(
-            callback="point_only_no_duration", **kwargs
+            probability="point_only_no_duration", **kwargs
         )["probability"]
         assert point_only_no_duration_result[0].shape == (5, 2)
         assert point_only_no_duration_result[1] is None
 
         no_point_result = illness_death_model.solve(
-            callback="no_point", **kwargs
+            probability="no_point", **kwargs
         )["probability"]
         assert no_point_result[0].shape == (5, 2, 8)
 
         no_point_no_duration_result = illness_death_model.solve(
-            callback="no_point_no_duration", **kwargs
+            probability="no_point_no_duration", **kwargs
         )["probability"]
         assert no_point_no_duration_result.shape == (5, 2, 3)
 
         none_result = illness_death_model.solve(
-            callback=None, **kwargs
+            probability="none", **kwargs
         )["probability"]
         assert none_result is None
+
+        disabled_result = illness_death_model.solve(probability=None, **kwargs)
+        assert "probability" not in disabled_result

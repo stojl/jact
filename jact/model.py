@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 from .initial_distribution import InitialDistribution
-from .solver import _PROBABILITY_UNSET
 from .state_space import StateSpace
 
 __all__ = ["Model", "ReducedModel", "TransitionInfo"]
@@ -299,8 +298,7 @@ class Model:
         horizon: int,
         steps_per_unit: int,
         initial_duration: Any = 0.0,
-        callback: Union[None, str, Callable] = "collapse_point_no_duration",
-        probability: Any = _PROBABILITY_UNSET,
+        probability: Union[None, str, Callable] = "collapse_point_no_duration",
         cashflows: Any = None,
         cashflow_views: Any = None,
         record_every: int = 1,
@@ -324,18 +322,16 @@ class Model:
         initial_duration : float or (batch,) array, optional
             Per-individual ``d_0`` for the ``str`` and ``(batch,)``
             shorthand forms of ``initial``. Default is ``0.0``.
-        callback : str or callable, optional
-            Probability callback. Default is
-            ``"collapse_point_no_duration"``.
         probability : str, callable, or None, optional
-            Alias for probability reporting. ``None`` disables probability
-            output.
+            Probability output reducer. Default is
+            ``"collapse_point_no_duration"``. ``None`` disables
+            probability output.
         cashflows : CashflowDeclaration, optional
             Cashflow declaration to evaluate.
         cashflow_views : dict, optional
             Solve-time cashflow aggregation views.
         record_every : int, optional
-            Record the callback output every ``record_every``-th solver
+            Record probability output every ``record_every``-th solver
             step. Must divide ``horizon * steps_per_unit``. Default is
             ``1``.
         **kwargs
@@ -356,7 +352,6 @@ class Model:
             horizon=horizon,
             steps_per_unit=steps_per_unit,
             initial_duration=initial_duration,
-            callback=callback,
             probability=probability,
             cashflows=cashflows,
             cashflow_views=cashflow_views,

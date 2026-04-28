@@ -527,7 +527,7 @@ result = model.solve(
     initial="healthy",
     horizon=10,
     steps_per_unit=12,
-    callback="collapse_point_no_duration",
+    probability="collapse_point_no_duration",
     record_every=1,
     age=age_array,
 )
@@ -565,8 +565,7 @@ Parameters:
 | `initial_duration` | float or `(batch,)` array | Per-individual `d_0` for `str` / `(batch,)` initial forms |
 | `horizon` | int | Number of time units |
 | `steps_per_unit` | int | Discretisation resolution per time unit |
-| `callback` | `str`, callable, or `None` | Probability callback. Defaults to `"collapse_point_no_duration"` |
-| `probability` | `str`, callable, or `None` | Alias for `callback`. `None` disables probability output. Passing both `callback` (non-default) and `probability` is rejected when they specify conflicting outputs |
+| `probability` | `str`, callable, or `None` | Probability output reducer. Defaults to `"collapse_point_no_duration"`. `None` disables probability output |
 | `cashflows` | `CashflowDeclaration` or `None` | Named cashflow components to evaluate. `None` disables cashflow output |
 | `cashflow_views` | `dict[str, View]` or `None` | Solve-time aggregation and time-only valuation declared per view. Requires `cashflows`. When omitted or explicitly `None` with `cashflows` supplied, defaults to `{"raw": Raw()}` |
 | `record_every` | int | Must divide `horizon * steps_per_unit` |
@@ -627,7 +626,7 @@ Built-in callbacks expose point masses directly from the solver state:
 - `collapse_point` and `collapse_point_no_duration` add point-mass value to the reported state total,
 - `point_only` and `point_only_no_duration` show the current point mass directly,
 - `no_point` and `no_point_no_duration` exclude point mass entirely,
-- `none` short-circuits to a callback that returns `None` per step — equivalent to `callback=None` / `probability=None`.
+- `none` short-circuits to a callback that returns `None` per step. `probability=None` disables probability output entirely and omits the result key.
 
 ## Numerical contract
 
@@ -642,7 +641,7 @@ Built-in callbacks expose point masses directly from the solver state:
 Static:
 
 - sparsity pattern of the reduced transition matrix,
-- callback function (and its identity for `probability`),
+- probability reducer callable identity,
 - presence or absence of `point_mass` per state,
 - declared set of initial states,
 - `step_size`,

@@ -305,7 +305,7 @@ visibly orthogonal. The user picks a view; the user picks a
 valuation; the solver applies them composably.
 
 This also matches the framing on the probability side: the
-`callback` argument controls *what to record*, and is independent
+`probability` argument controls *what to record*, and is independent
 of any post-processing the user might apply. Cashflow gets the
 same split: views control what to materialise, valuation controls
 the weight, and the two compose.

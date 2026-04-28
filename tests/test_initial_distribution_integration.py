@@ -91,7 +91,7 @@ class TestInitialDistributionSolveIntegration:
             ),
             horizon=1,
             steps_per_unit=4,
-            callback="point_only",
+            probability="point_only",
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
@@ -125,7 +125,7 @@ class TestInitialDistributionSolveIntegration:
             initial=dist,
             horizon=1,
             steps_per_unit=4,
-            callback="point_only",
+            probability="point_only",
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
@@ -161,7 +161,7 @@ class TestInitialDistributionSolveIntegration:
             initial=dist,
             horizon=1,
             steps_per_unit=4,
-            callback="point_only",
+            probability="point_only",
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
