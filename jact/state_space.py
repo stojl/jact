@@ -12,6 +12,8 @@ from .initial_distribution import InitialDistribution
 if TYPE_CHECKING:
     from .model import Model
 
+__all__ = ["StateSpace"]
+
 
 class StateSpace:
     """Defines the topology of a multi-state model.

@@ -24,6 +24,8 @@ from .cashflows import (
 )
 from .initial_distribution import InitialDistribution
 
+__all__ = ["solve"]
+
 _PROBABILITY_UNSET = object()
 
 _KIND_STATE_RATE = 0

@@ -29,6 +29,16 @@ jact/
 └── callbacks.py             # Probability output callbacks
 ```
 
+The recommended import style is `import jact` for everyday modeling:
+`jact.StateSpace`, `jact.InitialDistribution`, `jact.solve`, and cashflow
+declarations such as `jact.StateRate` and `jact.Total`. Lower-level objects
+used for inspection or custom callbacks stay in their submodules, for example
+`jact.callbacks.PointMass`, `jact.callbacks.StateCarry`,
+`jact.model.ReducedModel`, and `jact.model.TransitionInfo`.
+
+Files under `docs/original_prototype/` are retained as numerical references for
+tests and benchmarks. They are not part of the package API.
+
 ## StateSpace
 
 `StateSpace` defines topology only. It carries no data and no intensity models.

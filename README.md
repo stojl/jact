@@ -50,6 +50,14 @@ See [docs/api_spec.md](docs/api_spec.md) for the full API specification.
 For a runnable walkthrough of the main workflow, see
 [docs/example_notebook.ipynb](docs/example_notebook.ipynb).
 
+## Namespace
+
+The recommended user API is the top-level `jact` namespace:
+`jact.StateSpace`, `jact.InitialDistribution`, `jact.solve`, and the
+cashflow declarations such as `jact.StateRate` and `jact.Total`.
+Advanced callback state objects remain available from submodules, for
+example `jact.callbacks.PointMass` and `jact.model.ReducedModel`.
+
 ## Installation
 
 ```bash

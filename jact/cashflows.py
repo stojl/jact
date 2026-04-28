@@ -10,6 +10,19 @@ import jax.numpy as jnp
 
 Scalar = int | float
 
+__all__ = [
+    "ByKind",
+    "ByState",
+    "CashflowDeclaration",
+    "Group",
+    "Raw",
+    "ScheduledEvent",
+    "StateRate",
+    "Total",
+    "TransitionLump",
+    "discount_factor",
+]
+
 
 @dataclass(frozen=True)
 class StateRate:

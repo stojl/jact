@@ -10,6 +10,8 @@ import jax.numpy as jnp
 
 ArrayLike = Any
 
+__all__ = ["InitialDistribution"]
+
 
 def _is_scalar_shape(shape: tuple[int, ...]) -> bool:
     return len(shape) == 0

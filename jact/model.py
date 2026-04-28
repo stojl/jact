@@ -9,6 +9,8 @@ from .initial_distribution import InitialDistribution
 from .solver import _PROBABILITY_UNSET
 from .state_space import StateSpace
 
+__all__ = ["Model", "ReducedModel", "TransitionInfo"]
+
 
 @dataclass(frozen=True)
 class TransitionInfo:

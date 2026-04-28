@@ -29,6 +29,15 @@ jact/
 └── callbacks.py             # Probability output callbacks
 ```
 
+Use `import jact` for the main user API: `jact.StateSpace`,
+`jact.InitialDistribution`, `jact.solve`, and cashflow declarations like
+`jact.StateRate` and `jact.Total`. Advanced inspection and callback state
+objects remain in submodules, such as `jact.callbacks.PointMass` and
+`jact.model.ReducedModel`.
+
+`docs/original_prototype/` is retained as a numerical reference for tests and
+benchmarks, not as public package API.
+
 ## StateSpace
 
 ```python
