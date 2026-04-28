@@ -47,9 +47,11 @@ The design separates structure, bindings, initial conditions, and numerics:
 
   Full solver state is `tuple[StateCarry, ...]` in reachable-state order. `density` evolves by advection-reaction with rigid duration shift (slot `k` → slot `k+1` each step); `point_mass` evolves by scalar exponential decay along its characteristic — a 1-D problem per individual. They're kept separate to avoid diffusing a Dirac through the finite-difference scheme and to let per-individual `d_0` sit off the duration grid. Each transition produces an integrated hazard `A_ij` by midpoint quadrature along the transported characteristic; point masses use the same midpoint sample. Exits from the same source state are then aggregated into one shared competing-risks update. `solve()` parameters: `initial`, `initial_duration`, `horizon`, `steps_per_unit` (so `D = horizon * steps_per_unit`), `callback`, `record_every` (must divide `horizon * steps_per_unit`; else `ValueError`), plus `**kwargs` covariates. `initial_duration` is valid only on the `str` / `(batch,)` forms of `initial`; passing it with an `InitialDistribution` raises `ValueError`.
 
-- **`callbacks.py`**: functions `(state: tuple[StateCarry, ...]) → PyTree` that reduce solver state each step. `lax.scan` stacks the returned PyTree along a new leading **time** axis — time is always the leading axis of every output leaf, no rank-dependent transpose. Built-ins: `"default"`, `"no_duration"`, `"collapse_point"`, `"collapse_point_no_duration"` (canonical actuarial output, `(T_out, batch, J)`), `"point_only"`, `"point_only_no_duration"`, `"no_point"`, `"no_point_no_duration"`, `"none"`. This is the extension point for future cashflow / integral-transform features.
+- **`callbacks.py`**: functions `(state: tuple[StateCarry, ...]) → PyTree` that reduce solver state each step. `lax.scan` stacks the returned PyTree along a new leading **time** axis — time is always the leading axis of every output leaf, no rank-dependent transpose. Built-ins: `"default"`, `"no_duration"`, `"collapse_point"`, `"collapse_point_no_duration"` (canonical actuarial output, `(T_out, batch, J)`), `"point_only"`, `"point_only_no_duration"`, `"no_point"`, `"no_point_no_duration"`, `"none"`. The string `"none"` and `callback=None` / `probability=None` are equivalent.
 
-- **`intensity/`** (stub subpackage): `parametric.py` (built-in parametric hazards, future) and `wrappers.py` (adapters for common model types, future). Currently placeholders.
+- **`cashflows.py` — `CashflowDeclaration` + components + views + `discount_factor`**: declares named cashflow components against a `StateSpace` via `state_space.cashflows({name: component, ...})`. Components are typed frozen dataclasses (`StateRate(payments)`, `TransitionLump(payments)`, `ScheduledEvent(when=..., payments=...)`); view types are also typed frozen dataclasses (`Raw`, `Group`, `Total`, `ByState`, `ByKind`) with optional `weight=` (per-step multiplicative factor) and `terminal=` (carry-only `(batch,)` accumulator instead of streamed `(T_out, batch)`). Validation is structural against the `StateSpace` only. `discount_factor(rate=...)` is the canonical numerics helper for continuously discounted weights. Recording semantics is **interval accumulation**: each streamed entry is the sum of inner-step contributions over the record period; scheduled events land in the unique period containing their effective event time (snapped to the grid by floor).
+
+- **`solver.py` — cashflow extension to `solve()`**: `solve(..., probability=..., cashflows=..., cashflow_views=...)` evaluates probability output (via `callback` / `probability`) and named cashflow views in one fused `jax.lax.scan`. `cashflows=None` and `probability=None` each silently drop the corresponding result key; `cashflow_views` requires `cashflows` and defaults to `{"raw": Raw()}` when `cashflows` is supplied without it. The result dict is a flat mapping from view name to that view's output (streamed `(T_out, batch)` or terminal `(batch,)`); streamed and terminal views can coexist.
 
 ### The three ways to assign intensities to transitions
 
@@ -94,12 +96,15 @@ At `t = 0`: every state declared in the `InitialDistribution` is seeded with `po
 | Static (trace-time) | Traced (runtime) |
 |---|---|
 | Matrix sparsity pattern (positions of `None` cells) | Covariate arrays (`**kwargs`) |
-| Callback function | Fitted parameters captured in closures |
+| Callback / `probability` callable identity | Fitted parameters captured in closures of intensity, payment, `when`, and `weight` callables |
 | Presence/absence of `point_mass` per state | `InitialDistribution` mass and duration arrays |
-| **Set of initial states** (declared on the distribution) | |
-| `step_size`, `record_every` | |
+| **Set of initial states** (declared on the distribution) | `PointMass.value`, `PointMass.d_0` |
+| `step_size`, `record_every` | Per-individual initial-state index arrays |
+| Cashflow component names, kinds, attachment points | |
+| Payment / `when` / `weight` callable identities | |
+| Cashflow view names, kinds, `terminal` flag | |
 
-Changing the declared *set* of initial states re-traces; changing `mass` / `duration` values or `states`-index values within an existing set does not. Rebuilding a `Model` with a different sparsity pattern re-traces; changing parameter values inside existing callables does not. This is why initial-state membership is decided structurally rather than by inspecting mass at runtime — the latter would be a data-dependent topology change incompatible with the trace contract.
+Changing the declared *set* of initial states re-traces; changing `mass` / `duration` values or `states`-index values within an existing set does not. Rebuilding a `Model` with a different sparsity pattern re-traces; changing parameter values inside existing callables does not. Adding/removing a cashflow component or view, or flipping `terminal` on a view, re-traces; changing values captured in payment / `when` / `weight` closures does not. This is why initial-state membership and cashflow declarations are decided structurally rather than by inspecting mass at runtime — the latter would be a data-dependent topology change incompatible with the trace contract.
 
 ## Conventions
 
@@ -108,4 +113,4 @@ Changing the declared *set* of initial states re-traces; changing `mass` / `dura
 - `docs/original_prototype/prototype_8.py` is the reference numerics the solver was ported from; consult it when debugging solver behavior.
 - Python >= 3.10 is required (uses `X | Y` union syntax and PEP 604 features in places).
 - **Pick `callback` and `record_every` before scaling `batch`.** The `default` callback retains `(time, batch, D)` per state and blows up memory fast; `collapse_point_no_duration` at `(T_out, batch, J)` is the canonical actuarial output and stays compact. See `docs/api_spec.md` §Memory budget for worked examples.
-- **Output axis convention**: time is the leading axis of every callback leaf. The spec flags that the current `solver.py` may still emit `(batch, J, T_out, ...)` under a rank-dependent transpose scheduled for removal along with the `transpose_result` kwarg — keep this in mind when touching solver output code and verify against the spec before relying on either layout.
+- **Output axis convention**: time is the leading axis of every callback leaf and every streamed cashflow leaf; terminal cashflow leaves (`terminal=True`) drop the time axis entirely. No rank-dependent transpose remains.

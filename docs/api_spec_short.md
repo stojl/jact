@@ -4,31 +4,30 @@ Condensed mirror of `docs/api_spec.md`. Same normative content with fewer exampl
 
 ## Overview
 
-`jact` currently has three implemented layers:
+`jact` has four implemented layers:
 
 - **StateSpace**: topology only.
 - **Model**: topology plus intensity callables.
-- **Solver**: midpoint quadrature on the reachable subgraph.
+- **Cashflows**: reusable named cashflow declarations built from a `StateSpace`.
+- **Solver**: midpoint quadrature on the reachable subgraph; emits probabilities and cashflow streams.
 
-This short spec also describes a planned cashflow declaration layer:
-
-- **cashflows**: reusable named cashflow declarations built from a `StateSpace`.
-
-All intensities must be JIT-compatible. The full pipeline from covariates to probabilities compiles into one XLA program.
+All intensity, payment, and weight callables must be JIT-compatible. The full pipeline from covariates to probabilities and cashflow streams compiles into one XLA program.
 
 ## Module layout
 
 ```text
 jact/
-├── __init__.py              # Public API: StateSpace, Model, InitialDistribution, solve, callbacks
-├── state_space.py           # StateSpace class + InitialDistribution helpers
+├── __init__.py              # Public API: StateSpace, Model, InitialDistribution, solve, callbacks,
+│                            #   StateRate, TransitionLump, ScheduledEvent,
+│                            #   Raw, Group, Total, ByState, ByKind,
+│                            #   CashflowDeclaration, discount_factor
+├── state_space.py           # StateSpace + InitialDistribution and cashflow helpers
 ├── model.py                 # Model, ReducedModel, TransitionInfo
-├── initial_distribution.py  # InitialDistribution class
-├── solver.py                # Semi-Markov solver
+├── initial_distribution.py  # InitialDistribution
+├── cashflows.py             # Cashflow components, views, CashflowDeclaration, discount_factor
+├── solver.py                # Semi-Markov solver with cashflow accumulation
 └── callbacks.py             # Probability output callbacks
 ```
-
-The planned cashflow API is documentation-only for now and is not yet reflected in the package layout.
 
 ## StateSpace
 
@@ -56,6 +55,11 @@ Surface:
 | `has_transition(s, t)` | bool |
 | `state_index(s)` | int |
 | `reachable_from(s)` | BFS; starting state first, then reachable states in original order |
+| `build(transitions=..., exits=..., groups=...)` | → `Model` |
+| `cashflows({...})` | → `CashflowDeclaration` |
+| `initial_at(state, duration=0.0)` | → `InitialDistribution` |
+| `initial_distribution(components, normalise=True)` | → `InitialDistribution` |
+| `initial_per_individual(state_names=... \| state_indices=..., duration=..., initial_states=None)` | → `InitialDistribution` |
 
 ## Model
 
@@ -95,6 +99,19 @@ Key rules:
 - `initial_duration` is valid only for the `str` / `(batch,)` `initial` shortcuts to `solve()`.
 - Component masses are normalised per individual by default.
 
+State-space helpers (eager name validation):
+
+```python
+state_space.initial_at(state, duration=0.0)
+state_space.initial_distribution(components, normalise=True)
+state_space.initial_per_individual(
+    state_names=...,        # OR state_indices=... — exactly one, keyword-only
+    state_indices=...,
+    duration=0.0,
+    initial_states=None,
+)
+```
+
 ## Intensity protocol
 
 ```python
@@ -117,22 +134,9 @@ Return shapes:
 
 JAX requirements: pure, JIT-compatible, and closed over static values only.
 
-## Cashflows (planned)
-
-This is the intended public API, not current implemented behavior.
+## Cashflows
 
 Construction takes a flat `name -> component` mapping; the component's Python type is the kind discriminator:
-
-```python
-cashflows = state_space.cashflows({
-    name: component,
-    ...
-})
-```
-
-Validation is against the `StateSpace`: attachment keys must reference declared states or transitions, and component names must be unique.
-
-Example:
 
 ```python
 cashflows = state_space.cashflows({
@@ -145,6 +149,10 @@ cashflows = state_space.cashflows({
 })
 ```
 
+The returned object is a `CashflowDeclaration` (frozen dataclass) bound to the state-space topology and reusable across solves. Surface: `declaration.state_space`, `declaration.names`, `declaration.component(name)`.
+
+Validation is structural, against the `StateSpace` only: attachment keys must reference declared states or transitions, and component names must be unique.
+
 Component types:
 
 - `StateRate(payments)` — payment rate while occupying an attached state; `payments` keyed by state name.
@@ -156,28 +164,29 @@ Component types:
 Payment callable protocol for all three kinds:
 
 ```python
-def payment(t, d, **kwargs) -> jnp.ndarray: ...
+def payment(t, d, **kwargs) -> jnp.ndarray: ...   # returns (batch, D)
 ```
 
 Scheduled-event time rule:
 
 ```python
-def when(**kwargs) -> jnp.ndarray: ...
+def when(**kwargs) -> jnp.ndarray: ...            # returns (batch,)
 ```
 
-V1 scheduled-event policy:
+Scheduled-event policy:
 
-- `when(**kwargs)` returns shape `(batch,)`
 - one event time per individual
 - event times may depend on solve-time covariates
-- event times must be grid-aligned
-- off-grid times are rejected
+- event times are snapped to the solver grid by flooring (silent); on-grid times are used unchanged
+- state occupancy at the effective event time uses the pre-step convention
+
+Out of scope: multiple event times per component (future work).
 
 Aggregation and time-only valuation are not declared on the cashflow object; they are passed per solve via `cashflow_views` (see "Cashflow views" below). Cumulative and terminal-from-stream totals are recovered host-side from recorded interval streams.
 
 ### Recording semantics
 
-Cashflow streams are recorded with **interval accumulation**: each entry of a streamed leaf is the sum of inner-step contributions over the record period it indexes. Scheduled events contribute to the unique period containing their event time. Sample semantics are not offered for state-rate or transition-lump cashflows. Cumulative output is `jnp.cumsum(stream, axis=0)` host-side.
+Cashflow streams are recorded with **interval accumulation**: each entry of a streamed leaf is the sum of inner-step contributions over the record period it indexes. Scheduled events contribute to the unique period containing their effective event time. Sample semantics are not offered for state-rate or transition-lump cashflows. Cumulative output is `jnp.cumsum(stream, axis=0)` host-side; terminal-from-stream is `stream.sum(axis=0)`.
 
 ### Cashflow views
 
@@ -193,32 +202,34 @@ cashflow_views = {
 }
 ```
 
-V1 view types and their leaf shapes:
+View types and their leaf shapes:
 
 | View | Constructor | Leaves |
 |---|---|---|
-| `Raw` | `Raw(name=None, *, weight=None, accumulate=False)` | `{component_name: stream}` for every component when `name is None`; one `{name: stream}` otherwise |
-| `Group` | `Group(members, *, weight=None, accumulate=False)` | one stream summing the named components |
-| `Total` | `Total(*, weight=None, accumulate=False)` | one stream summing every declared component |
-| `ByState` | `ByState(*, weight=None, accumulate=False)` | `{state_name: stream}` keyed by attachment state |
-| `ByKind` | `ByKind(*, weight=None, accumulate=False)` | `{kind_name: stream}` keyed by component kind |
+| `Raw` | `Raw(name=None, *, weight=None, terminal=False)` | `{component_name: stream}` for every component when `name is None`; one `{name: stream}` otherwise |
+| `Group` | `Group(members, *, weight=None, terminal=False)` | one stream summing the named components |
+| `Total` | `Total(*, weight=None, terminal=False)` | one stream summing every declared component |
+| `ByState` | `ByState(*, weight=None, terminal=False)` | `{state_name: stream}` keyed by every reachable state in the reduced solve |
+| `ByKind` | `ByKind(*, weight=None, terminal=False)` | `{kind_name: stream}` keyed by component kind (`"state_rate"`, `"transition_lump"`, `"scheduled_event"`) |
 
 Every view shares two optional fields:
 
-- `weight: Callable[[float, ...], jnp.ndarray] | float | None = None` — per-step multiplicative factor applied before recording or accumulation. Returns the per-step factor directly (no implicit exponentiation, no implicit cumulative product). A scalar is sugar for a constant callable.
-- `accumulate: bool = False` — `False` records one entry per `record_every` (interval); `True` collapses the time axis to a single carry-only `(batch,)` accumulator per leaf.
+- `weight: Callable[[float, ...], jnp.ndarray] | float | None = None` — per-step multiplicative factor applied before recording or terminal accumulation. Returns the per-step factor directly (no implicit exponentiation, no implicit cumulative product). A scalar is sugar for a constant callable.
+- `terminal: bool = False` — `False` records one entry per `record_every` (interval); `True` collapses the time axis to a single carry-only `(batch,)` accumulator per leaf.
 
-Validation is structural: view names unique, `Group.members` and `Raw(name=...)` references must be declared component names, `accumulate` is a `bool`, `weight` is `None` / scalar / callable.
+`ByState` includes zero-valued leaves for reachable states with no contributions. `StateRate` contributes to its attached state, `TransitionLump` to its source state, `ScheduledEvent` to the state occupied at the effective event time.
+
+Validation is structural: view names unique, `Group.members` and `Raw(name=...)` references must be declared component names, `terminal` is a `bool`, `weight` is `None` / scalar / callable.
 
 `PerAttachment` (one stream per attachment point of a single component) is sketched in `docs/design/cashflow_aggregation.md` §6 and deferred.
 
 ### Cashflow valuation
 
-Time-only valuation is expressed via `weight=` on a view; there is no separate valuation dict. Everything lands under `result["cashflows"][view_name]`. `accumulate=True` is the carry-only mode where solver-side weighting buys what host-side post-processing cannot — no `(T_out, batch)` stream is materialised.
+Time-only valuation is expressed via `weight=` on a view; there is no separate valuation dict. Everything lands under `result["cashflows"][view_name]`. `terminal=True` is the carry-only mode where solver-side weighting buys what host-side post-processing cannot — no `(T_out, batch)` stream is materialised.
 
 `jact.discount_factor(rate=...)` is the canonical numerics helper for `D(t) ≈ exp(-int_0^t r(s) ds)`. `rate` is a callable `(t, **kwargs) -> (batch,)` or scalar; the returned weight uses the same midpoint approximation as the solver, applied to the within-interval contribution.
 
-Out of scope for v1: non-linear-in-cashflow transforms (capping, flooring), path-dependent transforms, and user-defined accumulator carry. Use a payment-callable bake or host-side post-processing for those.
+Out of scope: non-linear-in-cashflow transforms (capping, flooring), path-dependent transforms, and user-defined accumulator carry. Use a payment-callable bake or host-side post-processing for those.
 
 ## Solver
 
@@ -241,20 +252,23 @@ class StateCarry(NamedTuple):
 
 ## Calling solve
 
-Current implemented call surface:
-
 ```python
 result = model.solve(
     initial="healthy",
     horizon=10,
     steps_per_unit=12,
-    callback="collapse_point_no_duration",
+    probability="collapse_point_no_duration",
+    cashflows=cashflows,
+    cashflow_views={
+        "benefits": Group(["death_benefit", "retirement_bonus"]),
+        "pv_total": Total(weight=discount_factor(rate=0.03), terminal=True),
+    },
     record_every=1,
     age=age_array,
 )
 ```
 
-Or:
+Or via the module-level entry point:
 
 ```python
 result = jact.solve(model, initial=..., horizon=..., steps_per_unit=..., **covariates)
@@ -268,54 +282,24 @@ Parameters:
 | `initial_duration` | float or `(batch,)` array | Per-individual `d_0` for `str` / `(batch,)` initial forms |
 | `horizon` | int | Number of time units |
 | `steps_per_unit` | int | Time discretisation resolution |
-| `callback` | `str`, callable, or `None` | Probability callback |
+| `callback` | `str`, callable, or `None` | Probability callback. Defaults to `"collapse_point_no_duration"` |
+| `probability` | `str`, callable, or `None` | Alias for `callback`. `None` disables probability output. Conflicting non-default values are rejected |
+| `cashflows` | `CashflowDeclaration` or `None` | Cashflow components to evaluate. `None` disables cashflow output |
+| `cashflow_views` | `dict[str, View]` or `None` | Solve-time aggregation and time-only valuation declared per view. Requires `cashflows`. When omitted with `cashflows` supplied, defaults to `{"raw": Raw()}` |
 | `record_every` | int | Must divide `horizon * steps_per_unit` |
 | `**kwargs` | arrays | Covariates with leading batch dimension |
 
-Result:
+Result keys:
 
 ```python
-result["probability"]
-result["states"]
+result["probability"]   # omitted when probability=None
+result["cashflows"]     # omitted when cashflows is None
+result["states"]        # always present: tuple of reachable-state names in reduced order
 ```
 
-Planned solve extension for cashflows:
+Disabled outputs are dropped from the result dict — no `None` placeholder is emitted. `result["cashflows"]` is a flat mapping from view name to that view's output. Streamed leaves carry `(T_out, batch)`; terminal (`terminal=True`) leaves carry `(batch,)`. Dict-valued views (`Raw()`, `ByState`, `ByKind`) drop the time axis on each leaf when terminal. Streamed and terminal views can coexist within one result.
 
-```python
-result = model.solve(
-    initial="healthy",
-    horizon=10,
-    steps_per_unit=12,
-    probability="collapse_point_no_duration",
-    cashflows=cashflows,
-    cashflow_views={
-        "benefits": Group(["death_benefit", "retirement_bonus"]),
-        "pv_total": Total(weight=discount_factor(rate=0.03), accumulate=True),
-    },
-    record_every=1,
-    age=age_array,
-)
-```
-
-Planned additional solve arguments:
-
-| Parameter | Type | Description |
-|---|---|---|
-| `probability` | `str`, callable, or `None` | Probability reporting control |
-| `cashflows` | cashflow declaration or `None` | Cashflow components to evaluate |
-| `cashflow_views` | `dict[str, View]` or `None` | Solve-time aggregation and time-only valuation declared per view |
-
-Omitting `cashflow_views` (or `None`) returns one streamed leaf per declared component — equivalent to a single implicit `Raw()`. A non-empty `cashflow_views` returns exactly the requested views; raw components are not added implicitly.
-
-Planned result extension:
-
-```python
-result["probability"]
-result["cashflows"]
-result["states"]
-```
-
-`result["cashflows"]` is a flat mapping from view name to that view's output. Streamed leaves carry `(T_out, batch)`; terminal (`accumulate=True`) leaves carry `(batch,)`. Dict-valued views (`Raw()`, `ByState`, `ByKind`) drop the time axis on each leaf when accumulated. Streamed and terminal views can coexist within one result.
+Built-in callbacks: `default`, `no_duration`, `collapse_point`, `collapse_point_no_duration`, `point_only`, `point_only_no_duration`, `no_point`, `no_point_no_duration`, `none` (the `none` string and `callback=None` / `probability=None` are equivalent).
 
 ## Numerical contract
 
@@ -329,15 +313,19 @@ result["states"]
 Static:
 
 - Matrix sparsity pattern
-- Callback function
+- Callback / `probability` callable identity
 - Presence or absence of `point_mass` per state
 - Declared set of initial states
 - `step_size` and `record_every`
+- Declared cashflow component names, kinds, and attachment points
+- Payment and `when` callable identities
+- Declared cashflow view names, kinds, and `terminal` flag
+- `weight` callable identity (or scalar value bound at trace time)
 
 Traced:
 
 - Covariate arrays
-- Fitted parameters captured in closures
+- Parameters captured in closures of intensity, payment, `when`, and `weight` callables
 - `PointMass.value`
 - `PointMass.d_0`
 - Per-individual masses, durations, and state-index arrays from `InitialDistribution`

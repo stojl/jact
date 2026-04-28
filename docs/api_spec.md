@@ -4,31 +4,30 @@
 
 `jact` is a JAX framework for computing transition probabilities in multi-state models with duration-dependent transition intensities. It is built for the pipeline from fitted intensity models to probabilities for large cohorts.
 
-The current implementation separates three concerns:
+The implementation separates four concerns:
 
 - **StateSpace**: the structural definition of states and allowed transitions.
 - **Model**: a `StateSpace` bound to intensity callables.
-- **Solver**: a midpoint-quadrature kernel over the reachable subgraph.
+- **Cashflows**: a reusable declaration of named cashflow components built from a `StateSpace`.
+- **Solver**: a midpoint-quadrature kernel over the reachable subgraph that emits both probabilities and cashflows.
 
-This specification also describes a planned cashflow declaration layer:
-
-- **cashflows**: a reusable declaration of named cashflow components built from a `StateSpace`.
-
-All intensity models must be JIT-compatible. The full pipeline from covariates to transition probabilities compiles into a single XLA program.
+All intensity, payment, and weight callables must be JIT-compatible. The full pipeline from covariates to transition probabilities and cashflow streams compiles into a single XLA program.
 
 ## Module layout
 
 ```text
 jact/
-├── __init__.py              # Public API: StateSpace, Model, InitialDistribution, solve, callbacks
-├── state_space.py           # StateSpace class + InitialDistribution helpers
+├── __init__.py              # Public API: StateSpace, Model, InitialDistribution, solve, callbacks,
+│                            #   StateRate, TransitionLump, ScheduledEvent,
+│                            #   Raw, Group, Total, ByState, ByKind,
+│                            #   CashflowDeclaration, discount_factor
+├── state_space.py           # StateSpace class + InitialDistribution and cashflow helpers
 ├── model.py                 # Model, ReducedModel, TransitionInfo
 ├── initial_distribution.py  # InitialDistribution class
-├── solver.py                # Semi-Markov solver
+├── cashflows.py             # Cashflow components, views, CashflowDeclaration, discount_factor
+├── solver.py                # Semi-Markov solver with cashflow accumulation
 └── callbacks.py             # Probability output callbacks
 ```
-
-The cashflow API described below is planned but not yet implemented, so no dedicated cashflow module is part of the current package layout.
 
 ## StateSpace
 
@@ -66,9 +65,15 @@ state_space.sources("dead")
 state_space.has_transition("healthy", "dead")
 state_space.state_index("disabled")
 state_space.reachable_from("healthy")
+state_space.build(transitions=..., exits=..., groups=...)        # → Model
+state_space.cashflows({...})                                     # → CashflowDeclaration
+state_space.initial_at(state, duration=0.0)                      # → InitialDistribution
+state_space.initial_distribution(components=..., normalise=True) # → InitialDistribution
+state_space.initial_per_individual(state_names=... | state_indices=...,
+                                   duration=..., initial_states=None)  # → InitialDistribution
 ```
 
-Reachability is used by the solver to reduce work to the relevant subgraph.
+Reachability is used by the solver to reduce work to the relevant subgraph. The `build`, `cashflows`, and `initial_*` helpers are documented in detail in §"Model", §"Cashflows", and §"InitialDistribution" below.
 
 Serialization:
 
@@ -180,10 +185,17 @@ Rules:
 State-space helpers perform eager name validation:
 
 ```python
-state_space.initial_at(...)
-state_space.initial_per_individual(...)
-state_space.initial_distribution(...)
+state_space.initial_at(state, duration=0.0)
+state_space.initial_distribution(components, normalise=True)
+state_space.initial_per_individual(
+    state_names=...,        # OR state_indices=... — exactly one of the two, keyword-only
+    state_indices=...,
+    duration=0.0,
+    initial_states=None,    # optional tuple of declared initial-state names
+)
 ```
+
+`initial_per_individual` is keyword-only and accepts either `state_names` (validated against the state space, converted to indices host-side) or `state_indices` (a `(batch,)` int32 array indexing into `initial_states` if given, otherwise into the model's full state list).
 
 ## Intensity protocol
 
@@ -221,9 +233,7 @@ JAX requirements:
 - JIT-compatible: no data-dependent Python control flow or non-JAX ops,
 - closed over static values only.
 
-## Cashflows (planned)
-
-This section specifies the intended public cashflow API. It is a documentation-only plan at present and is not implemented in the current package.
+## Cashflows
 
 ### Cashflow declaration layer
 
@@ -236,7 +246,13 @@ cashflows = state_space.cashflows({
 })
 ```
 
-The argument is a single flat mapping from component name to a typed component object (`StateRate`, `TransitionLump`, or `ScheduledEvent`). The returned object is a reusable cashflow declaration built against the state-space topology. The exact concrete class name of the declaration is not yet fixed.
+The argument is a single flat mapping from component name to a typed component object (`StateRate`, `TransitionLump`, or `ScheduledEvent`). The returned object is a `CashflowDeclaration` (frozen dataclass) bound to the state-space topology and reusable across solves. Its surface is:
+
+```python
+declaration.state_space      # the StateSpace it was built from
+declaration.names            # tuple of component names in declaration order
+declaration.component(name)  # look up a component by name
+```
 
 The cashflow declaration answers:
 
@@ -245,7 +261,7 @@ The cashflow declaration answers:
 - where each component attaches,
 - what callable defines the payment amount.
 
-Aggregation, valuation, cumulative totals, and terminal totals are not declared on this object. Aggregation and time-only valuation are declared per solve via `cashflow_views` (see §"Cashflow views" and §"Cashflow valuation" below); cumulative and terminal-from-stream totals are recovered host-side from the recorded interval streams.
+Aggregation, valuation, cumulative totals, and terminal totals are not declared on this object. Aggregation and time-only valuation are declared per solve via `cashflow_views` (see §"Cashflow views" and §"Cashflow valuation" below); cumulative and terminal-from-stream totals are recovered host-side from the recorded interval streams (`jnp.cumsum(stream, axis=0)` and `stream.sum(axis=0)` respectively).
 
 Validation is structural and uses the `StateSpace` only:
 
@@ -354,21 +370,22 @@ def when(**kwargs) -> jnp.ndarray: ...
 Return value:
 
 - shape `(batch,)`,
-- one deterministic event time per individual in v1.
+- one deterministic event time per individual.
 
 The event-time rule is user-defined and may depend on the same solve-time covariates passed to intensities and payment functions. The package does not define business-specific helpers such as `AtAge(70)`.
 
-### Scheduled-event policy in v1
+### Scheduled-event policy
 
-The planned first version keeps scheduled deterministic events intentionally narrow:
+Scheduled deterministic events are intentionally narrow:
 
 - event times may be data-dependent per individual,
 - `when(**kwargs)` returns exactly one event time per individual,
 - event times are snapped to the solver grid by flooring to the greatest grid time less than or equal to the returned value,
 - snapping is silent and defines the effective event time used by the solver,
 - event times exactly on the solver grid use that grid time unchanged,
-- state occupancy at the effective event time uses the pre-step convention,
-- multiple event times per component are future work.
+- state occupancy at the effective event time uses the pre-step convention.
+
+Out of scope: multiple event times per component (future work).
 
 ### Recording semantics
 
@@ -395,7 +412,7 @@ cashflow_views = {
 
 Each entry maps a user-facing view name to one self-describing object; the Python type carries the kind of view. Each declared view name becomes one entry in `result["cashflows"]`.
 
-The v1 view types are small frozen dataclasses parallel to the typed component objects:
+The view types are small frozen dataclasses parallel to the typed component objects:
 
 | View | Constructor | Output leaves |
 |---|---|---|
@@ -414,7 +431,7 @@ Every view shares two optional fields:
 
 The `weight` callable returns the per-step factor directly: no implicit exponentiation, no implicit cumulative product. For continuously discounted weights, use the `discount_factor` helper described in §"Cashflow valuation".
 
-Within a single `cashflow_views` mapping, streamed and terminal views can coexist freely; each leaf's shape is decided by that view's `terminal` setting (see §"Output shape" within §"Planned cashflow solve extension").
+Within a single `cashflow_views` mapping, streamed and terminal views can coexist freely; each leaf's shape is decided by that view's `terminal` setting (see §"Output shape" within §"Solver" → §"Calling solve").
 
 View semantics:
 
@@ -432,7 +449,7 @@ Validation is structural and uses the cashflow declaration only:
 - `terminal` is a `bool`,
 - `weight` is `None`, a Python scalar, or a callable.
 
-Within-component splitting (a `PerAttachment` view exposing one stream per attachment point of a single component) is sketched in `docs/design/cashflow_aggregation.md` §6 and deferred to a future version.
+Out of scope: within-component splitting (a `PerAttachment` view exposing one stream per attachment point of a single component) is sketched in `docs/design/cashflow_aggregation.md` §6 and deferred to a future version.
 
 ### Cashflow valuation
 
@@ -457,7 +474,7 @@ cashflow_views = {
 - The returned callable evaluates the running discount factor against the solver step grid using the same midpoint approximation as the rest of the solver. The within-interval weight applied to the contribution attributed to interval `[t_n, t_{n+1}]` is `exp(-r(t_n + dt/2) · dt) · D(t_n)`.
 - Because the recording default is interval accumulation, the discount weight applied is the within-interval weight for the interval the cashflow is attributed to, not a point-time weight at the recording boundary.
 
-Out of scope for v1 (deferred to a future functor protocol; see `docs/design/cashflow_valuation.md` §4.6):
+Out of scope (deferred to a future functor protocol; see `docs/design/cashflow_valuation.md` §4.6):
 
 - non-linear-in-cashflow transforms (capping, flooring, utility),
 - path-dependent transforms (running maxima, threshold accumulators, look-back guarantees),
@@ -486,7 +503,7 @@ The full solver state is a tuple of `StateCarry`, one per reachable state.
 
 ### Calling solve
 
-Current implemented call surface:
+Probability-only call:
 
 ```python
 result = model.solve(
@@ -499,34 +516,7 @@ result = model.solve(
 )
 ```
 
-Or:
-
-```python
-result = jact.solve(model, initial=..., horizon=..., steps_per_unit=..., **covariates)
-```
-
-Parameters:
-
-| Parameter | Type | Description |
-|---|---|---|
-| `initial` | `str`, `(batch,)` int array, or `InitialDistribution` | Initial condition |
-| `initial_duration` | float or `(batch,)` array | Per-individual `d_0` for `str` / `(batch,)` initial forms |
-| `horizon` | int | Number of time units |
-| `steps_per_unit` | int | Discretisation resolution per time unit |
-| `callback` | `str`, callable, or `None` | Probability callback |
-| `record_every` | int | Must divide `horizon * steps_per_unit` |
-| `**kwargs` | arrays | Covariates with a shared leading batch dimension |
-
-Result:
-
-```python
-result["probability"]
-result["states"]
-```
-
-### Planned cashflow solve extension
-
-The intended cashflow API extends the solve surface rather than introducing a separate cashflow solver:
+Probability + cashflows in a single solve:
 
 ```python
 result = model.solve(
@@ -544,28 +534,36 @@ result = model.solve(
 )
 ```
 
-Planned semantics:
-
-| Parameter | Type | Meaning |
-|---|---|---|
-| `probability` | `str`, callable, or `None` | Probability reporting control |
-| `cashflows` | cashflow declaration or `None` | Named cashflow components to evaluate |
-| `cashflow_views` | `dict[str, View]` or `None` | Solve-time aggregation and time-only valuation declared per view |
-
-`probability=None` disables probability output.
-`cashflows=None` disables cashflow output.
-
-When `cashflows` is supplied and `cashflow_views` is `None` (or omitted), the solver behaves exactly as if `cashflow_views={"raw": Raw()}` had been passed. When `cashflow_views` is supplied, the solver returns exactly the requested views; raw components are not added implicitly.
-
-Planned result keys:
+Or via the module-level entry point:
 
 ```python
-result["probability"]
-result["cashflows"]
-result["states"]
+result = jact.solve(model, initial=..., horizon=..., steps_per_unit=..., **covariates)
 ```
 
-`result["cashflows"]` is a flat mapping from view name to that view's output; streamed and terminal views can coexist within the same result. The exact disabled-output convention, such as omitted key versus `None`, is not yet fixed.
+Parameters:
+
+| Parameter | Type | Description |
+|---|---|---|
+| `initial` | `str`, `(batch,)` int array, or `InitialDistribution` | Initial condition |
+| `initial_duration` | float or `(batch,)` array | Per-individual `d_0` for `str` / `(batch,)` initial forms |
+| `horizon` | int | Number of time units |
+| `steps_per_unit` | int | Discretisation resolution per time unit |
+| `callback` | `str`, callable, or `None` | Probability callback. Defaults to `"collapse_point_no_duration"` |
+| `probability` | `str`, callable, or `None` | Alias for `callback`. `None` disables probability output. Passing both `callback` (non-default) and `probability` is rejected when they specify conflicting outputs |
+| `cashflows` | `CashflowDeclaration` or `None` | Named cashflow components to evaluate. `None` disables cashflow output |
+| `cashflow_views` | `dict[str, View]` or `None` | Solve-time aggregation and time-only valuation declared per view. Requires `cashflows`. When omitted with `cashflows` supplied, defaults to `{"raw": Raw()}` |
+| `record_every` | int | Must divide `horizon * steps_per_unit` |
+| `**kwargs` | arrays | Covariates with a shared leading batch dimension |
+
+Result keys:
+
+```python
+result["probability"]   # omitted when probability=None
+result["cashflows"]     # omitted when cashflows is None
+result["states"]        # always present: tuple of reachable-state names in reduced order
+```
+
+Disabled outputs are dropped from the result dict — no `None` placeholder is emitted. `result["cashflows"]` is a flat mapping from view name to that view's output; streamed and terminal views can coexist within the same result.
 
 #### Output shape
 
@@ -605,11 +603,14 @@ The step then:
 5. Injects transferred mass into duration zero.
 6. Decays point masses along `(t, d_0 + t)` and transfers their outgoing mass into target densities.
 
-Built-in callbacks keep their existing names and expose point masses directly from the solver state:
+Built-in callbacks expose point masses directly from the solver state:
 
+- `default` returns the full per-state pytree (`StateCarry` per state) unchanged,
+- `no_duration` marginalises duration but keeps the per-state pytree,
 - `collapse_point` and `collapse_point_no_duration` add point-mass value to the reported state total,
 - `point_only` and `point_only_no_duration` show the current point mass directly,
-- `no_point` and `no_point_no_duration` continue to exclude point mass entirely.
+- `no_point` and `no_point_no_duration` exclude point mass entirely,
+- `none` short-circuits to a callback that returns `None` per step — equivalent to `callback=None` / `probability=None`.
 
 ## Numerical contract
 
@@ -624,16 +625,20 @@ Built-in callbacks keep their existing names and expose point masses directly fr
 Static:
 
 - sparsity pattern of the reduced transition matrix,
-- callback function,
+- callback function (and its identity for `probability`),
 - presence or absence of `point_mass` per state,
 - declared set of initial states,
 - `step_size`,
-- `record_every`.
+- `record_every`,
+- declared cashflow component names, kinds, and attachment points,
+- payment and `when` callable identities,
+- declared cashflow view names, kinds, and `terminal` flag,
+- weight callable identity (or scalar value bound at trace time).
 
 Traced:
 
 - covariate arrays,
-- parameters captured in closures,
+- parameters captured in closures of intensity, payment, `when`, and `weight` callables,
 - per-individual masses and durations,
 - `PointMass.value`,
 - `PointMass.d_0`,
