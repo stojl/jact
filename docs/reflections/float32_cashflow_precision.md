@@ -24,20 +24,27 @@ Post-fix sweep for the original reproduction:
 
 ```
 steps_per_unit   err float32   err float64
-            32     1.144e-05     1.101e-05
-            64     3.099e-06     2.752e-06
-           128     0.000e+00     6.879e-07
-           256     4.768e-07     1.720e-07
-           512     1.907e-06     4.299e-08
-          1024     2.146e-06     1.075e-08
-          2048     3.338e-06     2.687e-09
-          4096     1.860e-05     6.718e-10
-          8192     2.694e-05     1.679e-10
+            32     1.121e-05     1.101e-05
+            64     2.861e-06     2.752e-06
+           128     7.153e-07     6.879e-07
+           256     2.384e-07     1.720e-07
+           512     2.384e-07     4.299e-08
+          1024     2.384e-07     1.075e-08
+          2048     2.384e-07     2.687e-09
+          4096     2.384e-07     6.718e-10
+          8192     2.384e-07     1.679e-10
 ```
 
 The wide density reduction may still deserve separate diagnostics for models
 that actually put material mass on the duration grid, but it is not the cause
 of this specific reproduction.
+
+Neumaier terminal accumulation was benchmarked after the survival fixes. It did
+not measurably improve this GPU-backed reproduction: both the plain terminal
+carry and the Neumaier prototype stayed at the high-step float32 floor
+(`2.384e-07`). Because this package is GPU-oriented, the prototype was not kept;
+the extra nested carry state and branch logic were not justified without a
+GPU-realistic case where terminal summation is the limiting error.
 
 ### Density-advection follow-up
 
@@ -72,10 +79,38 @@ bias whenever material mass is repeatedly transported by near-one survival
 factors.
 
 The density fix is more invasive than the point-mass fix because density has
-additive inflow and last-bin pooling. A robust implementation should either
-carry internal `log_density` with `logaddexp` at merge points, or apply a
-narrower log-survival correction along pure advection characteristics while
-keeping transition inflow reductions in linear space.
+additive inflow and last-bin pooling. A robust implementation could carry
+internal `log_density` with `logaddexp` at merge points, but the least invasive
+fix is to avoid materialising the rounded near-one survival factor along pure
+advection while leaving transition inflows and last-bin pooling in linear space.
+
+Implemented density fix: `_advance_density` now receives the per-cell total
+hazard and updates advected mass as `density + density * expm1(-hazard)` instead
+of `density * (1 - (-expm1(-hazard)))`. This is algebraically the same
+float32-space survival update, but it avoids the extra rounding of a survival
+factor very close to one. Additive inflows and last-bin pooling remain linear,
+so the public solver state and initial-distribution API are unchanged.
+
+Post-fix density-only sweep from `scripts/density_precision_sweep.py`:
+
+```
+steps_per_unit   density err float32         float64
+            32             4.053e-06       4.003e-06
+            64             8.345e-07       1.001e-06
+           128             2.384e-07       2.502e-07
+           256             1.192e-07       6.254e-08
+           512             2.384e-07       1.564e-08
+          1024             1.431e-06       3.909e-09
+          2048             2.027e-06       9.772e-10
+          4096             2.384e-07       2.443e-10
+          8192             1.073e-06       6.108e-11
+```
+
+The `steps_per_unit=1024` density-path error drops from `4.315e-05` to
+`1.431e-06`. That remaining error is around the practical float32 floor for a
+thousands-step scan/reduction, not evidence of the same coherent survival-factor
+bias. Float32 machine epsilon is about `1.19e-07`, and a few to tens of ulps of
+absolute error are expected once the solver has performed thousands of updates.
 
 ## Symptom
 
@@ -107,39 +142,43 @@ N=1024 is reproducible across runs — this is not random noise.
 
 ## What this is *not*
 
-Initial hypothesis: terminal `+=` accumulation across all `n_steps` carries
-recurrent rounding error, fixable with Kahan / Neumaier compensated summation
-in the terminal carry inside `_midpoint_solver`.
+Initial hypothesis: terminal `+=` accumulation across all `n_steps` was the
+source of the large `steps_per_unit=1024` spike, fixable with Kahan / Neumaier
+compensated summation in the terminal carry inside `_midpoint_solver`.
 
-This hypothesis is **wrong**. Two diagnostics in `scripts/` rule it out:
+As an explanation of the original spike, this hypothesis was **wrong**. Two
+diagnostics in `scripts/` ruled it out before the survival-advection fixes:
 
 `scripts/cashflow_precision_diagnose.py` runs the same model with both a
 `terminal=True` view (in-solver scan accumulator) and a streamed view, and
-host-side-sums the streamed `(T_out, batch)` array independently. Result:
-identical error to the in-solver terminal accumulator at every `steps_per_unit`.
-The two paths have entirely different summation structures; only the per-step
-values they share are the same.
+host-side-sums the streamed `(T_out, batch)` array independently. Before the
+survival fixes, both paths had the same large error because they shared biased
+per-step values. After the survival fixes, this script is useful for checking
+whether ordinary terminal scan addition is still worse than pairwise or
+compensated summation of the now-good per-step values.
 
 `scripts/cashflow_precision_step.py` takes those per-step streamed values and
 sums them four ways: naïve sequential f32, JAX pairwise (`jnp.sum`), full
-Python Neumaier in f32, and upcast-to-f64-then-sum. At `steps=1024`:
+Python Neumaier in f32, and upcast-to-f64-then-sum. In the current checkout at
+`steps=1024`:
 
 ```
-naïve sequential f32:  err 9.68e-05
-pairwise (jnp.sum):    err 9.80e-05
-Neumaier f32:          err 9.80e-05
-upcast to f64 + sum:   err 9.80e-05
+naïve sequential f32:  err 2.15e-06
+pairwise (jnp.sum):    err 2.38e-07
+Neumaier f32:          err 0.00e+00
+upcast to f64 + sum:   err 9.51e-08
 ```
 
-All four agree. **Even summing in float64 cannot recover the precision.** The
-information is gone before the values reach the accumulator. Compensated
-summation in the terminal carry, or anywhere else *downstream* of the per-step
-emit, can therefore never help — there is nothing left to compensate.
+Before the survival fixes, all four summation modes agreed because the
+information was already gone before the values reached the accumulator. In the
+current solver, the per-step values are accurate enough that downstream
+summation order matters again.
 
-A Neumaier prototype was implemented in `_midpoint_solver` (compensated
-`(value, comp)` carry, branchless `jnp.where` Neumaier add, materialised at
-solve-end) and confirmed to produce float32 errors within rounding noise of
-the unmodified main branch. The prototype was reverted.
+A Neumaier prototype used a `(sum, compensation)` tree for `terminal=True`
+views, branchless `jnp.where` correction per leaf, and `sum + compensation`
+materialisation at solve end. It was removed after GPU benchmarking showed no
+measurable accuracy improvement for the reproduction and negligible but
+unnecessary added solver complexity.
 
 ## Where the error actually originates
 
@@ -164,11 +203,11 @@ Two suspects, both upstream of the terminal accumulator:
    step by an exponential survival factor; over thousands of float32
    multiplications the density carries cumulative rounding bias.
 
-The N=1024 spike in particular looks like a discretisation/representation
-artefact of `D` rather than smooth accumulation drift — accumulation drift
-would be monotone in N, but the error *recovers* somewhat at N=2048 and
-beyond. This points at the inner reduction (whose nature changes with `D`)
-rather than at advection (whose drift would only grow with N).
+The initial N=1024 cashflow spike looked like a discretisation/representation
+artefact of `D`, but the later point-mass and density-only probes showed that
+the dominant failure mode was coherent rounding bias from repeatedly applying a
+float32 survival factor near one. The inner reduction can still set a model-
+specific float32 floor, but it was not the cause of either isolated spike.
 
 ## What to do — float64 upcast is undesirable on GPU
 
@@ -201,14 +240,11 @@ Replace the implicit pairwise `jnp.sum(density * payment, axis=-1)` inside
 
 ### B. Stabilise the density advection
 
-If diagnostic (2) above is the real culprit, no amount of inner-sum work will
-help. Probe via a separate sweep that reads the density at `t = horizon`
-directly (e.g. through `result["probability"]` with a no-op cashflow) and
-checks whether `1 - exp(-rate * horizon)` is recovered to float32 ulp. If the
-density itself has drifted, the fix has to live in `_advance_solver_step_from_dynamics`
-(consider compensated multiplication of the survival factor along the
-characteristic, or reformulating the advection as a log-space update where
-multiplications become additions amenable to compensated summation).
+This was the next successful least-invasive fix. The private density-only sweep
+confirmed that `_advance_density` had the same near-one survival-factor rounding
+issue as point masses. Updating pure advection with `density + density *
+expm1(-hazard)` collapses the `steps_per_unit=1024` error to about `1e-6`
+without adding an internal `log_density` carry.
 
 ### C. Document the precision floor
 
@@ -227,8 +263,16 @@ Even with (A) and (B), float32 has a hard ulp floor on GPU. Document, in
 
 ## Recommendation
 
-Investigate (A) first — implement a magnitude-sorted or block-Kahan
-reduction in `_compute_cashflow_step`'s inner sum, validated against the
-sweep script. If the spike at N=1024 collapses, ship that. If it does not,
-move to (B). Either way (C) is worth doing in parallel — even an ideal
-float32 solver has a precision floor and users should know where it sits.
+The point-mass and density-advection survival-factor fixes should be the
+default path. They remove the identified coherent float32 rounding bias while
+preserving the public solver state.
+
+Do not add a full `log_density` carry unless a future model shows density-path
+error materially above the post-fix `~1e-6` floor. That design would need
+`logaddexp` at additive inflow and last-bin merge points and is not justified by
+the current benchmark.
+
+Keep (A) as a later optimisation for models whose remaining error is dominated
+by wide duration-grid reductions rather than survival advection. Document (C)
+for users: float32 GPU solves still have a model-specific precision floor, so
+increasing `steps_per_unit` indefinitely cannot buy float64-like convergence.

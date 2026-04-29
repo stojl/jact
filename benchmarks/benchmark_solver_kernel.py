@@ -631,7 +631,7 @@ def _run_e2e_correctness_check(
         initial="s0",
         horizon=config.horizon,
         steps_per_unit=config.steps_per_unit,
-        callback="collapse_point_no_duration",
+        probability="collapse_point_no_duration",
         age=ages,
     )
 
@@ -761,7 +761,7 @@ def _benchmark_e2e(
             initial="s0",
             horizon=config.horizon,
             steps_per_unit=config.steps_per_unit,
-            callback="collapse_point_no_duration",
+            probability="collapse_point_no_duration",
             age=ages,
         )
 

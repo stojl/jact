@@ -167,19 +167,24 @@ def _survival_and_transfer_factor(
 
 def _advance_density(
     density: jnp.ndarray,
-    survival: jnp.ndarray,
+    total_hazard: jnp.ndarray,
     inflow: jnp.ndarray,
 ) -> jnp.ndarray:
+    def survive(values: jnp.ndarray, hazard: jnp.ndarray) -> jnp.ndarray:
+        survived = values + values * jnp.expm1(-hazard)
+        return jnp.maximum(survived, jnp.zeros_like(values))
+
     if density.shape[-1] == 1:
-        return density.at[..., 0].set(density[..., 0] * survival[..., 0] + inflow)
+        survived = survive(density[..., 0], total_hazard[..., 0])
+        return density.at[..., 0].set(survived + inflow)
 
     next_density = jnp.zeros_like(density)
     next_density = next_density.at[..., 1:-1].set(
-        density[..., :-2] * survival[..., :-2]
+        survive(density[..., :-2], total_hazard[..., :-2])
     )
     next_density = next_density.at[..., -1].set(
-        density[..., -1] * survival[..., -1]
-        + density[..., -2] * survival[..., -2]
+        survive(density[..., -1], total_hazard[..., -1])
+        + survive(density[..., -2], total_hazard[..., -2])
     )
     next_density = next_density.at[..., 0].set(inflow)
     return next_density
@@ -243,7 +248,7 @@ def _solver_step(
                 point_total = point_total + point_hazard
                 point_hazards.append((j, point_hazard))
 
-        density_survival, density_transfer_factor = _survival_and_transfer_factor(
+        _density_survival, density_transfer_factor = _survival_and_transfer_factor(
             density_total
         )
         for j, density_hazard in density_hazards:
@@ -267,7 +272,7 @@ def _solver_step(
                 )
 
         next_densities.append(
-            _advance_density(densities[i], density_survival, next_inflow[i])
+            _advance_density(densities[i], density_total, next_inflow[i])
         )
 
     return _dense_state_to_tuple(
@@ -324,6 +329,7 @@ def _solver_step_dynamics(
             jnp.ndarray,
             jnp.ndarray,
             jnp.ndarray,
+            jnp.ndarray,
         ],
         ...,
     ],
@@ -371,6 +377,7 @@ def _solver_step_dynamics(
                 *_survival_and_transfer_factor(point_total),
                 jnp.exp(-0.5 * density_total),
                 jnp.exp(-0.5 * point_total),
+                density_total,
                 point_total,
             )
         )
@@ -401,12 +408,13 @@ def _advance_solver_step_from_dynamics(
     for i, (
         density_hazards,
         point_hazards,
-        density_survival,
+        _density_survival,
         density_transfer_factor,
         _point_survival,
         point_transfer_factor,
         _density_midpoint_factor,
         _point_midpoint_factor,
+        density_total,
         point_total,
     ) in enumerate(row_hazards):
         for j, density_hazard in density_hazards:
@@ -427,7 +435,7 @@ def _advance_solver_step_from_dynamics(
                 )
 
         next_densities.append(
-            _advance_density(densities[i], density_survival, next_inflow[i])
+            _advance_density(densities[i], density_total, next_inflow[i])
         )
 
     return _dense_state_to_tuple(
@@ -476,6 +484,7 @@ def _compute_cashflow_step(
                     _point_transfer_factor,
                     density_midpoint_factor,
                     _point_midpoint_factor,
+                    _density_total,
                     point_total,
                 ) = row_hazards[state_index]
                 density_midpoint = densities[state_index] * density_midpoint_factor
@@ -517,6 +526,7 @@ def _compute_cashflow_step(
                     point_transfer_factor,
                     _density_midpoint_factor,
                     _point_midpoint_factor,
+                    _density_total,
                     _point_total,
                 ) = row_hazards[source_index]
                 _target_index, density_hazard = density_hazards[hazard_slot]
