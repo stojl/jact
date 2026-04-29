@@ -1,13 +1,15 @@
 """Diagnose where the float32 error comes from.
 
 Same setup as cashflow_precision_sweep.py but compares three accumulation paths:
-  1. terminal=True (in-solver Neumaier accumulation)
+  1. terminal=True (in-solver accumulator)
   2. streamed, summed outside the solver in float32 (host-side jnp.sum)
   3. streamed, summed outside the solver in float64 (host-side, after upcast)
 
 If (1) ~ (2) and both >> (3), the error is in the per-step contributions
 themselves (density advection / midpoint quadrature in float32), not in the
 terminal accumulator. If (1) >> (2), the in-solver accumulator is at fault.
+After the solver's survival-advection fixes, this script is also useful for
+checking whether terminal scan summation is a meaningful remaining error source.
 """
 
 from __future__ import annotations

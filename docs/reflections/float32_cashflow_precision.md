@@ -24,20 +24,27 @@ Post-fix sweep for the original reproduction:
 
 ```
 steps_per_unit   err float32   err float64
-            32     1.144e-05     1.101e-05
-            64     3.099e-06     2.752e-06
-           128     0.000e+00     6.879e-07
-           256     4.768e-07     1.720e-07
-           512     1.907e-06     4.299e-08
-          1024     2.146e-06     1.075e-08
-          2048     3.338e-06     2.687e-09
-          4096     1.860e-05     6.718e-10
-          8192     2.694e-05     1.679e-10
+            32     1.121e-05     1.101e-05
+            64     2.861e-06     2.752e-06
+           128     7.153e-07     6.879e-07
+           256     2.384e-07     1.720e-07
+           512     2.384e-07     4.299e-08
+          1024     2.384e-07     1.075e-08
+          2048     2.384e-07     2.687e-09
+          4096     2.384e-07     6.718e-10
+          8192     2.384e-07     1.679e-10
 ```
 
 The wide density reduction may still deserve separate diagnostics for models
 that actually put material mass on the duration grid, but it is not the cause
 of this specific reproduction.
+
+Neumaier terminal accumulation was benchmarked after the survival fixes. It did
+not measurably improve this GPU-backed reproduction: both the plain terminal
+carry and the Neumaier prototype stayed at the high-step float32 floor
+(`2.384e-07`). Because this package is GPU-oriented, the prototype was not kept;
+the extra nested carry state and branch logic were not justified without a
+GPU-realistic case where terminal summation is the limiting error.
 
 ### Density-advection follow-up
 
@@ -135,39 +142,43 @@ N=1024 is reproducible across runs — this is not random noise.
 
 ## What this is *not*
 
-Initial hypothesis: terminal `+=` accumulation across all `n_steps` carries
-recurrent rounding error, fixable with Kahan / Neumaier compensated summation
-in the terminal carry inside `_midpoint_solver`.
+Initial hypothesis: terminal `+=` accumulation across all `n_steps` was the
+source of the large `steps_per_unit=1024` spike, fixable with Kahan / Neumaier
+compensated summation in the terminal carry inside `_midpoint_solver`.
 
-This hypothesis is **wrong**. Two diagnostics in `scripts/` rule it out:
+As an explanation of the original spike, this hypothesis was **wrong**. Two
+diagnostics in `scripts/` ruled it out before the survival-advection fixes:
 
 `scripts/cashflow_precision_diagnose.py` runs the same model with both a
 `terminal=True` view (in-solver scan accumulator) and a streamed view, and
-host-side-sums the streamed `(T_out, batch)` array independently. Result:
-identical error to the in-solver terminal accumulator at every `steps_per_unit`.
-The two paths have entirely different summation structures; only the per-step
-values they share are the same.
+host-side-sums the streamed `(T_out, batch)` array independently. Before the
+survival fixes, both paths had the same large error because they shared biased
+per-step values. After the survival fixes, this script is useful for checking
+whether ordinary terminal scan addition is still worse than pairwise or
+compensated summation of the now-good per-step values.
 
 `scripts/cashflow_precision_step.py` takes those per-step streamed values and
 sums them four ways: naïve sequential f32, JAX pairwise (`jnp.sum`), full
-Python Neumaier in f32, and upcast-to-f64-then-sum. At `steps=1024`:
+Python Neumaier in f32, and upcast-to-f64-then-sum. In the current checkout at
+`steps=1024`:
 
 ```
-naïve sequential f32:  err 9.68e-05
-pairwise (jnp.sum):    err 9.80e-05
-Neumaier f32:          err 9.80e-05
-upcast to f64 + sum:   err 9.80e-05
+naïve sequential f32:  err 2.15e-06
+pairwise (jnp.sum):    err 2.38e-07
+Neumaier f32:          err 0.00e+00
+upcast to f64 + sum:   err 9.51e-08
 ```
 
-All four agree. **Even summing in float64 cannot recover the precision.** The
-information is gone before the values reach the accumulator. Compensated
-summation in the terminal carry, or anywhere else *downstream* of the per-step
-emit, can therefore never help — there is nothing left to compensate.
+Before the survival fixes, all four summation modes agreed because the
+information was already gone before the values reached the accumulator. In the
+current solver, the per-step values are accurate enough that downstream
+summation order matters again.
 
-A Neumaier prototype was implemented in `_midpoint_solver` (compensated
-`(value, comp)` carry, branchless `jnp.where` Neumaier add, materialised at
-solve-end) and confirmed to produce float32 errors within rounding noise of
-the unmodified main branch. The prototype was reverted.
+A Neumaier prototype used a `(sum, compensation)` tree for `terminal=True`
+views, branchless `jnp.where` correction per leaf, and `sum + compensation`
+materialisation at solve end. It was removed after GPU benchmarking showed no
+measurable accuracy improvement for the reproduction and negligible but
+unnecessary added solver complexity.
 
 ## Where the error actually originates
 
