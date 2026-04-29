@@ -17,6 +17,7 @@ import prototype_8
 
 import jact
 from jact.callbacks import PointMass, StateCarry
+from jact.solver import _KIND_STATE_RATE, _SOURCE_COMPONENT, _midpoint_solver
 
 LAMBDA_HD = 0.3
 MU_HM = 0.2
@@ -210,6 +211,68 @@ class TestSolverAgainstClosedForm:
 
 
 class TestSolverContinuityAndStability:
+    def test_density_only_advection_avoids_float32_survival_spike(self):
+        rate = 0.25
+        horizon = 2
+        steps_per_unit = 1024
+        batch_size = 1
+        solver_steps = horizon * steps_per_unit
+        step_size = 1 / steps_per_unit
+
+        def constant_intensity(t, d, **kwargs):
+            del t, kwargs
+            return jnp.full((batch_size, d.shape[-1]), rate, dtype=jnp.float32)
+
+        def unit_payment(t, d, **kwargs):
+            del t, kwargs
+            return jnp.ones((batch_size, d.shape[-1]), dtype=jnp.float32)
+
+        alive_density = jnp.zeros(
+            (batch_size, solver_steps),
+            dtype=jnp.float32,
+        ).at[:, 0].set(1.0)
+        dead_density = jnp.zeros_like(alive_density)
+        state_0 = (
+            StateCarry(density=alive_density, point_mass=None),
+            StateCarry(density=dead_density, point_mass=None),
+        )
+        grid = jnp.linspace(
+            0.0,
+            horizon,
+            solver_steps + 1,
+            endpoint=True,
+            dtype=jnp.float32,
+        )[None, :]
+        duration_left = grid[:, :-1]
+        duration_mid = 0.5 * (duration_left + grid[:, 1:])
+
+        result = _midpoint_solver(
+            state_0,
+            duration_mid,
+            duration_left,
+            step_size,
+            ((None, constant_intensity), (None, None)),
+            {},
+            lambda _state: None,
+            solver_steps,
+            ((_KIND_STATE_RATE, ((0, unit_payment),)),),
+            (
+                (
+                    "annuity",
+                    True,
+                    None,
+                    ((_SOURCE_COMPONENT, 0),),
+                    ("annuity",),
+                    "single",
+                ),
+            ),
+        )
+
+        annuity = result["cashflow_terminal"][0][0]
+        expected = (1.0 - jnp.exp(-rate * horizon)) / rate
+
+        assert jnp.allclose(annuity, expected, atol=5e-6, rtol=0.0)
+
     def test_constant_intensity_stays_consistent_with_prototype(
         self, illness_death_model
     ):
