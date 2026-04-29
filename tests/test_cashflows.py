@@ -263,6 +263,40 @@ def test_constant_intensity_time_duration_state_rate_matches_closed_form():
     assert jnp.allclose(result["cashflows"]["annuity"], expected, atol=2e-5)
 
 
+def test_point_mass_state_rate_remains_accurate_at_high_resolution_float32():
+    rate = 0.25
+    horizon = 2
+    initial_duration = jnp.array([0.0, 0.75], dtype=jnp.float32)
+    base = 1.5
+    time_coef = 0.4
+    duration_coef = 0.2
+    ss = jact.StateSpace(["alive", "dead"], [("alive", "dead")])
+    model = ss.build(transitions={("alive", "dead"): _constant_intensity(rate, 2)})
+    cashflows = ss.cashflows({"annuity": jact.StateRate({
+        "alive": _time_duration_payment(base, time_coef, duration_coef, 2)
+    })})
+
+    result = model.solve(
+        initial="alive",
+        initial_duration=initial_duration,
+        horizon=horizon,
+        steps_per_unit=1024,
+        probability=None,
+        cashflows=cashflows,
+        cashflow_views={"annuity": jact.Raw("annuity", terminal=True)},
+        age=jnp.arange(2.0, dtype=jnp.float32),
+    )
+
+    survival = jnp.exp(-rate * horizon)
+    integral_0 = (1.0 - survival) / rate
+    integral_1 = (1.0 - survival * (1.0 + rate * horizon)) / rate**2
+    expected = (
+        (base + duration_coef * initial_duration) * integral_0
+        + (time_coef + duration_coef) * integral_1
+    )
+    assert jnp.allclose(result["cashflows"]["annuity"], expected, atol=1e-5)
+
+
 def test_time_dependent_intensity_transition_lump_matches_closed_form():
     base = 0.08
     time_coef = 0.05

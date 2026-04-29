@@ -27,14 +27,24 @@ __all__ = [
 class PointMass:
     """Per-individual point mass carried along a characteristic."""
 
-    __slots__ = ("value", "d_0")
+    __slots__ = ("value", "d_0", "log_value")
 
-    def __init__(self, value: jnp.ndarray, d_0: jnp.ndarray):
+    def __init__(
+        self,
+        value: jnp.ndarray,
+        d_0: jnp.ndarray,
+        log_value: jnp.ndarray | None = None,
+    ):
         self.value = value
         self.d_0 = d_0
+        self.log_value = (
+            jnp.where(value > 0, jnp.log(value), -jnp.inf)
+            if log_value is None
+            else log_value
+        )
 
     def tree_flatten(self):
-        return (self.value, self.d_0), None
+        return (self.value, self.d_0, self.log_value), None
 
     @classmethod
     def tree_unflatten(cls, _, children):

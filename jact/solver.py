@@ -43,34 +43,47 @@ def _stack_state_densities(state: tuple[StateCarry, ...]) -> jnp.ndarray:
 
 def _stack_point_masses(
     state: tuple[StateCarry, ...],
-) -> tuple[jnp.ndarray, jnp.ndarray, tuple[bool, ...]]:
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, tuple[bool, ...]]:
     value_template = state[0].density[:, 0]
     values = []
     d_0 = []
+    log_values = []
     mask = []
     for carry in state:
         if carry.point_mass is None:
             values.append(jnp.zeros_like(value_template))
             d_0.append(jnp.zeros_like(value_template))
+            log_values.append(jnp.full_like(value_template, -jnp.inf))
             mask.append(False)
         else:
             values.append(carry.point_mass.value)
             d_0.append(carry.point_mass.d_0)
+            log_values.append(carry.point_mass.log_value)
             mask.append(True)
-    return jnp.stack(values, axis=0), jnp.stack(d_0, axis=0), tuple(mask)
+    return (
+        jnp.stack(values, axis=0),
+        jnp.stack(d_0, axis=0),
+        jnp.stack(log_values, axis=0),
+        tuple(mask),
+    )
 
 
 def _dense_state_to_tuple(
     densities: jnp.ndarray,
     point_values: jnp.ndarray,
     point_d_0: jnp.ndarray,
+    point_log_values: jnp.ndarray,
     point_mask: tuple[bool, ...],
 ) -> tuple[StateCarry, ...]:
     state = []
     for i, has_point_mass in enumerate(point_mask):
         point_mass = None
         if has_point_mass:
-            point_mass = PointMass(value=point_values[i], d_0=point_d_0[i])
+            point_mass = PointMass(
+                value=point_values[i],
+                d_0=point_d_0[i],
+                log_value=point_log_values[i],
+            )
         state.append(StateCarry(density=densities[i], point_mass=point_mass))
     return tuple(state)
 
@@ -193,9 +206,10 @@ def _solver_step(
     intensity_kwargs: Dict[str, jnp.ndarray],
 ) -> tuple[StateCarry, ...]:
     densities = _stack_state_densities(state)
-    point_values, point_d_0, point_mask = _stack_point_masses(state)
+    point_values, point_d_0, point_log_values, point_mask = _stack_point_masses(state)
     next_inflow = jnp.zeros(densities.shape[:-1], dtype=densities.dtype)
     next_point_values = point_values
+    next_point_log_values = point_log_values
     next_densities = []
 
     for i, row in enumerate(solver_matrix):
@@ -239,11 +253,13 @@ def _solver_step(
             )
 
         if point_mask[i]:
-            point_survival, point_transfer_factor = _survival_and_transfer_factor(
+            _point_survival, point_transfer_factor = _survival_and_transfer_factor(
                 point_total
             )
+            next_log_value = point_log_values[i] - point_total
+            next_point_log_values = next_point_log_values.at[i].set(next_log_value)
             next_point_values = next_point_values.at[i].set(
-                point_values[i] * point_survival
+                jnp.exp(next_log_value)
             )
             for j, point_hazard in point_hazards:
                 next_inflow = next_inflow.at[j].add(
@@ -258,6 +274,7 @@ def _solver_step(
         jnp.stack(tuple(next_densities), axis=0),
         next_point_values,
         point_d_0,
+        next_point_log_values,
         point_mask,
     )
 
@@ -294,6 +311,7 @@ def _solver_step_dynamics(
     jnp.ndarray,
     jnp.ndarray,
     jnp.ndarray,
+    jnp.ndarray,
     tuple[bool, ...],
     tuple[
         tuple[
@@ -305,12 +323,13 @@ def _solver_step_dynamics(
             jnp.ndarray,
             jnp.ndarray,
             jnp.ndarray,
+            jnp.ndarray,
         ],
         ...,
     ],
 ]:
     densities = _stack_state_densities(state)
-    point_values, point_d_0, point_mask = _stack_point_masses(state)
+    point_values, point_d_0, point_log_values, point_mask = _stack_point_masses(state)
     row_hazards = []
 
     for source_index, row in enumerate(solver_matrix):
@@ -352,21 +371,31 @@ def _solver_step_dynamics(
                 *_survival_and_transfer_factor(point_total),
                 jnp.exp(-0.5 * density_total),
                 jnp.exp(-0.5 * point_total),
+                point_total,
             )
         )
 
-    return densities, point_values, point_d_0, point_mask, tuple(row_hazards)
+    return (
+        densities,
+        point_values,
+        point_d_0,
+        point_log_values,
+        point_mask,
+        tuple(row_hazards),
+    )
 
 
 def _advance_solver_step_from_dynamics(
     densities: jnp.ndarray,
     point_values: jnp.ndarray,
     point_d_0: jnp.ndarray,
+    point_log_values: jnp.ndarray,
     point_mask: tuple[bool, ...],
     row_hazards: tuple[Any, ...],
 ) -> tuple[StateCarry, ...]:
     next_inflow = jnp.zeros(densities.shape[:-1], dtype=densities.dtype)
     next_point_values = point_values
+    next_point_log_values = point_log_values
     next_densities = []
 
     for i, (
@@ -374,10 +403,11 @@ def _advance_solver_step_from_dynamics(
         point_hazards,
         density_survival,
         density_transfer_factor,
-        point_survival,
+        _point_survival,
         point_transfer_factor,
         _density_midpoint_factor,
         _point_midpoint_factor,
+        point_total,
     ) in enumerate(row_hazards):
         for j, density_hazard in density_hazards:
             transferred = density_hazard * density_transfer_factor
@@ -386,8 +416,10 @@ def _advance_solver_step_from_dynamics(
             )
 
         if point_mask[i]:
+            next_log_value = point_log_values[i] - point_total
+            next_point_log_values = next_point_log_values.at[i].set(next_log_value)
             next_point_values = next_point_values.at[i].set(
-                point_values[i] * point_survival
+                jnp.exp(next_log_value)
             )
             for j, point_hazard in point_hazards:
                 next_inflow = next_inflow.at[j].add(
@@ -402,6 +434,7 @@ def _advance_solver_step_from_dynamics(
         jnp.stack(tuple(next_densities), axis=0),
         next_point_values,
         point_d_0,
+        next_point_log_values,
         point_mask,
     )
 
@@ -410,6 +443,7 @@ def _compute_cashflow_step(
     densities: jnp.ndarray,
     point_values: jnp.ndarray,
     point_d_0: jnp.ndarray,
+    point_log_values: jnp.ndarray,
     point_mask: tuple[bool, ...],
     row_hazards: tuple[Any, ...],
     t: jnp.ndarray,
@@ -441,7 +475,8 @@ def _compute_cashflow_step(
                     _point_survival,
                     _point_transfer_factor,
                     density_midpoint_factor,
-                    point_midpoint_factor,
+                    _point_midpoint_factor,
+                    point_total,
                 ) = row_hazards[state_index]
                 density_midpoint = densities[state_index] * density_midpoint_factor
                 payment = _call_payment(
@@ -461,7 +496,9 @@ def _compute_cashflow_step(
                         point_d_0[state_index] + t_mid,
                         intensity_kwargs,
                     )
-                    point_midpoint = point_values[state_index] * point_midpoint_factor
+                    point_midpoint = jnp.exp(
+                        point_log_values[state_index] - 0.5 * point_total
+                    )
                     contribution = contribution + (
                         step_size * point_midpoint * point_payment
                     )
@@ -480,6 +517,7 @@ def _compute_cashflow_step(
                     point_transfer_factor,
                     _density_midpoint_factor,
                     _point_midpoint_factor,
+                    _point_total,
                 ) = row_hazards[source_index]
                 _target_index, density_hazard = density_hazards[hazard_slot]
                 payment = _call_payment(
@@ -754,6 +792,7 @@ def _midpoint_solver(
                     densities,
                     point_values,
                     point_d_0,
+                    point_log_values,
                     point_mask,
                     row_hazards,
                 ) = _solver_step_dynamics(
@@ -768,6 +807,7 @@ def _midpoint_solver(
                     densities,
                     point_values,
                     point_d_0,
+                    point_log_values,
                     point_mask,
                     row_hazards,
                     current_t,
@@ -814,6 +854,7 @@ def _midpoint_solver(
                     densities,
                     point_values,
                     point_d_0,
+                    point_log_values,
                     point_mask,
                     row_hazards,
                 )
