@@ -8,17 +8,38 @@ version = "0.1.0"
 description = "JAX-based transition probability computation for multi-state models"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [
+    {name = "Lucas", email = "lucashillerod@hotmail.com"},
+]
+keywords = [
+    "jax",
+    "markov-model",
+    "multi-state-model",
+    "semi-markov",
+    "transition-probabilities",
+]
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Mathematics",
 ]
 dependencies = [
     "jax>=0.4",
     "jaxlib>=0.4",
 ]
+
+[project.urls]
+Homepage = "https://github.com/stojl/jact"
+Repository = "https://github.com/stojl/jact"
+Issues = "https://github.com/stojl/jact/issues"
+Documentation = "https://github.com/stojl/jact/blob/main/docs/api_spec.md"
 
 [project.optional-dependencies]
 dev = [
@@ -33,6 +54,7 @@ notebook = [
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+include-package-data = false
 
 [tool.setuptools.packages.find]
 where = ["src"]

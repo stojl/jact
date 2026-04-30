@@ -33,6 +33,8 @@ Example
 ... )
 """
 
+from importlib.metadata import PackageNotFoundError, version
+
 from . import callbacks
 from .cashflows import (
     ByKind,
@@ -51,7 +53,13 @@ from .model import Model
 from .solver import solve
 from .state_space import StateSpace
 
+try:
+    __version__ = version("jact")
+except PackageNotFoundError:
+    __version__ = "0.1.0"
+
 __all__ = [
+    "__version__",
     "StateSpace",
     "Model",
     "InitialDistribution",
