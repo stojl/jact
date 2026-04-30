@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 authors = [
-    {name = "Lucas", email = "lucashillerod@hotmail.com"},
+    {name = "Lucas Støjko Andersen", email = "93032255+stojl@users.noreply.github.com"},
 ]
 keywords = [
     "jax",
