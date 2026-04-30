@@ -175,6 +175,14 @@ def test_cashflow_declaration_copies_payment_mappings():
     assert set(component.payments) == {"healthy"}
 
 
+def test_discount_factor_removed_from_public_api():
+    with pytest.raises(ImportError):
+        exec("from jact import discount_factor", {})
+
+    assert "discount_factor" not in jact.__all__
+    assert not hasattr(jact, "discount_factor")
+
+
 def test_cashflow_views_accept_rank_zero_array_weight():
     ss = jact.StateSpace(["active"], [])
     model = ss.build(transitions={})
@@ -530,6 +538,9 @@ def test_discounted_constant_state_rate_matches_closed_form_present_value():
         "alive": _constant_payment(payment)
     })})
 
+    def flat_discount_weight(t, **kwargs):
+        return jnp.exp(-discount_rate * t)
+
     result = model.solve(
         initial="alive",
         horizon=horizon,
@@ -538,7 +549,7 @@ def test_discounted_constant_state_rate_matches_closed_form_present_value():
         cashflows=cashflows,
         cashflow_views={
             "pv": jact.Total(
-                weight=jact.discount_factor(rate=discount_rate),
+                weight=flat_discount_weight,
                 terminal=True,
             )
         },

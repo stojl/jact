@@ -20,7 +20,6 @@ __all__ = [
     "StateRate",
     "Total",
     "TransitionLump",
-    "discount_factor",
 ]
 
 
@@ -275,15 +274,3 @@ def validate_cashflow_views(
             )
         frozen.append((name, view))
     return tuple(frozen)
-
-
-def discount_factor(rate: Callable[..., jnp.ndarray] | Scalar):
-    """Return a continuously discounted per-step weight function."""
-    if not callable(rate) and not isinstance(rate, Number):
-        raise TypeError("rate must be a scalar or callable.")
-
-    def weight(t, **kwargs):
-        r = rate(t, **kwargs) if callable(rate) else rate
-        return jnp.exp(-jnp.asarray(r) * t)
-
-    return weight

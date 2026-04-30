@@ -46,7 +46,6 @@ from .cashflows import (
     StateRate,
     Total,
     TransitionLump,
-    discount_factor,
 )
 from .initial_distribution import InitialDistribution
 from .model import Model
@@ -74,5 +73,4 @@ __all__ = [
     "ByState",
     "ByKind",
     "CashflowDeclaration",
-    "discount_factor",
 ]

@@ -5,7 +5,6 @@ This directory contains the public documentation for `jact`.
 ## Start here
 
 - [API specification](api_spec.md): authoritative public API contract.
-- [Short API reference](api_spec_short.md): condensed reference for quick review.
 - [Example notebook](example_notebook.ipynb): runnable walkthrough of the main workflow.
 
 ## Maintainer-only material
