@@ -110,6 +110,8 @@ class Model:
 
         # Groups
         for fn, trans_list in self._groups_map.items():
+            if not trans_list:
+                raise ValueError("Group assignments must cover at least one transition.")
             for i, (src, tgt) in enumerate(trans_list):
                 self._register_transition(
                     src, tgt, "groups", fn, index=i, covered=covered
@@ -136,6 +138,10 @@ class Model:
         covered: Dict[Tuple[str, str], str],
     ) -> None:
         """Register a single transition, checking for conflicts."""
+        if not callable(fn):
+            raise TypeError(
+                f"{assignment} assignment for '{src}' -> '{tgt}' must be callable."
+            )
         if not self._state_space.has_transition(src, tgt):
             raise ValueError(
                 f"Transition '{src}' -> '{tgt}' is not declared in the "
@@ -298,7 +304,7 @@ class Model:
         horizon: int,
         steps_per_unit: int,
         initial_duration: Any = 0.0,
-        probability: Union[None, str, Callable] = "collapse_point_no_duration",
+        probability: Union[None, str, Callable] = "state_probability",
         cashflows: Any = None,
         cashflow_views: Any = None,
         record_every: int = 1,
@@ -324,7 +330,7 @@ class Model:
             shorthand forms of ``initial``. Default is ``0.0``.
         probability : str, callable, or None, optional
             Probability output reducer. Default is
-            ``"collapse_point_no_duration"``. ``None`` disables
+            ``"state_probability"``. ``None`` disables
             probability output.
         cashflows : CashflowDeclaration, optional
             Cashflow declaration to evaluate.
@@ -390,6 +396,23 @@ def _make_slice_wrapper(fn: Callable, index: int) -> Callable:
 
     def wrapper(t, grid, **kwargs):
         full_output = fn(t, grid, **kwargs)
-        return full_output[index]
+        try:
+            size = full_output.shape[0]
+        except Exception:
+            size = None
+        if size is None:
+            try:
+                size = len(full_output)
+            except Exception:
+                size = None
+        if size is not None and index >= size:
+            raise ValueError(
+                "Multi-output assignment returned too few transition "
+                f"outputs: expected at least {index + 1}, got {size}."
+            )
+        try:
+            return full_output[index]
+        except Exception as exc:
+            raise
 
     return wrapper

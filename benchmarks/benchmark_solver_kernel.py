@@ -25,14 +25,9 @@ import jax
 import jax.numpy as jnp
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PROTO_DIR = REPO_ROOT / "docs" / "original_prototype"
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-if str(PROTO_DIR) not in sys.path:
-    sys.path.insert(0, str(PROTO_DIR))
-
-import prototype_8
 
 import jact
 
@@ -164,8 +159,7 @@ def _parse_args() -> BenchmarkConfig:
         default="all",
         help=(
             "Cashflow scenarios to benchmark after the probability baseline. "
-            "Use 'none' to run only the historical probability/prototype "
-            "benchmark."
+            "Use 'none' to run only the probability benchmark."
         ),
     )
     parser.add_argument(
@@ -291,6 +285,29 @@ def _involved_weight(t: jnp.ndarray, **kwargs: Any) -> jnp.ndarray:
 
 def _event_time(**kwargs: Any) -> jnp.ndarray:
     return kwargs["event_time"]
+
+
+def _illness_death_closed_form_from_healthy(
+    times: jnp.ndarray,
+    lambda_hd: float,
+    mu_hm: float,
+    nu_dm: float,
+) -> jnp.ndarray:
+    healthy = jnp.exp(-(lambda_hd + mu_hm) * times)
+    disabled = (
+        lambda_hd
+        * (healthy - jnp.exp(-nu_dm * times))
+        / (nu_dm - lambda_hd - mu_hm)
+    )
+    dead = 1.0 - healthy - disabled
+    return jnp.stack([healthy, disabled, dead], axis=-1)
+
+
+def _survival_under_duration_hazard(
+    times: jnp.ndarray,
+    d_0: jnp.ndarray,
+) -> jnp.ndarray:
+    return jnp.exp(-(d_0[None, :] * times[:, None] + 0.5 * times[:, None] ** 2))
 
 
 def _build_topology(name: str, state_count: int) -> TopologySpec:
@@ -532,37 +549,6 @@ def _build_cashflow_scenarios(
     return scenarios
 
 
-def _run_prototype_e2e(
-    *,
-    horizon: int,
-    steps_per_unit: int,
-    intensity,
-    ages: jnp.ndarray,
-):
-    semimarkov_solver = getattr(
-        prototype_8.semimarkov_solver,
-        "__wrapped__",
-        prototype_8.semimarkov_solver,
-    )
-    return semimarkov_solver(
-        units=horizon,
-        discretization_unit=steps_per_unit,
-        intensity=intensity,
-        intensity_kwargs={"age": ages},
-        prob_callback=_prototype_collapse_point_no_duration,
-        transpose_result=True,
-    )
-
-
-@jax.jit
-def _prototype_collapse_point_no_duration(
-    p: jnp.ndarray,
-    p_point: jnp.ndarray,
-) -> jnp.ndarray:
-    p = p.at[..., 0, :].add(p_point)
-    return jnp.sum(p, axis=-1)
-
-
 def _block_until_ready(tree: Any) -> Any:
     jax.tree_util.tree_map(
         lambda leaf: leaf.block_until_ready()
@@ -617,7 +603,121 @@ def _benchmark_header(config: BenchmarkConfig, scenarios: list[Scenario]) -> Non
     print()
 
 
-def _run_e2e_correctness_check(
+def _run_analytic_correctness_checks(
+    config: BenchmarkConfig,
+    dtype: jnp.dtype,
+) -> None:
+    batch_size = min(config.correctness_batch_size, 8)
+
+    lambda_hd = 0.3
+    mu_hm = 0.2
+    nu_dm = 0.8
+    horizon = 3
+    steps_per_unit = max(8, config.steps_per_unit)
+    times = jnp.linspace(0.0, horizon, horizon * steps_per_unit + 1, endpoint=True)
+    expected = jnp.broadcast_to(
+        _illness_death_closed_form_from_healthy(
+            times,
+            lambda_hd,
+            mu_hm,
+            nu_dm,
+        )[:, None, :],
+        (times.shape[0], batch_size, 3),
+    )
+    illness_death = jact.StateSpace(
+        states=["healthy", "disabled", "dead"],
+        transitions=[
+            ("healthy", "disabled"),
+            ("healthy", "dead"),
+            ("disabled", "dead"),
+        ],
+    ).build(
+        transitions={
+            ("healthy", "disabled"): _constant_intensity(lambda_hd, dtype),
+            ("healthy", "dead"): _constant_intensity(mu_hm, dtype),
+            ("disabled", "dead"): _constant_intensity(nu_dm, dtype),
+        }
+    )
+    result = illness_death.solve(
+        initial="healthy",
+        horizon=horizon,
+        steps_per_unit=steps_per_unit,
+        probability="collapse_point_no_duration",
+        age=jnp.arange(batch_size, dtype=dtype),
+    )
+    _block_until_ready(result)
+    max_abs_diff = float(jnp.max(jnp.abs(result["probability"] - expected)))
+    if not jnp.allclose(result["probability"], expected, atol=1e-2, rtol=0.0):
+        raise SystemExit(
+            "Analytic correctness failed for illness-death benchmark.\n"
+            f"max_abs_diff={max_abs_diff:.3e}"
+        )
+    print(
+        "analytic correctness passed: "
+        "scenario=illness-death "
+        f"shape={result['probability'].shape} "
+        f"max_abs_diff={max_abs_diff:.3e}"
+    )
+
+    duration_horizon = 1
+    duration_steps = max(64, config.steps_per_unit)
+    duration_times = jnp.linspace(
+        0.0,
+        duration_horizon,
+        duration_horizon * duration_steps + 1,
+        endpoint=True,
+    )
+    initial_duration = jnp.linspace(
+        jnp.asarray(0.0, dtype=dtype),
+        jnp.asarray(0.7, dtype=dtype),
+        batch_size,
+        dtype=dtype,
+    )
+    survival = _survival_under_duration_hazard(duration_times, initial_duration)
+    expected = jnp.stack([survival, 1.0 - survival], axis=-1)
+    duration_model = jact.StateSpace(
+        states=["alive", "dead"],
+        transitions=[("alive", "dead")],
+    ).build(
+        transitions={
+            ("alive", "dead"): lambda t, d, **kwargs: jnp.broadcast_to(
+                d,
+                (kwargs["age"].shape[0], d.shape[-1]),
+            )
+        }
+    )
+    result = duration_model.solve(
+        initial="alive",
+        initial_duration=initial_duration,
+        horizon=duration_horizon,
+        steps_per_unit=duration_steps,
+        probability="collapse_point_no_duration",
+        record_every=2,
+        age=jnp.arange(batch_size, dtype=dtype),
+    )
+    _block_until_ready(result)
+    recorded_expected = expected[::2]
+    max_abs_diff = float(jnp.max(jnp.abs(result["probability"] - recorded_expected)))
+    if not jnp.allclose(
+        result["probability"],
+        recorded_expected,
+        atol=2e-3,
+        rtol=0.0,
+    ):
+        raise SystemExit(
+            "Analytic correctness failed for duration-hazard benchmark.\n"
+            f"max_abs_diff={max_abs_diff:.3e}"
+        )
+    print(
+        "analytic correctness passed: "
+        "scenario=duration-hazard-recorded "
+        f"shape={result['probability'].shape} "
+        f"max_abs_diff={max_abs_diff:.3e}"
+    )
+    print()
+
+
+def _run_e2e_sanity_check(
     config: BenchmarkConfig,
     topology: TopologySpec,
     intensity,
@@ -655,17 +755,6 @@ def _run_e2e_correctness_check(
             f"Sanity check failed for topology={topology.name}.\n"
             f"Probability mass deviated from one by {max_abs_diff:.3e}."
         )
-    prototype_result = _run_prototype_e2e(
-        horizon=config.horizon,
-        steps_per_unit=config.steps_per_unit,
-        intensity=intensity,
-        ages=ages,
-    )
-    _block_until_ready(prototype_result)
-    prototype_probability = jnp.swapaxes(prototype_result["probability"], 0, 1)
-    max_abs_diff = float(
-        jnp.max(jnp.abs(current_probability[:-1] - prototype_probability[:-1]))
-    )
 
     print(
         "sanity passed: "
@@ -673,11 +762,8 @@ def _run_e2e_correctness_check(
         f"shape={current_probability.shape} "
         f"atol={config.correctness_atol:g}"
     )
-    print(
-        "prototype consistency: "
-        f"benchmark=e2e topology={topology.name} "
-        f"max_abs_diff={max_abs_diff:.3e}"
-    )
+
+
 def _time_runs(name: str, fn: Callable[[], Any], timed_runs: int) -> TimingStats:
     timings_ms = []
     for _ in range(timed_runs):
@@ -708,19 +794,17 @@ def _warmup(fn: Callable[[], Any], warmup_runs: int) -> None:
 
 def _print_timing_summary(
     current_stats: TimingStats,
-    prototype_stats: TimingStats,
+    current_no_probability_stats: TimingStats,
     topology: str,
 ) -> None:
-    speedup = prototype_stats.median_ms / current_stats.median_ms
     print(f"timings: benchmark=e2e topology={topology}")
-    for stats in (current_stats, prototype_stats):
+    for stats in (current_stats, current_no_probability_stats):
         print(
             f"{stats.name}: "
             f"median={stats.median_ms:.3f} ms, "
             f"min={stats.min_ms:.3f} ms, "
             f"p95={stats.p95_ms:.3f} ms"
         )
-    print(f"speedup_vs_prototype: {speedup:.3f}x")
     print()
 
 
@@ -774,17 +858,8 @@ def _benchmark_e2e(
             age=ages,
         )
 
-    def run_prototype():
-        return _run_prototype_e2e(
-            horizon=config.horizon,
-            steps_per_unit=config.steps_per_unit,
-            intensity=intensity,
-            ages=ages,
-        )
-
     _warmup(run_current, config.warmup_runs)
     _warmup(run_current_no_probability, config.warmup_runs)
-    _warmup(run_prototype, config.warmup_runs)
 
     current_stats = _time_runs("current", run_current, config.timed_runs)
     current_no_probability_stats = _time_runs(
@@ -792,20 +867,11 @@ def _benchmark_e2e(
         run_current_no_probability,
         config.timed_runs,
     )
-    prototype_stats = _time_runs("prototype", run_prototype, config.timed_runs)
     _print_timing_summary(
         current_stats,
-        prototype_stats,
+        current_no_probability_stats,
         topology.name,
     )
-    print(f"timings: benchmark=e2e-probability-none topology={topology.name}")
-    print(
-        f"{current_no_probability_stats.name}: "
-        f"median={current_no_probability_stats.median_ms:.3f} ms, "
-        f"min={current_no_probability_stats.min_ms:.3f} ms, "
-        f"p95={current_no_probability_stats.p95_ms:.3f} ms"
-    )
-    print()
 
 
 def _benchmark_cashflows(
@@ -878,12 +944,13 @@ def main() -> None:
     dtype = jnp.float32
 
     _benchmark_header(config, scenarios)
+    _run_analytic_correctness_checks(config, dtype)
 
     for scenario in scenarios:
         topology = _build_topology(scenario.topology, config.state_count)
         intensity = _build_intensity_matrix(config, topology, dtype)
         model = _build_model(topology, intensity)
-        _run_e2e_correctness_check(config, topology, intensity, dtype)
+        _run_e2e_sanity_check(config, topology, intensity, dtype)
         _benchmark_e2e(config, topology, intensity, dtype)
         for cashflow_scenario in _build_cashflow_scenarios(
             config,

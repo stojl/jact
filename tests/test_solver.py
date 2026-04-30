@@ -3,17 +3,8 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(
-    0,
-    str(Path(__file__).resolve().parents[1] / "docs" / "original_prototype"),
-)
-
 import jax.numpy as jnp
 import pytest
-import prototype_8
 
 import jact
 from jact.callbacks import PointMass, StateCarry
@@ -63,10 +54,6 @@ def _time_duration_covariate_intensity(
     return fn
 
 
-def _prototype_collapse_point_no_duration(p, p_point):
-    p = p.at[..., 0, :].add(p_point)
-    return jnp.sum(p, axis=-1)
-
 def _illness_death_closed_form_from_healthy(times: jnp.ndarray) -> jnp.ndarray:
     healthy = jnp.exp(-(LAMBDA_HD + MU_HM) * times)
     disabled = (
@@ -92,6 +79,56 @@ def _survival_under_duration_hazard(
     d_0: jnp.ndarray,
 ) -> jnp.ndarray:
     return jnp.exp(-(d_0[None, :] * times[:, None] + 0.5 * times[:, None] ** 2))
+
+
+def _symmetric_two_state_cycle_closed_form(
+    times: jnp.ndarray,
+    rate: float,
+) -> jnp.ndarray:
+    oscillation = 0.5 * jnp.exp(-2.0 * rate * times)
+    return jnp.stack([0.5 + oscillation, 0.5 - oscillation], axis=-1)
+
+
+def _scalar_output_intensity(t, d, **kwargs):
+    del t, d, kwargs
+    return jnp.array(0.1)
+
+
+def _rank_one_output_intensity(t, d, **kwargs):
+    del t, d
+    return jnp.full((kwargs["age"].shape[0],), 0.1)
+
+
+def _wrong_width_output_intensity(t, d, **kwargs):
+    batch = kwargs["age"].shape[0]
+    return jnp.full((batch, d.shape[-1] + 1), 0.1)
+
+
+class TestPointMassValidation:
+    def test_rejects_incompatible_value_and_duration_shapes(self):
+        with pytest.raises(ValueError, match=r"d_0 must have shape \(2, 3\)"):
+            PointMass(
+                value=jnp.ones((2, 3)),
+                d_0=jnp.zeros((3, 2)),
+            )
+
+    def test_rejects_incompatible_explicit_log_value_shape(self):
+        with pytest.raises(
+            ValueError,
+            match=r"log_value must have shape \(2, 3\)",
+        ):
+            PointMass(
+                value=jnp.ones((2, 3)),
+                d_0=jnp.zeros((2, 3)),
+                log_value=jnp.zeros((2, 2)),
+            )
+
+    def test_rejects_negative_concrete_value(self):
+        with pytest.raises(ValueError, match="value must be non-negative"):
+            PointMass(
+                value=jnp.array([[1.0, -0.1]]),
+                d_0=jnp.zeros((1, 2)),
+            )
 
 
 @pytest.fixture
@@ -193,7 +230,7 @@ class TestSolverAgainstClosedForm:
             initial="healthy",
             horizon=horizon,
             steps_per_unit=steps_per_unit,
-            probability="collapse_point_no_duration",
+            probability="state_probability",
             age=jnp.arange(batch_size, dtype=jnp.float32),
         )
 
@@ -208,6 +245,48 @@ class TestSolverAgainstClosedForm:
             rtol=0.0,
         )
         assert jnp.allclose(probability, expected, atol=5e-3, rtol=0.0)
+
+    def test_solve_conserves_mass_for_two_state_cycle_with_backward_transition(self):
+        rate = 0.7
+        horizon = 1
+        steps_per_unit = 1000
+        batch_size = 2
+        times = jnp.linspace(
+            0.0, horizon, horizon * steps_per_unit + 1, endpoint=True
+        )
+        expected = jnp.broadcast_to(
+            _symmetric_two_state_cycle_closed_form(times, rate)[:, None, :],
+            (times.shape[0], batch_size, 2),
+        )
+        state_space = jact.StateSpace(
+            states=["a", "b"],
+            transitions=[("a", "b"), ("b", "a")],
+        )
+        model = state_space.build(
+            transitions={
+                ("a", "b"): _constant_intensity(rate),
+                ("b", "a"): _constant_intensity(rate),
+            }
+        )
+
+        result = model.solve(
+            initial="a",
+            horizon=horizon,
+            steps_per_unit=steps_per_unit,
+            probability="state_probability",
+            age=jnp.arange(batch_size, dtype=jnp.float32),
+        )
+        probability = result["probability"]
+
+        assert result["states"] == ("a", "b")
+        assert probability.shape == (times.shape[0], batch_size, 2)
+        assert jnp.allclose(
+            jnp.sum(probability, axis=-1),
+            jnp.ones((times.shape[0], batch_size)),
+            atol=3e-6,
+            rtol=0.0,
+        )
+        assert jnp.allclose(probability, expected, atol=5e-4, rtol=0.0)
 
 
 class TestSolverContinuityAndStability:
@@ -273,126 +352,63 @@ class TestSolverContinuityAndStability:
 
         assert jnp.allclose(annuity, expected, atol=5e-6, rtol=0.0)
 
-    def test_constant_intensity_stays_consistent_with_prototype(
+    def test_constant_intensity_matches_closed_form_at_benchmark_resolution(
         self, illness_death_model
     ):
-        ages = jnp.arange(4, dtype=jnp.float32)
+        horizon = 3
+        steps_per_unit = 4
+        batch_size = 4
+        times = jnp.linspace(
+            0.0, horizon, horizon * steps_per_unit + 1, endpoint=True
+        )
+        expected = jnp.broadcast_to(
+            _illness_death_closed_form_from_healthy(times)[:, None, :],
+            (times.shape[0], batch_size, 3),
+        )
 
-        current = illness_death_model.solve(
+        result = illness_death_model.solve(
             initial="healthy",
-            horizon=3,
-            steps_per_unit=4,
-            probability="collapse_point_no_duration",
-            age=ages,
+            horizon=horizon,
+            steps_per_unit=steps_per_unit,
+            probability="state_probability",
+            age=jnp.arange(batch_size, dtype=jnp.float32),
         )
-        prototype = prototype_8.semimarkov_solver(
-            units=3,
-            discretization_unit=4,
-            intensity=(
-                (None, _constant_intensity(LAMBDA_HD), _constant_intensity(MU_HM)),
-                (None, None, _constant_intensity(NU_DM)),
-                (None, None, None),
-            ),
-            intensity_kwargs={"age": ages},
-            prob_callback=_prototype_collapse_point_no_duration,
-            transpose_result=True,
-        )
+        probability = result["probability"]
 
-        prototype_probability = jnp.swapaxes(prototype["probability"], 0, 1)
-        max_abs_diff = jnp.max(
-            jnp.abs(current["probability"][:-1] - prototype_probability[:-1])
-        )
+        assert result["states"] == ("healthy", "disabled", "dead")
+        assert probability.shape == expected.shape
+        assert jnp.allclose(probability, expected, atol=2.5e-2, rtol=0.0)
 
-        assert current["states"] == ("healthy", "disabled", "dead")
-        assert prototype_probability.shape == current["probability"].shape
-        assert float(max_abs_diff) < 2.1e-2
-
-    def test_smooth_intensity_stays_consistent_with_prototype(
-        self, mixed_time_duration_model
+    def test_record_every_preserves_closed_form_constant_intensity(
+        self, illness_death_model
     ):
-        ages = jnp.array([40.0, 55.0], dtype=jnp.float32)
+        horizon = 3
+        steps_per_unit = 8
+        record_every = 2
+        batch_size = 3
+        full_times = jnp.linspace(
+            0.0, horizon, horizon * steps_per_unit + 1, endpoint=True
+        )
+        recorded_times = full_times[::record_every]
+        expected = jnp.broadcast_to(
+            _illness_death_closed_form_from_healthy(recorded_times)[:, None, :],
+            (recorded_times.shape[0], batch_size, 3),
+        )
 
-        current = mixed_time_duration_model.solve(
+        result = illness_death_model.solve(
             initial="healthy",
-            horizon=2,
-            steps_per_unit=6,
-            probability="collapse_point_no_duration",
-            age=ages,
-        )
-        prototype = prototype_8.semimarkov_solver(
-            units=2,
-            discretization_unit=6,
-            intensity=(
-                (
-                    None,
-                    _time_duration_intensity(0.03, 0.01, 0.02),
-                    _time_duration_intensity(0.02, 0.005, 0.01),
-                ),
-                (None, None, _time_duration_intensity(0.08, 0.004, 0.015)),
-                (None, None, None),
-            ),
-            intensity_kwargs={"age": ages},
-            prob_callback=_prototype_collapse_point_no_duration,
-            transpose_result=True,
+            horizon=horizon,
+            steps_per_unit=steps_per_unit,
+            record_every=record_every,
+            probability="state_probability",
+            age=jnp.arange(batch_size, dtype=jnp.float32),
         )
 
-        prototype_probability = jnp.swapaxes(prototype["probability"], 0, 1)
-        max_abs_diff = jnp.max(
-            jnp.abs(current["probability"][:-1] - prototype_probability[:-1])
-        )
+        probability = result["probability"]
 
-        assert current["states"] == ("healthy", "disabled", "dead")
-        assert prototype_probability.shape == current["probability"].shape
-        assert float(max_abs_diff) < 1e-3
-
-    def test_covariate_intensity_stays_consistent_with_prototype(
-        self, mixed_time_duration_covariate_model
-    ):
-        ages = jnp.array([45.0, 60.0, 75.0], dtype=jnp.float32)
-
-        current = mixed_time_duration_covariate_model.solve(
-            initial="healthy",
-            horizon=2,
-            steps_per_unit=8,
-            record_every=2,
-            probability="collapse_point_no_duration",
-            age=ages,
-        )
-        prototype = prototype_8.semimarkov_solver(
-            units=2,
-            discretization_unit=8,
-            intensity=(
-                (
-                    None,
-                    _time_duration_covariate_intensity(
-                        0.01, 0.008, 0.01, 0.0004
-                    ),
-                    _time_duration_covariate_intensity(
-                        0.005, 0.004, 0.006, 0.0002
-                    ),
-                ),
-                (
-                    None,
-                    None,
-                    _time_duration_covariate_intensity(
-                        0.03, 0.006, 0.012, 0.0003
-                    ),
-                ),
-                (None, None, None),
-            ),
-            intensity_kwargs={"age": ages},
-            prob_callback=_prototype_collapse_point_no_duration,
-            transpose_result=True,
-        )
-
-        prototype_probability = jnp.swapaxes(prototype["probability"], 0, 1)[::2]
-        max_abs_diff = jnp.max(
-            jnp.abs(current["probability"][:-1] - prototype_probability[:-1])
-        )
-
-        assert current["states"] == ("healthy", "disabled", "dead")
-        assert prototype_probability.shape == current["probability"].shape
-        assert float(max_abs_diff) < 5e-4
+        assert result["states"] == ("healthy", "disabled", "dead")
+        assert probability.shape == expected.shape
+        assert jnp.allclose(probability, expected, atol=9e-3, rtol=0.0)
 
     def test_grid_aligned_discontinuity_uses_stable_midpoint_path(self):
         state_space = jact.StateSpace(
@@ -413,7 +429,7 @@ class TestSolverContinuityAndStability:
             initial="healthy",
             horizon=1,
             steps_per_unit=4,
-            probability="collapse_point_no_duration",
+            probability="state_probability",
             age=jnp.arange(2, dtype=jnp.float32),
         )["probability"]
 
@@ -442,7 +458,7 @@ class TestSolverContinuityAndStability:
             initial="healthy",
             horizon=2,
             steps_per_unit=6,
-            probability="collapse_point_no_duration",
+            probability="state_probability",
             age=jnp.arange(3, dtype=jnp.float32),
         )["probability"]
 
@@ -460,7 +476,7 @@ class TestSolverContinuityAndStability:
                 horizon=2,
                 steps_per_unit=6,
                 freeze_initial=False,
-                probability="collapse_point_no_duration",
+                probability="state_probability",
                 age=jnp.arange(3, dtype=jnp.float32),
             )
 
@@ -477,7 +493,7 @@ class TestSolverContinuityAndStability:
             initial="healthy",
             horizon=1,
             steps_per_unit=4,
-            probability="collapse_point_no_duration",
+            probability="state_probability",
             age=jnp.arange(2, dtype=jnp.float32),
         )["probability"]
 
@@ -509,7 +525,7 @@ class TestSolverContinuityAndStability:
             initial="disabled",
             horizon=horizon,
             steps_per_unit=steps_per_unit,
-            probability="collapse_point_no_duration",
+            probability="state_probability",
             age=jnp.arange(batch_size, dtype=jnp.float32),
         )
 
@@ -527,6 +543,28 @@ class TestSolverContinuityAndStability:
 
 
 class TestSolverEntry:
+    def test_invalid_solver_dimensions_are_rejected(self, illness_death_model):
+        for horizon in (0, -1, 1.5):
+            with pytest.raises(ValueError, match="horizon must be a positive integer"):
+                illness_death_model.solve(
+                    initial="healthy",
+                    horizon=horizon,
+                    steps_per_unit=8,
+                    age=jnp.arange(2, dtype=jnp.float32),
+                )
+
+        for steps_per_unit in (0, -2, 2.5):
+            with pytest.raises(
+                ValueError,
+                match="steps_per_unit must be a positive integer",
+            ):
+                illness_death_model.solve(
+                    initial="healthy",
+                    horizon=1,
+                    steps_per_unit=steps_per_unit,
+                    age=jnp.arange(2, dtype=jnp.float32),
+                )
+
     def test_string_shortcut_accepts_scalar_initial_duration(
         self, illness_death_model
     ):
@@ -535,7 +573,7 @@ class TestSolverEntry:
             initial_duration=2.0,
             horizon=1,
             steps_per_unit=8,
-            probability="point_only",
+            probability="point_mass",
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
@@ -557,7 +595,7 @@ class TestSolverEntry:
             initial_duration=jnp.array([0.0, 0.37]),
             horizon=1,
             steps_per_unit=8,
-            probability="point_only",
+            probability="point_mass",
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
@@ -575,7 +613,7 @@ class TestSolverEntry:
             initial=initial,
             horizon=1,
             steps_per_unit=8,
-            probability="point_only",
+            probability="point_mass",
             age=jnp.arange(3, dtype=jnp.float32),
         )
 
@@ -602,7 +640,7 @@ class TestSolverEntry:
             initial=dist,
             horizon=1,
             steps_per_unit=8,
-            probability="point_only",
+            probability="point_mass",
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
@@ -627,7 +665,7 @@ class TestSolverEntry:
             initial=dist,
             horizon=1,
             steps_per_unit=8,
-            probability="collapse_point_no_duration",
+            probability="state_probability",
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
@@ -655,6 +693,38 @@ class TestSolverEntry:
                 horizon=1,
                 steps_per_unit=8,
                 record_every=3,
+                age=jnp.arange(2, dtype=jnp.float32),
+            )
+
+    @pytest.mark.parametrize(
+        ("intensity_fn", "steps_per_unit"),
+        [
+            (_scalar_output_intensity, 4),
+            (_rank_one_output_intensity, 4),
+            (_wrong_width_output_intensity, 4),
+        ],
+    )
+    def test_reference_callable_output_shape_is_validated(
+        self,
+        intensity_fn,
+        steps_per_unit,
+    ):
+        state_space = jact.StateSpace(
+            states=["healthy", "dead"],
+            transitions=[("healthy", "dead")],
+        )
+        model = state_space.build(
+            transitions={("healthy", "dead"): intensity_fn}
+        )
+
+        with pytest.raises(
+            ValueError,
+            match=r"Reference intensity output must have shape \(batch, 4\)\.",
+        ):
+            model.solve(
+                initial="healthy",
+                horizon=1,
+                steps_per_unit=steps_per_unit,
                 age=jnp.arange(2, dtype=jnp.float32),
             )
 
@@ -711,7 +781,7 @@ class TestSolverEntry:
             initial_duration=d_0,
             horizon=horizon,
             steps_per_unit=steps_per_unit,
-            probability="collapse_point_no_duration",
+            probability="state_probability",
             age=jnp.arange(1, dtype=jnp.float32),
         )
 
@@ -763,7 +833,7 @@ class TestSolverEntry:
             ),
             horizon=horizon,
             steps_per_unit=steps_per_unit,
-            probability="collapse_point_no_duration",
+            probability="state_probability",
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
@@ -792,59 +862,47 @@ class TestBuiltInCallbacks:
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
-        default_result = illness_death_model.solve(
-            probability="default", **kwargs
+        full_result = illness_death_model.solve(
+            probability="full", **kwargs
         )["probability"]
-        assert len(default_result) == 3
-        assert isinstance(default_result[0], StateCarry)
-        assert default_result[0].density.shape == (5, 2, 8)
-        assert isinstance(default_result[0].point_mass, PointMass)
-        assert default_result[0].point_mass.value.shape == (5, 2)
-        assert default_result[0].point_mass.d_0.shape == (5, 2)
+        assert len(full_result) == 3
+        assert isinstance(full_result[0], StateCarry)
+        assert full_result[0].density.shape == (5, 2, 8)
+        assert isinstance(full_result[0].point_mass, PointMass)
+        assert full_result[0].point_mass.value.shape == (5, 2)
+        assert full_result[0].point_mass.d_0.shape == (5, 2)
 
-        no_duration_result = illness_death_model.solve(
-            probability="no_duration", **kwargs
+        marginal_components_result = illness_death_model.solve(
+            probability="marginal_components", **kwargs
         )["probability"]
-        assert isinstance(no_duration_result[0], StateCarry)
-        assert no_duration_result[0].density.shape == (5, 2)
-        assert isinstance(no_duration_result[0].point_mass, PointMass)
-        assert no_duration_result[0].point_mass.value.shape == (5, 2)
-        assert no_duration_result[0].point_mass.d_0.shape == (5, 2)
+        assert isinstance(marginal_components_result[0], StateCarry)
+        assert marginal_components_result[0].density.shape == (5, 2)
+        assert isinstance(marginal_components_result[0].point_mass, PointMass)
+        assert marginal_components_result[0].point_mass.value.shape == (5, 2)
+        assert marginal_components_result[0].point_mass.d_0.shape == (5, 2)
 
-        collapse_result = illness_death_model.solve(
-            probability="collapse_point", **kwargs
+        state_probability_result = illness_death_model.solve(
+            probability="state_probability", **kwargs
         )["probability"]
-        assert len(collapse_result) == 3
-        assert collapse_result[0].shape == (5, 2, 8)
+        assert state_probability_result.shape == (5, 2, 3)
 
-        collapse_no_duration_result = illness_death_model.solve(
-            probability="collapse_point_no_duration", **kwargs
+        point_mass_result = illness_death_model.solve(
+            probability="point_mass", **kwargs
         )["probability"]
-        assert collapse_no_duration_result.shape == (5, 2, 3)
+        assert isinstance(point_mass_result[0], PointMass)
+        assert point_mass_result[0].value.shape == (5, 2)
+        assert point_mass_result[0].d_0.shape == (5, 2)
+        assert point_mass_result[1] is None
 
-        point_only_result = illness_death_model.solve(
-            probability="point_only", **kwargs
+        density_result = illness_death_model.solve(
+            probability="density", **kwargs
         )["probability"]
-        assert isinstance(point_only_result[0], PointMass)
-        assert point_only_result[0].value.shape == (5, 2)
-        assert point_only_result[0].d_0.shape == (5, 2)
-        assert point_only_result[1] is None
+        assert density_result[0].shape == (5, 2, 8)
 
-        point_only_no_duration_result = illness_death_model.solve(
-            probability="point_only_no_duration", **kwargs
+        density_probability_result = illness_death_model.solve(
+            probability="density_probability", **kwargs
         )["probability"]
-        assert point_only_no_duration_result[0].shape == (5, 2)
-        assert point_only_no_duration_result[1] is None
-
-        no_point_result = illness_death_model.solve(
-            probability="no_point", **kwargs
-        )["probability"]
-        assert no_point_result[0].shape == (5, 2, 8)
-
-        no_point_no_duration_result = illness_death_model.solve(
-            probability="no_point_no_duration", **kwargs
-        )["probability"]
-        assert no_point_no_duration_result.shape == (5, 2, 3)
+        assert density_probability_result.shape == (5, 2, 3)
 
         none_result = illness_death_model.solve(
             probability="none", **kwargs
@@ -853,3 +911,21 @@ class TestBuiltInCallbacks:
 
         disabled_result = illness_death_model.solve(probability=None, **kwargs)
         assert "probability" not in disabled_result
+
+    def test_removed_builtin_callbacks_raise_unknown_callback(
+        self, illness_death_model
+    ):
+        kwargs = dict(
+            initial="healthy",
+            horizon=1,
+            steps_per_unit=8,
+            age=jnp.arange(2, dtype=jnp.float32),
+        )
+
+        with pytest.raises(ValueError, match="collapse_point"):
+            illness_death_model.solve(probability="collapse_point", **kwargs)
+
+        with pytest.raises(ValueError, match="point_only_no_duration"):
+            illness_death_model.solve(
+                probability="point_only_no_duration", **kwargs
+            )

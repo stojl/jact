@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import jact
@@ -53,36 +55,60 @@ class TestConstruction:
         )
         assert ss.n_states == 2
 
+    def test_construction_accepts_generators(self):
+        ss = jact.StateSpace(
+            states=(state for state in ["a", "b", "c"]),
+            transitions=(transition for transition in [("a", "b"), ("b", "c")]),
+        )
+        assert ss.states == ("a", "b", "c")
+        assert ss.transitions == frozenset({("a", "b"), ("b", "c")})
+
+    def test_non_string_state_raises(self):
+        with pytest.raises(TypeError, match="State names must be strings"):
+            jact.StateSpace(
+                states=["a", 1],
+                transitions=[("a", "a")],  # type: ignore[list-item]
+            )
+
     def test_duplicate_states_raise(self):
-        with pytest.raises((ValueError, Exception)):
+        with pytest.raises(ValueError, match="Duplicate state names"):
             jact.StateSpace(
                 states=["a", "a", "b"],
                 transitions=[("a", "b")],
             )
 
     def test_unknown_source_raises(self):
-        with pytest.raises((ValueError, KeyError, Exception)):
+        with pytest.raises(
+            ValueError,
+            match="Transition source 'c' is not a declared state",
+        ):
             jact.StateSpace(
                 states=["a", "b"],
                 transitions=[("c", "b")],
             )
 
     def test_unknown_target_raises(self):
-        with pytest.raises((ValueError, KeyError, Exception)):
+        with pytest.raises(
+            ValueError,
+            match="Transition target 'c' is not a declared state",
+        ):
             jact.StateSpace(
                 states=["a", "b"],
                 transitions=[("a", "c")],
             )
 
     def test_self_transition_raises(self):
-        with pytest.raises((ValueError, Exception)):
+        with pytest.raises(
+            ValueError,
+            match="Self-transition 'a' -> 'a' is not allowed",
+        ):
             jact.StateSpace(
                 states=["a", "b"],
                 transitions=[("a", "a"), ("a", "b")],
             )
 
     def test_duplicate_transition_raises(self):
-        with pytest.raises((ValueError, Exception)):
+        with pytest.raises(ValueError, match="Duplicate transitions"):
             jact.StateSpace(
                 states=["a", "b"],
                 transitions=[("a", "b"), ("a", "b")],
@@ -184,7 +210,7 @@ class TestQueries:
         assert illness_death.state_index("dead") == 2
 
     def test_query_unknown_state_raises(self, illness_death):
-        with pytest.raises((ValueError, KeyError, Exception)):
+        with pytest.raises(ValueError, match="is not a declared state"):
             illness_death.state_index("nonexistent")
 
 
@@ -272,3 +298,26 @@ class TestSerialization:
         path = tmp_path / "ss.json"
         illness_death.to_json(str(path))
         assert path.exists()
+
+    def test_to_json_orders_transitions_by_state_space_order(self, tmp_path):
+        state_space = jact.StateSpace(
+            states=["b", "a", "c"],
+            transitions=[
+                ("c", "a"),
+                ("b", "c"),
+                ("b", "a"),
+                ("a", "c"),
+            ],
+        )
+        path = tmp_path / "ss.json"
+
+        state_space.to_json(str(path))
+
+        with open(path) as f:
+            payload = json.load(f)
+        assert payload["transitions"] == [
+            ["b", "a"],
+            ["b", "c"],
+            ["a", "c"],
+            ["c", "a"],
+        ]

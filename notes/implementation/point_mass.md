@@ -1,8 +1,8 @@
 # Point-mass evolution under heterogeneous starts: implementation reflections
 
-This note is the downstream companion to [docs/implementation/initial_distribution.md](/home/lucas/Documents/jact/docs/implementation/initial_distribution.md). Once a canonicalised `InitialDistribution` reaches the solver, the initial condition is represented as one optional point mass per declared initial state plus one duration density per reachable state.
+This note is the downstream companion to [initial_distribution.md](initial_distribution.md). Once a canonicalised `InitialDistribution` reaches the solver, the initial condition is represented as one optional point mass per declared initial state plus one duration density per reachable state.
 
-The public contract lives in [docs/api_spec.md](/home/lucas/Documents/jact/docs/api_spec.md). This note records the implementation shape and the consequences for callbacks.
+The public contract lives in [docs/api_spec.md](../../docs/api_spec.md). This note records the implementation shape and the consequences for callbacks.
 
 ## Solver-facing representation
 

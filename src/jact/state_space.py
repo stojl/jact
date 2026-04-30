@@ -49,9 +49,11 @@ class StateSpace:
         states: Sequence[str],
         transitions: Sequence[tuple[str, str]],
     ):
+        states = tuple(states)
+        transitions = tuple(transitions)
         self._validate_inputs(states, transitions)
 
-        self._states = tuple(states)
+        self._states = states
         self._transitions = frozenset(transitions)
         self._state_to_index = {s: i for i, s in enumerate(self._states)}
 
@@ -64,6 +66,13 @@ class StateSpace:
         states: Sequence[str],
         transitions: Sequence[tuple[str, str]],
     ) -> None:
+        for state in states:
+            if not isinstance(state, str):
+                raise TypeError(
+                    "State names must be strings, "
+                    f"got {type(state)}."
+                )
+
         # No duplicate state names
         if len(states) != len(set(states)):
             dupes = [s for s in states if states.count(s) > 1]
@@ -363,7 +372,16 @@ class StateSpace:
         """
         data = {
             "states": list(self._states),
-            "transitions": [list(t) for t in sorted(self._transitions)],
+            "transitions": [
+                list(t)
+                for t in sorted(
+                    self._transitions,
+                    key=lambda pair: (
+                        self._state_to_index[pair[0]],
+                        self._state_to_index[pair[1]],
+                    ),
+                )
+            ],
         }
         with open(path, "w") as f:
             json.dump(data, f, indent=2)

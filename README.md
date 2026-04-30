@@ -4,7 +4,7 @@ JAX-based transition probability computation for multi-state models with duratio
 
 ## What is jact?
 
-`jact` computes transition probabilities in semi-Markov multi-state models. It takes fitted intensity models — parametric functions, GLMs, neural networks, or any JIT-compatible callable — and produces transition probabilities for thoudsands of individuals in a single vectorized pass on GPU. Computations are optimized for JIT-compiled GPU execution.
+`jact` computes transition probabilities in semi-Markov multi-state models. It takes fitted intensity models — parametric functions, GLMs, neural networks, or any JIT-compatible callable — and produces transition probabilities for thousands of individuals in a single vectorized pass on GPU. Computations are optimized for JIT-compiled GPU execution.
 
 ## Quick example
 
@@ -46,9 +46,12 @@ result = model.solve(initial="healthy", horizon=30, steps_per_unit=12, age=ages)
 
 ## Documentation
 
-See [docs/api_spec.md](docs/api_spec.md) for the full API specification.
-For a runnable walkthrough of the main workflow, see
-[docs/example_notebook.ipynb](docs/example_notebook.ipynb).
+See the [documentation index](https://github.com/stojl/jact/blob/main/docs/index.md)
+for the public documentation set.
+For the full API contract, use the
+[API specification](https://github.com/stojl/jact/blob/main/docs/api_spec.md).
+For a runnable walkthrough of the main workflow, see the
+[example notebook](https://github.com/stojl/jact/blob/main/docs/example_notebook.ipynb).
 
 ## Namespace
 
@@ -62,16 +65,43 @@ example `jact.callbacks.PointMass` and `jact.model.ReducedModel`.
 
 ```bash
 pip install jax jaxlib
-pip install -e .
+pip install jact
 ```
 
-To run the example notebook with plotting support:
+For local development from this repository:
 
 ```bash
-pip install -e '.[notebook]'
+pip install -e '.[dev]'
+pytest
 ```
+
+The package uses a `src/` layout, so editable install is the intended local
+workflow.
+
+To run the example notebook with plotting support from a local checkout:
+
+```bash
+pip install -e '.[dev,notebook]'
+```
+
+## Release checks
+
+Before cutting a PyPI release:
+
+```bash
+rm -rf build dist src/*.egg-info
+python -m build --no-isolation
+python -m twine check dist/*
+pytest tests/test_solver.py tests/test_initial_distribution_integration.py -q
+```
+
+The tag-driven publish flow is documented in [RELEASING.md](RELEASING.md).
 
 ## Requirements
 
 - Python >= 3.10
 - JAX >= 0.4
+
+## License
+
+Apache-2.0

@@ -8,29 +8,69 @@ version = "0.1.0"
 description = "JAX-based transition probability computation for multi-state models"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [
+    {name = "Lucas Støjko Andersen", email = "93032255+stojl@users.noreply.github.com"},
+]
+keywords = [
+    "jax",
+    "markov-model",
+    "multi-state-model",
+    "semi-markov",
+    "transition-probabilities",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
 dependencies = [
     "jax>=0.4",
     "jaxlib>=0.4",
 ]
 
+[project.urls]
+Homepage = "https://github.com/stojl/jact"
+Repository = "https://github.com/stojl/jact"
+Issues = "https://github.com/stojl/jact/issues"
+Documentation = "https://github.com/stojl/jact/blob/main/docs/index.md"
+
 [project.optional-dependencies]
 dev = [
+    "build>=1.2.0",
     "pytest>=7.0",
     "pyright>=1.1.0",
     "ruff>=0.4.0",
+    "twine>=5.0.0",
 ]
 notebook = [
     "matplotlib>=3.8",
 ]
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = false
+
 [tool.setuptools.packages.find]
+where = ["src"]
 include = ["jact*"]
 
 [tool.pyright]
-include = ["jact", "tests"]
+include = ["src/jact", "tests"]
+extraPaths = ["src"]
 typeCheckingMode = "basic"
 reportMissingImports = false
 reportMissingTypeStubs = false
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 88

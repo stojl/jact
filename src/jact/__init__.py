@@ -25,8 +25,15 @@ Example
 ...     }
 ... )
 >>>
->>> result = model.solve(horizon=10, steps_per_unit=12, age=ages)
+>>> result = model.solve(
+...     initial="healthy",
+...     horizon=10,
+...     steps_per_unit=12,
+...     age=ages,
+... )
 """
+
+from importlib.metadata import PackageNotFoundError, version
 
 from . import callbacks
 from .cashflows import (
@@ -39,14 +46,19 @@ from .cashflows import (
     StateRate,
     Total,
     TransitionLump,
-    discount_factor,
 )
 from .initial_distribution import InitialDistribution
 from .model import Model
 from .solver import solve
 from .state_space import StateSpace
 
+try:
+    __version__ = version("jact")
+except PackageNotFoundError:
+    __version__ = "0.1.0"
+
 __all__ = [
+    "__version__",
     "StateSpace",
     "Model",
     "InitialDistribution",
@@ -61,5 +73,4 @@ __all__ = [
     "ByState",
     "ByKind",
     "CashflowDeclaration",
-    "discount_factor",
 ]
