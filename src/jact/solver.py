@@ -993,6 +993,8 @@ def solve(
         raise TypeError("cashflows must be a CashflowDeclaration or None.")
     if cashflows is not None and cashflows.state_space is not model.state_space:
         raise ValueError("cashflows must be declared from model.state_space.")
+    if cashflows is not None:
+        _prepare_cashflow_views(cashflows, cashflow_views, model.state_space.states)
 
     initial_distribution = _canonicalize_initial(initial, initial_duration)
     model_states = model.state_space.states

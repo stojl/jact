@@ -62,13 +62,23 @@ example `jact.callbacks.PointMass` and `jact.model.ReducedModel`.
 
 ```bash
 pip install jax jaxlib
-pip install -e .
+pip install jact
 ```
 
-To run the example notebook with plotting support:
+For local development from this repository:
 
 ```bash
-pip install -e '.[notebook]'
+pip install -e '.[dev]'
+pytest
+```
+
+The package uses a `src/` layout, so editable install is the intended local
+workflow.
+
+To run the example notebook with plotting support from a local checkout:
+
+```bash
+pip install -e '.[dev,notebook]'
 ```
 
 ## Requirements

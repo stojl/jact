@@ -8,6 +8,13 @@ version = "0.1.0"
 description = "JAX-based transition probability computation for multi-state models"
 readme = "README.md"
 requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
 dependencies = [
     "jax>=0.4",
     "jaxlib>=0.4",
@@ -15,6 +22,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "build>=1.2.0",
     "pytest>=7.0",
     "pyright>=1.1.0",
     "ruff>=0.4.0",
@@ -23,14 +31,23 @@ notebook = [
     "matplotlib>=3.8",
 ]
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+
 [tool.setuptools.packages.find]
+where = ["src"]
 include = ["jact*"]
 
 [tool.pyright]
-include = ["jact", "tests"]
+include = ["src/jact", "tests"]
+extraPaths = ["src"]
 typeCheckingMode = "basic"
 reportMissingImports = false
 reportMissingTypeStubs = false
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 88
