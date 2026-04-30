@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import pytest
 
 import jact
+from jact.cashflows import validate_cashflow_views
 
 
 def _constant_intensity(rate: float, batch: int = 1):
@@ -160,6 +161,80 @@ def test_cashflow_declaration_validation():
             cashflows=cashflows,
             cashflow_views={"bad": jact.Total(weight=object())},  # type: ignore[arg-type]
         )
+
+
+def test_cashflow_declaration_copies_payment_mappings():
+    ss = jact.StateSpace(["healthy", "dead"], [("healthy", "dead")])
+    payments = {"healthy": _constant_payment(1.0)}
+
+    declaration = ss.cashflows({"premium": jact.StateRate(payments)})
+    payments["dead"] = _constant_payment(2.0)
+
+    component = declaration.component("premium")
+    assert isinstance(component, jact.StateRate)
+    assert set(component.payments) == {"healthy"}
+
+
+def test_cashflow_views_accept_rank_zero_array_weight():
+    ss = jact.StateSpace(["active"], [])
+    model = ss.build(transitions={})
+    cashflows = ss.cashflows({"premium": jact.StateRate({
+        "active": _constant_payment(2.0)
+    })})
+
+    result = model.solve(
+        initial="active",
+        horizon=1,
+        steps_per_unit=4,
+        probability=None,
+        cashflows=cashflows,
+        cashflow_views={
+            "pv": jact.Total(weight=jnp.array(0.5), terminal=True),
+        },
+    )
+
+    assert jnp.allclose(result["cashflows"]["pv"], jnp.array([1.0]))
+
+
+def test_cashflow_views_reject_non_scalar_array_weight():
+    ss = jact.StateSpace(["active"], [])
+    model = ss.build(transitions={})
+    cashflows = ss.cashflows({"premium": jact.StateRate({
+        "active": _constant_payment(2.0)
+    })})
+
+    with pytest.raises(TypeError, match="weight"):
+        model.solve(
+            initial="active",
+            horizon=1,
+            steps_per_unit=4,
+            probability=None,
+            cashflows=cashflows,
+            cashflow_views={
+                "pv": jact.Total(weight=jnp.array([0.5, 1.0]), terminal=True),
+            },
+        )
+
+
+def test_group_view_members_are_frozen_during_validation():
+    ss = jact.StateSpace(["healthy", "dead"], [("healthy", "dead")])
+    cashflows = ss.cashflows({
+        "premium": jact.StateRate({"healthy": _constant_payment(1.0)}),
+        "death": jact.TransitionLump({
+            ("healthy", "dead"): _constant_payment(5.0)
+        }),
+    })
+    members = ["death"]
+    frozen_views = validate_cashflow_views(
+        cashflows,
+        {"benefits": jact.Group(members)},
+    )
+    members.append("premium")
+
+    name, view = frozen_views[0]
+    assert name == "benefits"
+    assert isinstance(view, jact.Group)
+    assert view.members == ("death",)
 
 
 def test_state_rate_no_transition_interval_and_terminal_outputs():

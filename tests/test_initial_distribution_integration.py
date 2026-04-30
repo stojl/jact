@@ -42,6 +42,15 @@ class TestStateSpaceHelpers:
                 components={"unknown": {"mass": 1.0, "duration": 0.0}}
             )
 
+    def test_initial_distribution_rejects_non_mapping_component_payload(
+        self, illness_death
+    ):
+        state_space, _ = illness_death
+        with pytest.raises(TypeError, match="payload must be a mapping"):
+            state_space.initial_distribution(
+                components={"healthy": 1.0}  # type: ignore[arg-type]
+            )
+
     def test_initial_per_individual_requires_exactly_one_input(self, illness_death):
         state_space, _ = illness_death
         with pytest.raises(ValueError):
@@ -69,6 +78,13 @@ class TestStateSpaceHelpers:
         assert canonical_name.states == canonical_index.states
         for left, right in zip(canonical_name.masses, canonical_index.masses):
             assert jnp.array_equal(left, right)
+
+    def test_initial_per_individual_rejects_float_state_indices(self, illness_death):
+        state_space, _ = illness_death
+        with pytest.raises(TypeError, match="integer dtype"):
+            state_space.initial_per_individual(
+                state_indices=jnp.array([0.0, 1.0], dtype=jnp.float32),
+            )
 
 
 class TestModelReduction:
@@ -176,6 +192,22 @@ class TestInitialDistributionSolveIntegration:
         assert jnp.allclose(healthy_point.value[0], jnp.array([0.25, 0.75]))
         assert jnp.allclose(disabled_point.value[0], jnp.array([0.75, 0.25]))
         assert jnp.allclose(disabled_point.d_0[0], jnp.array([1.0, 0.0]))
+
+    def test_component_mixture_all_zero_normalized_mass_stays_zero(self, illness_death):
+        state_space, _ = illness_death
+        dist = state_space.initial_distribution(
+            components={
+                "healthy": {"mass": 0.0, "duration": 0.0},
+                "disabled": {"mass": 0.0, "duration": 1.0},
+            },
+            normalise=True,
+        )
+
+        canonical = dist.canonicalize(state_space.states)
+
+        assert canonical.states == ("healthy", "disabled")
+        assert jnp.array_equal(canonical.masses[0], jnp.asarray(0.0))
+        assert jnp.array_equal(canonical.masses[1], jnp.asarray(0.0))
 
     def test_initial_distribution_batch_mismatch_fails_at_solver_entry(
         self, illness_death

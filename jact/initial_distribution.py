@@ -61,13 +61,33 @@ def _validate_non_negative_if_concrete(name: str, value: ArrayLike) -> None:
 
 
 def _component_payload(
-    payload: Mapping[str, ArrayLike],
+    payload: Any,
 ) -> tuple[ArrayLike, ArrayLike]:
+    if not isinstance(payload, Mapping):
+        raise TypeError(
+            "Each component payload must be a mapping containing 'mass' and "
+            f"'duration', got {type(payload)}."
+        )
     if "mass" not in payload or "duration" not in payload:
         raise ValueError(
             "Each component must contain both 'mass' and 'duration'."
         )
     return payload["mass"], payload["duration"]
+
+
+def _validate_integer_indices_if_concrete(states: ArrayLike) -> None:
+    try:
+        dtype = jnp.asarray(states).dtype
+    except Exception as exc:  # pragma: no cover - tracer path
+        if "tracer" not in type(exc).__name__.lower():
+            message = str(exc).lower()
+            if "tracer" not in message and "concret" not in message:
+                raise
+        return
+
+    if jnp.issubdtype(dtype, jnp.integer):
+        return
+    raise TypeError("per_individual states must use an integer dtype.")
 
 
 @dataclass(frozen=True)
@@ -183,6 +203,7 @@ class InitialDistribution:
             raise ValueError(
                 "per_individual states must be a rank-1 (batch,) array."
             )
+        _validate_integer_indices_if_concrete(states)
 
         duration_shape = _array_shape(duration)
         if not (_is_scalar_shape(duration_shape) or len(duration_shape) == 1):

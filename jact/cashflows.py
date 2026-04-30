@@ -121,7 +121,24 @@ def _validate_payment_mapping(payments: Any, field: str) -> Mapping[Any, Any]:
         raise ValueError(f"{field} must be a non-empty mapping.")
     for fn in payments.values():
         _check_callable(fn, f"{field} values")
-    return payments
+    return dict(payments)
+
+
+def _is_scalar_array_like(value: Any) -> bool:
+    if value is None:
+        return False
+    try:
+        return bool(jnp.asarray(value).ndim == 0)
+    except Exception:
+        return False
+
+
+def _normalise_weight(weight: Any) -> Any:
+    if weight is None:
+        return None
+    if _is_scalar_array_like(weight):
+        return jnp.asarray(weight).item()
+    return weight
 
 
 def validate_cashflow_components(
@@ -147,6 +164,7 @@ def validate_cashflow_components(
             )
             for state in payments:
                 state_space._check_state(state)
+            frozen_component = StateRate(payments=payments)
         elif isinstance(component, TransitionLump):
             payments = _validate_payment_mapping(
                 component.payments,
@@ -162,6 +180,7 @@ def validate_cashflow_components(
                         f"TransitionLump('{name}') references unknown "
                         f"transition {transition!r}."
                     )
+            frozen_component = TransitionLump(payments=payments)
         elif isinstance(component, ScheduledEvent):
             _check_callable(component.when, f"ScheduledEvent('{name}').when")
             payments = _validate_payment_mapping(
@@ -170,12 +189,16 @@ def validate_cashflow_components(
             )
             for state in payments:
                 state_space._check_state(state)
+            frozen_component = ScheduledEvent(
+                when=component.when,
+                payments=payments,
+            )
         else:
             raise TypeError(
                 "cashflow components must be StateRate, TransitionLump, "
                 f"or ScheduledEvent; got {type(component)}."
             )
-        frozen.append((name, component))
+        frozen.append((name, frozen_component))
 
     return CashflowDeclaration(state_space=state_space, components=tuple(frozen))
 
@@ -184,8 +207,11 @@ def _validate_view_common(view: Any) -> None:
     if not isinstance(view.terminal, bool):
         raise TypeError("cashflow view terminal must be a bool.")
     weight = view.weight
-    if weight is not None and not callable(weight) and not isinstance(weight, Number):
-        raise TypeError("cashflow view weight must be None, a scalar, or callable.")
+    if weight is None or callable(weight) or isinstance(weight, Number):
+        return
+    if _is_scalar_array_like(weight):
+        return
+    raise TypeError("cashflow view weight must be None, a scalar, or callable.")
 
 
 def validate_cashflow_views(
@@ -210,6 +236,11 @@ def validate_cashflow_views(
 
         if isinstance(view, Raw):
             _validate_view_common(view)
+            view = Raw(
+                name=view.name,
+                weight=_normalise_weight(view.weight),
+                terminal=view.terminal,
+            )
             if view.name is not None and view.name not in component_names:
                 raise ValueError(
                     f"Raw view '{name}' references unknown component "
@@ -219,14 +250,24 @@ def validate_cashflow_views(
             _validate_view_common(view)
             if isinstance(view.members, str) or not view.members:
                 raise ValueError(f"Group view '{name}' requires members.")
-            for member in view.members:
+            members = tuple(view.members)
+            for member in members:
                 if member not in component_names:
                     raise ValueError(
                         f"Group view '{name}' references unknown component "
                         f"'{member}'."
                     )
+            view = Group(
+                members=members,
+                weight=_normalise_weight(view.weight),
+                terminal=view.terminal,
+            )
         elif isinstance(view, (Total, ByState, ByKind)):
             _validate_view_common(view)
+            view = type(view)(
+                weight=_normalise_weight(view.weight),
+                terminal=view.terminal,
+            )
         else:
             raise TypeError(
                 "cashflow views must be Raw, Group, Total, ByState, or ByKind; "

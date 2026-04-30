@@ -110,6 +110,8 @@ class Model:
 
         # Groups
         for fn, trans_list in self._groups_map.items():
+            if not trans_list:
+                raise ValueError("Group assignments must cover at least one transition.")
             for i, (src, tgt) in enumerate(trans_list):
                 self._register_transition(
                     src, tgt, "groups", fn, index=i, covered=covered
@@ -136,6 +138,10 @@ class Model:
         covered: Dict[Tuple[str, str], str],
     ) -> None:
         """Register a single transition, checking for conflicts."""
+        if not callable(fn):
+            raise TypeError(
+                f"{assignment} assignment for '{src}' -> '{tgt}' must be callable."
+            )
         if not self._state_space.has_transition(src, tgt):
             raise ValueError(
                 f"Transition '{src}' -> '{tgt}' is not declared in the "
@@ -390,6 +396,23 @@ def _make_slice_wrapper(fn: Callable, index: int) -> Callable:
 
     def wrapper(t, grid, **kwargs):
         full_output = fn(t, grid, **kwargs)
-        return full_output[index]
+        try:
+            size = full_output.shape[0]
+        except Exception:
+            size = None
+        if size is None:
+            try:
+                size = len(full_output)
+            except Exception:
+                size = None
+        if size is not None and index >= size:
+            raise ValueError(
+                "Multi-output assignment returned too few transition "
+                f"outputs: expected at least {index + 1}, got {size}."
+            )
+        try:
+            return full_output[index]
+        except Exception as exc:
+            raise
 
     return wrapper

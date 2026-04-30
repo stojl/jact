@@ -39,6 +39,17 @@ def _disabled_exit_group(t, grid, **kwargs):
     )
 
 
+def _too_short_exit_group(t, grid, **kwargs):
+    batch = kwargs["age"].shape[0]
+    width = grid.shape[-1]
+    return jnp.stack(
+        [
+            jnp.full((batch, width), 101.0),
+        ],
+        axis=0,
+    )
+
+
 @pytest.fixture
 def illness_death_state_space():
     return jact.StateSpace(
@@ -146,6 +157,62 @@ class TestModelBuildValidation:
                 }
             )
 
+    def test_build_rejects_non_callable_transition_assignment(
+        self, illness_death_state_space
+    ):
+        with pytest.raises(TypeError, match="must be callable"):
+            illness_death_state_space.build(
+                transitions={
+                    ("healthy", "disabled"): object(),
+                    ("healthy", "dead"): _single_transition_fn,
+                    ("disabled", "dead"): _single_transition_fn,
+                }
+            )
+
+    def test_build_rejects_non_callable_exit_assignment(
+        self, illness_death_state_space
+    ):
+        with pytest.raises(TypeError, match="must be callable"):
+            illness_death_state_space.build(
+                transitions={
+                    ("healthy", "dead"): _single_transition_fn,
+                    ("disabled", "dead"): _single_transition_fn,
+                },
+                exits={"healthy": object()},
+            )
+
+    def test_build_rejects_non_callable_group_assignment(
+        self, mixed_assignment_state_space
+    ):
+        with pytest.raises(TypeError, match="must be callable"):
+            mixed_assignment_state_space.build(
+                transitions={
+                    ("healthy", "disabled"): _single_transition_fn,
+                    ("disabled", "recovered"): _single_transition_fn,
+                    ("disabled", "dead"): _single_transition_fn,
+                },
+                groups={
+                    object(): [
+                        ("healthy", "dead"),
+                        ("recovered", "dead"),
+                    ]
+                },
+            )
+
+    def test_build_rejects_empty_group_assignment(
+        self, illness_death_state_space
+    ):
+        with pytest.raises(ValueError, match="at least one transition"):
+            illness_death_state_space.build(
+                transitions={
+                    ("healthy", "disabled"): _single_transition_fn,
+                },
+                groups={
+                    _healthy_mortality_group: [],
+                },
+                exits={"disabled": _single_transition_fn},
+            )
+
 
 class TestModelInfo:
     def test_info_returns_transition_metadata(self, mixed_assignment_model):
@@ -241,6 +308,21 @@ class TestReducedSolverMatrix:
             recovered_dead_fn(0.0, grid, age=age),
             jnp.full((batch, 2), 22.0),
         )
+
+    def test_exit_assignment_rejects_too_few_outputs(self, illness_death_state_space):
+        model = illness_death_state_space.build(
+            exits={"healthy": _too_short_exit_group},
+            transitions={
+                ("disabled", "dead"): _single_transition_fn,
+            },
+        )
+        reduced = model.reduce("healthy")
+        batch = 2
+        grid = jnp.zeros((batch, 3))
+        age = jnp.arange(batch)
+
+        with pytest.raises(ValueError, match="too few transition outputs"):
+            reduced.solver_matrix[0][2](0.0, grid, age=age)
 
 class TestModelReduction:
     def test_reduce_returns_reduced_model_dataclass(self, mixed_assignment_model):
