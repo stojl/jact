@@ -84,6 +84,19 @@ To run the example notebook with plotting support from a local checkout:
 pip install -e '.[dev,notebook]'
 ```
 
+## Release checks
+
+Before cutting a PyPI release:
+
+```bash
+rm -rf build dist src/*.egg-info
+python -m build --no-isolation
+python -m twine check dist/*
+pytest tests/test_solver.py tests/test_initial_distribution_integration.py -q
+```
+
+The tag-driven publish flow is documented in [RELEASING.md](RELEASING.md).
+
 ## Requirements
 
 - Python >= 3.10
