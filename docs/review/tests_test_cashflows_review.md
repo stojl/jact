@@ -2,29 +2,24 @@
 
 Reviewed file: `tests/test_cashflows.py`
 
-## Findings
+## Status
 
-1. Empty cashflow view mapping is not tested.
+All previously noted gaps are now covered by the current test file.
 
-   The docs say `cashflow_views={}` should produce no cashflow outputs. The
-   current solver crashes in this case. Add a regression test once the solver is
-   fixed.
+## Resolved
 
-2. Mutation-after-validation is not covered.
+1. Empty cashflow view mapping is tested.
 
-   Cashflow declarations retain user-supplied payment mappings. A test should
-   cover whether mutating the original dict after `state_space.cashflows()`
-   changes the declaration.
+   `test_empty_cashflow_view_mapping_returns_empty_outputs` locks in
+   `cashflow_views={}` returning `result["cashflows"] == {}`.
 
-3. Weight scalar forms are under-specified.
+2. Mutation-after-validation is covered.
 
-   Tests cover Python scalar weights and callable weights, but not rank-0 JAX
-   arrays. Suggested change: add an explicit accept-or-reject test after the API
-   decision.
+   `test_cashflow_declaration_copies_payment_mappings` verifies that mutating
+   the original payments mapping after declaration does not alter the validated
+   cashflow component.
 
-## Tests To Add
+3. Rank-0 JAX scalar weights are covered.
 
-- `cashflow_views={}` returns `result["cashflows"] == {}`.
-- Mutating original payment dicts after validation cannot bypass validation.
-- Rank-0 JAX scalar weight behavior.
-
+   `test_cashflow_views_accept_rank_zero_array_weight` accepts rank-0 arrays,
+   and `test_cashflow_views_reject_non_scalar_array_weight` rejects non-scalars.

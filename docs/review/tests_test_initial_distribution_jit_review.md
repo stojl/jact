@@ -2,30 +2,28 @@
 
 Reviewed file: `tests/test_initial_distribution_jit.py`
 
-## Findings
+## Status
 
-1. The pytree registration guard skips rather than fails.
+Two review items are now resolved; one related behavior remains covered outside
+this file.
 
-   `_pytree_registered` skips Group B if `InitialDistribution` is not a pytree.
-   Since pytree behavior is part of the documented contract, a regression here
-   should probably fail. Suggested change: turn the skip guard into a direct
-   assertion.
+## Resolved
 
-2. The tests do not cover invalid traced index values at solve time.
+1. Pytree registration is required, not skipped.
 
-   Constructors are trace-clean, but invalid index values are only partly
-   covered outside JIT. Suggested change: add a jitted solve or canonicalization
-   boundary test for invalid per-individual indices if feasible.
+   The file now asserts that `InitialDistribution` is a registered JAX pytree
+   and no longer treats loss of pytree registration as a skip-only condition.
 
-3. Integer dtype is not asserted.
+2. Invalid runtime indices are covered at the JIT boundary.
 
-   The spec says `states` is an int32 index array. This file does not cover
-   float or bool index arrays. Suggested change: add concrete dtype tests once
-   production validation is tightened.
+   A jitted `per_individual(...)` path now verifies that out-of-range integer
+   indices fail instead of silently producing zero mass.
 
-## Tests To Add
+## Covered Elsewhere
 
-- Pytree registration is required, not skipped.
-- Concrete non-integer state index arrays are rejected.
-- JIT-boundary behavior for invalid runtime indices is documented.
+1. Concrete integer-dtype validation already exists in
+   `tests/test_initial_distribution_integration.py`.
 
+   That integration file rejects float state indices directly. No duplicate
+   dtype test is needed here unless bool-specific behavior becomes part of the
+   contract.

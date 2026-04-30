@@ -2,15 +2,14 @@
 
 Reviewed file: `tests/test_solver.py`
 
-## Findings
+## Status
 
-1. Prototype imports are path-mutating.
+No active findings remain from this review note.
 
-   The file inserts `docs/original_prototype` into `sys.path` to import
-   `prototype_8`. This is pragmatic, but it couples test import behavior to
-   mutable global path state. Suggested change: isolate prototype imports in a
-   helper module or use `importlib` from an explicit file path.
+## Resolved
 
-## Tests To Add
+1. The prototype-import concern is stale.
 
-- Prototype comparison import path remains isolated.
+   The current `tests/test_solver.py` does not mutate `sys.path` or import from
+   `docs/original_prototype/`. The API spec also documents that
+   `docs/original_prototype/` is historical-only and not part of active tests.

@@ -2,29 +2,22 @@
 
 Reviewed file: `tests/test_model.py`
 
-## Findings
+## Status
 
-1. Non-callable assignment coverage is missing.
+All previously noted gaps are now covered by the current test file.
 
-   The tests cover missing, overlapping, and unknown transition assignments, but
-   do not cover non-callable objects passed as intensities. This matches a
-   production validation gap in `jact/model.py`.
+## Resolved
 
-2. Multi-output callable shape errors are not tested.
+1. Non-callable assignment coverage exists.
 
-   `exits` and `groups` tests verify happy-path slicing, but not too-few output
-   slices or wrong rank. Suggested change: add failure tests that lock in a
-   clear error.
+   The file now rejects non-callable `transitions`, `exits`, and `groups`
+   assignments directly.
 
-3. Empty group transition lists are not tested.
+2. Multi-output callable shape failure is tested.
 
-   Empty groups are currently ignored and lead to indirect coverage errors.
-   Suggested change: decide and test direct rejection or the current indirect
-   behavior.
+   `test_exit_assignment_rejects_too_few_outputs` locks in the reduced-model
+   failure for underspecified multi-output exit callables.
 
-## Tests To Add
+3. Empty group assignment is tested.
 
-- Non-callable `transitions`, `exits`, and `groups` entries.
-- Too-short multi-output callable for an exit or group.
-- Empty group assignment.
-
+   `test_build_rejects_empty_group_assignment` covers direct rejection.

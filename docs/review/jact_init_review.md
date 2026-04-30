@@ -2,16 +2,15 @@
 
 Reviewed file: `jact/__init__.py`
 
-## Findings
+## Status
 
-1. Internal callback types are not re-exported at top level.
+No code change is needed here.
 
-   The `callbacks` module is exported, but `PointMass` and `StateCarry` are not
-   available as `jact.PointMass` / `jact.StateCarry`. Tests import them from
-   `jact.callbacks`, so this is not a bug. Suggested change: either keep the
-   current explicit module access or document it in the public API examples.
+## Resolved
 
-## Tests To Add
+1. Callback helper types remain submodule-level API by design.
 
-- If documentation snippets are tested later, include the top-level docstring
-  example so this does not drift again.
+   The public API spec already documents `jact.callbacks.PointMass` and
+   `jact.callbacks.StateCarry` as lower-level objects that stay in their
+   submodule rather than being re-exported as `jact.PointMass` /
+   `jact.StateCarry`.
