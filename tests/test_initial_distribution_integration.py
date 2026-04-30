@@ -79,6 +79,16 @@ class TestStateSpaceHelpers:
         for left, right in zip(canonical_name.masses, canonical_index.masses):
             assert jnp.array_equal(left, right)
 
+    def test_initial_per_individual_rejects_name_outside_restricted_initial_states(
+        self, illness_death
+    ):
+        state_space, _ = illness_death
+        with pytest.raises(ValueError, match="is not a valid initial state"):
+            state_space.initial_per_individual(
+                state_names=["dead"],
+                initial_states=("healthy", "disabled"),
+            )
+
     def test_initial_per_individual_rejects_float_state_indices(self, illness_death):
         state_space, _ = illness_death
         with pytest.raises(TypeError, match="integer dtype"):

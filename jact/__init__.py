@@ -25,7 +25,12 @@ Example
 ...     }
 ... )
 >>>
->>> result = model.solve(horizon=10, steps_per_unit=12, age=ages)
+>>> result = model.solve(
+...     initial="healthy",
+...     horizon=10,
+...     steps_per_unit=12,
+...     age=ages,
+... )
 """
 
 from . import callbacks

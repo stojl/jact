@@ -104,6 +104,33 @@ def _wrong_width_output_intensity(t, d, **kwargs):
     return jnp.full((batch, d.shape[-1] + 1), 0.1)
 
 
+class TestPointMassValidation:
+    def test_rejects_incompatible_value_and_duration_shapes(self):
+        with pytest.raises(ValueError, match=r"d_0 must have shape \(2, 3\)"):
+            PointMass(
+                value=jnp.ones((2, 3)),
+                d_0=jnp.zeros((3, 2)),
+            )
+
+    def test_rejects_incompatible_explicit_log_value_shape(self):
+        with pytest.raises(
+            ValueError,
+            match=r"log_value must have shape \(2, 3\)",
+        ):
+            PointMass(
+                value=jnp.ones((2, 3)),
+                d_0=jnp.zeros((2, 3)),
+                log_value=jnp.zeros((2, 2)),
+            )
+
+    def test_rejects_negative_concrete_value(self):
+        with pytest.raises(ValueError, match="value must be non-negative"):
+            PointMass(
+                value=jnp.array([[1.0, -0.1]]),
+                d_0=jnp.zeros((1, 2)),
+            )
+
+
 @pytest.fixture
 def illness_death_model():
     state_space = jact.StateSpace(

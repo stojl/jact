@@ -71,35 +71,44 @@ class TestConstruction:
             )
 
     def test_duplicate_states_raise(self):
-        with pytest.raises((ValueError, Exception)):
+        with pytest.raises(ValueError, match="Duplicate state names"):
             jact.StateSpace(
                 states=["a", "a", "b"],
                 transitions=[("a", "b")],
             )
 
     def test_unknown_source_raises(self):
-        with pytest.raises((ValueError, KeyError, Exception)):
+        with pytest.raises(
+            ValueError,
+            match="Transition source 'c' is not a declared state",
+        ):
             jact.StateSpace(
                 states=["a", "b"],
                 transitions=[("c", "b")],
             )
 
     def test_unknown_target_raises(self):
-        with pytest.raises((ValueError, KeyError, Exception)):
+        with pytest.raises(
+            ValueError,
+            match="Transition target 'c' is not a declared state",
+        ):
             jact.StateSpace(
                 states=["a", "b"],
                 transitions=[("a", "c")],
             )
 
     def test_self_transition_raises(self):
-        with pytest.raises((ValueError, Exception)):
+        with pytest.raises(
+            ValueError,
+            match="Self-transition 'a' -> 'a' is not allowed",
+        ):
             jact.StateSpace(
                 states=["a", "b"],
                 transitions=[("a", "a"), ("a", "b")],
             )
 
     def test_duplicate_transition_raises(self):
-        with pytest.raises((ValueError, Exception)):
+        with pytest.raises(ValueError, match="Duplicate transitions"):
             jact.StateSpace(
                 states=["a", "b"],
                 transitions=[("a", "b"), ("a", "b")],
@@ -201,7 +210,7 @@ class TestQueries:
         assert illness_death.state_index("dead") == 2
 
     def test_query_unknown_state_raises(self, illness_death):
-        with pytest.raises((ValueError, KeyError, Exception)):
+        with pytest.raises(ValueError, match="is not a declared state"):
             illness_death.state_index("nonexistent")
 
 

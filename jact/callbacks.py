@@ -23,6 +23,33 @@ __all__ = [
 ]
 
 
+def _validate_shape(
+    name: str,
+    value: jnp.ndarray,
+    expected_shape: tuple[int, ...],
+) -> None:
+    shape = jnp.shape(value)
+    if shape != expected_shape:
+        raise ValueError(
+            f"{name} must have shape {expected_shape}, got {shape}."
+        )
+
+
+def _validate_non_negative_if_concrete(value: jnp.ndarray) -> None:
+    try:
+        arr = jnp.asarray(value)
+        if bool(jnp.any(arr < 0)):
+            raise ValueError("value must be non-negative.")
+    except Exception as exc:  # pragma: no cover - tracer path
+        if "tracer" not in type(exc).__name__.lower():
+            try:
+                message = str(exc).lower()
+            except Exception:  # pragma: no cover
+                message = ""
+            if "tracer" not in message and "concret" not in message:
+                raise
+
+
 @jax.tree_util.register_pytree_node_class
 class PointMass:
     """Per-individual point mass carried along a characteristic."""
@@ -35,6 +62,11 @@ class PointMass:
         d_0: jnp.ndarray,
         log_value: jnp.ndarray | None = None,
     ):
+        value_shape = jnp.shape(value)
+        _validate_shape("d_0", d_0, value_shape)
+        if log_value is not None:
+            _validate_shape("log_value", log_value, value_shape)
+        _validate_non_negative_if_concrete(value)
         self.value = value
         self.d_0 = d_0
         self.log_value = (
@@ -48,7 +80,12 @@ class PointMass:
 
     @classmethod
     def tree_unflatten(cls, _, children):
-        return cls(*children)
+        value, d_0, log_value = children
+        self = cls.__new__(cls)
+        self.value = value
+        self.d_0 = d_0
+        self.log_value = log_value
+        return self
 
 
 class StateCarry(NamedTuple):
