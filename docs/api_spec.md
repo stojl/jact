@@ -414,7 +414,7 @@ result = model.solve(
     initial="healthy",
     horizon=10,
     steps_per_unit=12,
-    probability="collapse_point_no_duration",
+    probability="state_probability",
     cashflows=cashflows,
     cashflow_views={"pv": jact.Total(weight=flat_discount, terminal=True)},
     record_every=12,
@@ -430,7 +430,7 @@ Parameters:
 | `initial_duration` | float or `(batch,)` array | Only valid with `str` and `(batch,)` `initial` forms |
 | `horizon` | positive int | Number of time units |
 | `steps_per_unit` | positive int | Solver steps per time unit |
-| `probability` | `str`, callable, or `None` | Probability reducer; default is `"collapse_point_no_duration"` |
+| `probability` | `str`, callable, or `None` | Probability reducer; default is `"state_probability"` |
 | `cashflows` | `CashflowDeclaration` or `None` | Cashflow components to evaluate |
 | `cashflow_views` | mapping or `None` | Solve-time views; requires `cashflows` |
 | `record_every` | positive int | Must divide `horizon * steps_per_unit` |
@@ -512,15 +512,18 @@ Each solver step:
 
 Built-in probability callbacks:
 
-- `default`,
-- `no_duration`,
-- `collapse_point`,
-- `collapse_point_no_duration`,
-- `point_only`,
-- `point_only_no_duration`,
-- `no_point`,
-- `no_point_no_duration`,
+- `full`,
+- `marginal_components`,
+- `state_probability`,
+- `point_mass`,
+- `density`,
+- `density_probability`,
 - `none`.
+
+When duration is retained, the singular component remains explicit as
+`PointMass(value, d_0)` rather than being projected onto the duration grid.
+After marginalizing over duration, `state_probability` combines continuous and
+point-mass probability into total state occupancy.
 
 Custom probability callbacks have signature
 `(state: tuple[StateCarry, ...]) -> PyTree`. Their returned PyTree is stacked by

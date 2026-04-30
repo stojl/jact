@@ -304,7 +304,7 @@ class Model:
         horizon: int,
         steps_per_unit: int,
         initial_duration: Any = 0.0,
-        probability: Union[None, str, Callable] = "collapse_point_no_duration",
+        probability: Union[None, str, Callable] = "state_probability",
         cashflows: Any = None,
         cashflow_views: Any = None,
         record_every: int = 1,
@@ -330,7 +330,7 @@ class Model:
             shorthand forms of ``initial``. Default is ``0.0``.
         probability : str, callable, or None, optional
             Probability output reducer. Default is
-            ``"collapse_point_no_duration"``. ``None`` disables
+            ``"state_probability"``. ``None`` disables
             probability output.
         cashflows : CashflowDeclaration, optional
             Cashflow declaration to evaluate.

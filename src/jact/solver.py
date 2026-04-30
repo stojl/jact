@@ -957,7 +957,7 @@ def solve(
     horizon: int,
     steps_per_unit: int,
     initial_duration: Any = 0.0,
-    probability: Union[None, str, Callable] = "collapse_point_no_duration",
+    probability: Union[None, str, Callable] = "state_probability",
     cashflows: CashflowDeclaration | None = None,
     cashflow_views: Mapping[str, Raw | Group | Total | ByState | ByKind] | None = None,
     record_every: int = 1,
