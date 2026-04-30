@@ -39,7 +39,7 @@ dependencies = [
 Homepage = "https://github.com/stojl/jact"
 Repository = "https://github.com/stojl/jact"
 Issues = "https://github.com/stojl/jact/issues"
-Documentation = "https://github.com/stojl/jact/blob/main/docs/api_spec.md"
+Documentation = "https://github.com/stojl/jact/blob/main/docs/index.md"
 
 [project.optional-dependencies]
 dev = [

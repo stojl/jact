@@ -91,7 +91,7 @@ float32-space survival update, but it avoids the extra rounding of a survival
 factor very close to one. Additive inflows and last-bin pooling remain linear,
 so the public solver state and initial-distribution API are unchanged.
 
-Post-fix density-only sweep from `scripts/density_precision_sweep.py`:
+Post-fix density-only sweep from `tools/density_precision_sweep.py`:
 
 ```
 steps_per_unit   density err float32         float64
@@ -118,7 +118,7 @@ On float32 inputs (the common GPU case, where float64 throughput is poor), the
 terminal-cashflow analytical-comparison error gets *worse* past a certain
 `steps_per_unit`, instead of continuing to converge as `O(1/N²)`.
 
-Reproduction script: `scripts/cashflow_precision_sweep.py` — sweeps the
+Reproduction script: `tools/cashflow_precision_sweep.py` — sweeps the
 constant-intensity time/duration annuity from
 `tests/test_cashflows.py::test_constant_intensity_time_duration_state_rate_matches_closed_form`
 across `steps_per_unit ∈ {32, …, 8192}`, in both float32 and float64.
@@ -147,9 +147,9 @@ source of the large `steps_per_unit=1024` spike, fixable with Kahan / Neumaier
 compensated summation in the terminal carry inside `_midpoint_solver`.
 
 As an explanation of the original spike, this hypothesis was **wrong**. Two
-diagnostics in `scripts/` ruled it out before the survival-advection fixes:
+diagnostics in `tools/` ruled it out before the survival-advection fixes:
 
-`scripts/cashflow_precision_diagnose.py` runs the same model with both a
+`tools/cashflow_precision_diagnose.py` runs the same model with both a
 `terminal=True` view (in-solver scan accumulator) and a streamed view, and
 host-side-sums the streamed `(T_out, batch)` array independently. Before the
 survival fixes, both paths had the same large error because they shared biased
@@ -157,7 +157,7 @@ per-step values. After the survival fixes, this script is useful for checking
 whether ordinary terminal scan addition is still worse than pairwise or
 compensated summation of the now-good per-step values.
 
-`scripts/cashflow_precision_step.py` takes those per-step streamed values and
+`tools/cashflow_precision_step.py` takes those per-step streamed values and
 sums them four ways: naïve sequential f32, JAX pairwise (`jnp.sum`), full
 Python Neumaier in f32, and upcast-to-f64-then-sum. In the current checkout at
 `steps=1024`:

@@ -3,7 +3,9 @@ include LICENSE
 
 prune tests
 prune docs
-prune scripts
+prune notes
+prune archive
+prune tools
 prune benchmarks
 prune .claude
 

@@ -394,5 +394,5 @@ silently but remains easy to opt into. That's the right default.
 3. Rewrite the "Static-topology invariant" and "Open design note"
    subsections as described in §6.
 4. Update the per-individual example block.
-5. Cross-reference from `docs/design/solver.md §3` so the
+5. Cross-reference from `notes/design/solver.md §3` so the
    point-mass-split design note matches the new seeding story.

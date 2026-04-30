@@ -35,7 +35,7 @@ Use `import jact` for the main user API: `jact.StateSpace`,
 objects remain in submodules, such as `jact.callbacks.PointMass` and
 `jact.model.ReducedModel`.
 
-`docs/original_prototype/` is retained as historical documentation only, not
+`archive/original_prototype/` is retained as historical documentation only, not
 as public package API and not as a runtime reference for tests or benchmarks.
 
 ## StateSpace
@@ -231,7 +231,7 @@ Every view shares two optional fields:
 
 Validation is structural: view names unique, `Group.members` and `Raw(name=...)` references must be declared component names, `terminal` is a `bool`, `weight` is `None` / scalar / callable.
 
-`PerAttachment` (one stream per attachment point of a single component) is sketched in `docs/design/cashflow_aggregation.md` §6 and deferred.
+`PerAttachment` (one stream per attachment point of a single component) is sketched in `notes/design/cashflow_aggregation.md` §6 and deferred.
 
 ### Cashflow valuation
 

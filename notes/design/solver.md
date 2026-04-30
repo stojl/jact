@@ -293,7 +293,7 @@ with the kwarg.
 Implementation-side reflections on how the solver should evolve point
 masses once heterogeneous starts reach it (off-grid per-individual
 `d_0`, multi-state declarations, per-individual mass) live in
-[docs/implementation/point_mass.md](/home/lucas/Documents/jact/docs/implementation/point_mass.md).
+[notes/implementation/point_mass.md](../implementation/point_mass.md).
 
 ---
 

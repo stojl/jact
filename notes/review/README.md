@@ -1,19 +1,13 @@
 # Code Review Notes
 
-This folder contains review documents for package modules and tests.
+This folder contains internal review notes for selected package modules and
+tests. It is maintainer-only material and not part of the public
+documentation set.
 
-## Package
+## Available reviews
 
-- `jact/__init__.py`: [jact_init_review.md](jact_init_review.md)
-- `jact/callbacks.py`: [jact_callbacks_review.md](jact_callbacks_review.md)
-- `jact/cashflows.py`: [jact_cashflows_review.md](jact_cashflows_review.md)
-- `jact/initial_distribution.py`: [jact_initial_distribution_review.md](jact_initial_distribution_review.md)
-- `jact/model.py`: [jact_model_review.md](jact_model_review.md)
-- `jact/solver.py`: [solver_review.md](solver_review.md)
-- `jact/state_space.py`: [jact_state_space_review.md](jact_state_space_review.md)
-
-## Tests
-
+- `src/jact/__init__.py`: [jact_init_review.md](jact_init_review.md)
+- `src/jact/callbacks.py`: [jact_callbacks_review.md](jact_callbacks_review.md)
 - `tests/__init__.py`: [tests_init_review.md](tests_init_review.md)
 - `tests/test_cashflows.py`: [tests_test_cashflows_review.md](tests_test_cashflows_review.md)
 - `tests/test_initial_distribution_integration.py`: [tests_test_initial_distribution_integration_review.md](tests_test_initial_distribution_integration_review.md)

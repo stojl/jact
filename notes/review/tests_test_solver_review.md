@@ -11,5 +11,5 @@ No active findings remain from this review note.
 1. The prototype-import concern is stale.
 
    The current `tests/test_solver.py` does not mutate `sys.path` or import from
-   `docs/original_prototype/`. The API spec also documents that
-   `docs/original_prototype/` is historical-only and not part of active tests.
+   `archive/original_prototype/`. The API spec also documents that
+   `archive/original_prototype/` is historical-only and not part of active tests.

@@ -65,7 +65,7 @@ All three can be used together; `build()` validates no gaps, no overlaps. `exits
 
 ### Quadrature
 
-Every transition uses midpoint quadrature along the transported characteristic; point-mass updates use the same midpoint sample. There is no per-callable continuity metadata and no alternative quadrature path. Hazards with jumps strictly inside a traversed cell can lose order; align jumps to the solver grid in `t` and `d` when possible. See [docs/design/continuity_design.md](docs/design/continuity_design.md) for the rationale.
+Every transition uses midpoint quadrature along the transported characteristic; point-mass updates use the same midpoint sample. There is no per-callable continuity metadata and no alternative quadrature path. Hazards with jumps strictly inside a traversed cell can lose order; align jumps to the solver grid in `t` and `d` when possible. See [notes/design/continuity_design.md](notes/design/continuity_design.md) for the rationale.
 
 ### Intensity callable contract
 
@@ -110,7 +110,7 @@ Changing the declared *set* of initial states re-traces; changing `mass` / `dura
 
 - `docs/api_spec.md` is the authoritative API contract — tests reference it explicitly ("per docs/api_spec.md"). Keep it in sync when changing public surface.
 - `docs/api_spec_short.md` is a condensed mirror of the spec — same normative content, stripped of examples and rationale. Prefer it for fast review in a fresh session; fall back to `api_spec.md` for worked examples and design rationale.
-- `docs/original_prototype/prototype_8.py` is the reference numerics the solver was ported from; consult it when debugging solver behavior.
+- `archive/original_prototype/prototype_8.py` is the reference numerics the solver was ported from; consult it when debugging solver behavior.
 - Python >= 3.10 is required (uses `X | Y` union syntax and PEP 604 features in places).
 - **Pick `probability` and `record_every` before scaling `batch`.** The `default` callback retains `(time, batch, D)` per state and blows up memory fast; `collapse_point_no_duration` at `(T_out, batch, J)` is the canonical actuarial output and stays compact. See `docs/api_spec.md` §Memory budget for worked examples.
 - **Output axis convention**: time is the leading axis of every probability output leaf and every streamed cashflow leaf; terminal cashflow leaves (`terminal=True`) drop the time axis entirely. No rank-dependent transpose remains.

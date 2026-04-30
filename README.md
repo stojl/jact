@@ -46,9 +46,12 @@ result = model.solve(initial="healthy", horizon=30, steps_per_unit=12, age=ages)
 
 ## Documentation
 
-See the [API specification](https://github.com/stojl/jact/blob/main/docs/api_spec.md) for the full API.
-For a runnable walkthrough of the main workflow, see
-the [example notebook](https://github.com/stojl/jact/blob/main/docs/example_notebook.ipynb).
+See the [documentation index](https://github.com/stojl/jact/blob/main/docs/index.md)
+for the public documentation set.
+For the full API contract, use the
+[API specification](https://github.com/stojl/jact/blob/main/docs/api_spec.md).
+For a runnable walkthrough of the main workflow, see the
+[example notebook](https://github.com/stojl/jact/blob/main/docs/example_notebook.ipynb).
 
 ## Namespace
 

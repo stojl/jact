@@ -1,6 +1,6 @@
 # InitialDistribution: implementation reflections
 
-This note reflects on the `InitialDistribution` object as specified in [docs/api_spec.md](/home/lucas/Documents/jact/docs/api_spec.md). It is intentionally implementation-focused rather than user-facing.
+This note reflects on the `InitialDistribution` object as specified in [docs/api_spec.md](../../docs/api_spec.md). It is intentionally implementation-focused rather than user-facing.
 
 ## Core role
 
@@ -237,7 +237,7 @@ Then solver setup can:
 
 This separation is preferable to letting the solver understand all constructor variants directly.
 
-The downstream side — how the solver should *evolve* those point masses under heterogeneous starts (multiple initial states, per-individual off-grid `d_0`, per-individual mass) — is covered in the companion note [point_mass.md](/home/lucas/Documents/jact/docs/implementation/point_mass.md).
+The downstream side — how the solver should *evolve* those point masses under heterogeneous starts (multiple initial states, per-individual off-grid `d_0`, per-individual mass) — is covered in the companion note [point_mass.md](point_mass.md).
 
 ## Testing considerations
 

@@ -36,7 +36,7 @@ used for inspection or custom callbacks stay in their submodules, for example
 `jact.callbacks.PointMass`, `jact.callbacks.StateCarry`,
 `jact.model.ReducedModel`, and `jact.model.TransitionInfo`.
 
-Files under `docs/original_prototype/` are retained as historical
+Files under `archive/original_prototype/` are retained as historical
 documentation only. They are not part of the package API and are not used by
 tests or benchmarks.
 
@@ -467,7 +467,7 @@ Validation is structural and uses the cashflow declaration only:
 - `terminal` is a `bool`,
 - `weight` is `None`, a Python scalar, or a callable.
 
-Out of scope: within-component splitting (a `PerAttachment` view exposing one stream per attachment point of a single component) is sketched in `docs/design/cashflow_aggregation.md` §6 and deferred to a future version.
+Out of scope: within-component splitting (a `PerAttachment` view exposing one stream per attachment point of a single component) is sketched in `notes/design/cashflow_aggregation.md` §6 and deferred to a future version.
 
 ### Cashflow valuation
 
@@ -492,7 +492,7 @@ cashflow_views = {
 - The returned callable evaluates the running discount factor against the solver step grid using the same midpoint approximation as the rest of the solver. The within-interval weight applied to the contribution attributed to interval `[t_n, t_{n+1}]` is `exp(-r(t_n + dt/2) · dt) · D(t_n)`.
 - Because the recording default is interval accumulation, the discount weight applied is the within-interval weight for the interval the cashflow is attributed to, not a point-time weight at the recording boundary.
 
-Out of scope (deferred to a future functor protocol; see `docs/design/cashflow_valuation.md` §4.6):
+Out of scope (deferred to a future functor protocol; see `notes/design/cashflow_valuation.md` §4.6):
 
 - non-linear-in-cashflow transforms (capping, flooring, utility),
 - path-dependent transforms (running maxima, threshold accumulators, look-back guarantees),
