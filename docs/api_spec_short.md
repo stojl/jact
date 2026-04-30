@@ -35,8 +35,8 @@ Use `import jact` for the main user API: `jact.StateSpace`,
 objects remain in submodules, such as `jact.callbacks.PointMass` and
 `jact.model.ReducedModel`.
 
-`docs/original_prototype/` is retained as a numerical reference for tests and
-benchmarks, not as public package API.
+`docs/original_prototype/` is retained as historical documentation only, not
+as public package API and not as a runtime reference for tests or benchmarks.
 
 ## StateSpace
 

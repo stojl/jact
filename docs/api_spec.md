@@ -36,8 +36,9 @@ used for inspection or custom callbacks stay in their submodules, for example
 `jact.callbacks.PointMass`, `jact.callbacks.StateCarry`,
 `jact.model.ReducedModel`, and `jact.model.TransitionInfo`.
 
-Files under `docs/original_prototype/` are retained as numerical references for
-tests and benchmarks. They are not part of the package API.
+Files under `docs/original_prototype/` are retained as historical
+documentation only. They are not part of the package API and are not used by
+tests or benchmarks.
 
 ## StateSpace
 
