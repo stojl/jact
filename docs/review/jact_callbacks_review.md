@@ -30,4 +30,3 @@ Reviewed file: `jact/callbacks.py`
 
 - Direct `PointMass` construction with incompatible shapes fails clearly.
 - Direct `PointMass` construction with negative values has documented behavior.
-

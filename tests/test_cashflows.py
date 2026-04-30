@@ -216,6 +216,26 @@ def test_cashflow_views_reject_non_scalar_array_weight():
         )
 
 
+def test_empty_cashflow_view_mapping_returns_empty_outputs():
+    ss = jact.StateSpace(["active"], [])
+    model = ss.build(transitions={})
+    cashflows = ss.cashflows({"premium": jact.StateRate({
+        "active": _constant_payment(2.0)
+    })})
+
+    result = model.solve(
+        initial="active",
+        horizon=1,
+        steps_per_unit=4,
+        probability=None,
+        cashflows=cashflows,
+        cashflow_views={},
+    )
+
+    assert result["cashflows"] == {}
+    assert "probability" not in result
+
+
 def test_group_view_members_are_frozen_during_validation():
     ss = jact.StateSpace(["healthy", "dead"], [("healthy", "dead")])
     cashflows = ss.cashflows({

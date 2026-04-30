@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
+from numbers import Integral
 from typing import Any, Callable, Dict, Mapping, NamedTuple, Sequence, Union
 
 import jax
@@ -308,7 +309,6 @@ def _advance_solver_step_from_dynamics(
     next_inflow = jnp.zeros(densities.shape[:-1], dtype=densities.dtype)
     next_point_values = point_values
     next_point_log_values = point_log_values
-    next_densities = []
 
     for i, hz in enumerate(row_hazards):
         for j, density_hazard in hz.density_hazards:
@@ -328,6 +328,8 @@ def _advance_solver_step_from_dynamics(
                     point_values[i] * point_hazard * hz.point_transfer_factor
                 )
 
+    next_densities = []
+    for i, hz in enumerate(row_hazards):
         next_densities.append(
             _advance_density(densities[i], hz.density_total, next_inflow[i])
         )
@@ -764,6 +766,15 @@ def _broadcast_batch(value: Any, batch_size: int) -> jnp.ndarray:
     raise ValueError("Expected a scalar or (batch,) array.")
 
 
+def _validate_positive_integer(name: str, value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise ValueError(f"{name} must be a positive integer.")
+    value = int(value)
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer.")
+    return value
+
+
 def _canonicalize_initial(
     initial: Union[str, jnp.ndarray, InitialDistribution],
     initial_duration: Any,
@@ -966,6 +977,8 @@ def solve(
         names = ", ".join(sorted(overlap))
         raise ValueError(f"Reserved covariate names are not allowed: {names}")
 
+    horizon = _validate_positive_integer("horizon", horizon)
+    steps_per_unit = _validate_positive_integer("steps_per_unit", steps_per_unit)
     solver_steps = steps_per_unit * horizon
     if record_every <= 0 or solver_steps % record_every != 0:
         raise ValueError(
@@ -1023,7 +1036,12 @@ def solve(
             "The intensity matrix contains no callables. Cannot solve."
         )
 
-    reference_output = reference_fn(0.0, duration_left, **kwargs)
+    reference_output = jnp.asarray(reference_fn(0.0, duration_left, **kwargs))
+    if reference_output.ndim != 2 or reference_output.shape[1] != solver_steps:
+        raise ValueError(
+            "Reference intensity output must have shape "
+            f"(batch, {solver_steps})."
+        )
     reference_batch = reference_output.shape[0]
 
     batch_size = distribution_batch
