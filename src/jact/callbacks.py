@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any, Callable, NamedTuple, Union
 
 import jax
@@ -144,15 +145,8 @@ def _point_mass_dict(
     }
 
 
-def none_callback(state_names: tuple[str, ...]) -> CallbackFn:
-    """Return nothing. Use when only side effects of the solve matter."""
-    del state_names
-    return _none_callback
-
-
-def full(state_names: tuple[str, ...]) -> CallbackFn:
-    """Per-state duration density and point masses, keyed by state name."""
-
+@lru_cache(maxsize=None)
+def _full_callback(state_names: tuple[str, ...]) -> CallbackFn:
     def fn(state: tuple[StateCarry, ...]):
         return {
             "density": jnp.stack(
@@ -164,9 +158,10 @@ def full(state_names: tuple[str, ...]) -> CallbackFn:
     return fn
 
 
-def marginal_components(state_names: tuple[str, ...]) -> CallbackFn:
-    """Duration-marginalized density per state plus point masses."""
-
+@lru_cache(maxsize=None)
+def _marginal_components_callback(
+    state_names: tuple[str, ...],
+) -> CallbackFn:
     def fn(state: tuple[StateCarry, ...]):
         return {
             "density": jnp.stack(
@@ -179,6 +174,30 @@ def marginal_components(state_names: tuple[str, ...]) -> CallbackFn:
     return fn
 
 
+@lru_cache(maxsize=None)
+def _point_mass_callback(state_names: tuple[str, ...]) -> CallbackFn:
+    def fn(state: tuple[StateCarry, ...]):
+        return _point_mass_dict(state, state_names)
+
+    return fn
+
+
+def none_callback(state_names: tuple[str, ...]) -> CallbackFn:
+    """Return nothing. Use when only side effects of the solve matter."""
+    del state_names
+    return _none_callback
+
+
+def full(state_names: tuple[str, ...]) -> CallbackFn:
+    """Per-state duration density and point masses, keyed by state name."""
+    return _full_callback(state_names)
+
+
+def marginal_components(state_names: tuple[str, ...]) -> CallbackFn:
+    """Duration-marginalized density per state plus point masses."""
+    return _marginal_components_callback(state_names)
+
+
 def state_probability(state_names: tuple[str, ...]) -> CallbackFn:
     """Total state occupancy after marginalizing over duration."""
     del state_names
@@ -187,11 +206,7 @@ def state_probability(state_names: tuple[str, ...]) -> CallbackFn:
 
 def point_mass(state_names: tuple[str, ...]) -> CallbackFn:
     """Point-mass component per state, keyed by state name."""
-
-    def fn(state: tuple[StateCarry, ...]):
-        return _point_mass_dict(state, state_names)
-
-    return fn
+    return _point_mass_callback(state_names)
 
 
 def density(state_names: tuple[str, ...]) -> CallbackFn:

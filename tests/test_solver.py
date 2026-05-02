@@ -1005,6 +1005,95 @@ class TestBuiltInCallbacks:
         disabled_result = illness_death_model.solve(probability=None, **kwargs)
         assert "probability" not in disabled_result
 
+    @pytest.mark.parametrize(
+        "callback_name",
+        [
+            "none",
+            "full",
+            "marginal_components",
+            "state_probability",
+            "point_mass",
+            "density",
+            "density_probability",
+        ],
+    )
+    def test_builtin_callbacks_do_not_recompile_on_repeat(
+        self,
+        illness_death_model,
+        callback_name,
+    ):
+        _midpoint_solver.clear_cache()
+        kwargs = dict(
+            initial="healthy",
+            horizon=1,
+            steps_per_unit=8,
+            record_every=2,
+            age=jnp.arange(2, dtype=jnp.float32),
+        )
+
+        cache_before = _midpoint_solver._cache_size()
+        illness_death_model.solve(probability=callback_name, **kwargs)
+        cache_after_first = _midpoint_solver._cache_size()
+        illness_death_model.solve(probability=callback_name, **kwargs)
+        cache_after_second = _midpoint_solver._cache_size()
+
+        assert cache_after_first == cache_before + 1
+        assert cache_after_second == cache_after_first
+
+    def test_reusing_same_custom_callback_does_not_recompile(
+        self,
+        illness_death_model,
+    ):
+        _midpoint_solver.clear_cache()
+        kwargs = dict(
+            initial="healthy",
+            horizon=1,
+            steps_per_unit=8,
+            record_every=2,
+            age=jnp.arange(2, dtype=jnp.float32),
+        )
+
+        cache_before = _midpoint_solver._cache_size()
+        illness_death_model.solve(
+            probability=_healthy_probability_callback, **kwargs
+        )
+        cache_after_first = _midpoint_solver._cache_size()
+        illness_death_model.solve(
+            probability=_healthy_probability_callback, **kwargs
+        )
+        cache_after_second = _midpoint_solver._cache_size()
+
+        assert cache_after_first == cache_before + 1
+        assert cache_after_second == cache_after_first
+
+    def test_fresh_custom_callback_objects_do_recompile(
+        self,
+        illness_death_model,
+    ):
+        _midpoint_solver.clear_cache()
+        kwargs = dict(
+            initial="healthy",
+            horizon=1,
+            steps_per_unit=8,
+            record_every=2,
+            age=jnp.arange(2, dtype=jnp.float32),
+        )
+
+        def make_callback():
+            def callback(state):
+                return _healthy_probability_callback(state)
+
+            return callback
+
+        cache_before = _midpoint_solver._cache_size()
+        illness_death_model.solve(probability=make_callback(), **kwargs)
+        cache_after_first = _midpoint_solver._cache_size()
+        illness_death_model.solve(probability=make_callback(), **kwargs)
+        cache_after_second = _midpoint_solver._cache_size()
+
+        assert cache_after_first == cache_before + 1
+        assert cache_after_second == cache_after_first + 1
+
     def test_removed_builtin_callbacks_raise_unknown_callback(
         self, illness_death_model
     ):
