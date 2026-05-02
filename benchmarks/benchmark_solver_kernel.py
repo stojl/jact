@@ -429,7 +429,7 @@ def _build_cashflow_scenarios(
                 name="unit-state-terminal-with-probability",
                 cashflows=unit_state_cashflows(),
                 views={"pv": jact.Total(terminal=True)},
-                probability="collapse_point_no_duration",
+                probability="state_probability",
                 record_every=step_count,
             )
         )
@@ -449,7 +449,7 @@ def _build_cashflow_scenarios(
                 name="unit-state-stream-with-probability",
                 cashflows=unit_state_cashflows(),
                 views={"pv": jact.Total()},
-                probability="collapse_point_no_duration",
+                probability="state_probability",
             )
         )
 
@@ -642,7 +642,7 @@ def _run_analytic_correctness_checks(
         initial="healthy",
         horizon=horizon,
         steps_per_unit=steps_per_unit,
-        probability="collapse_point_no_duration",
+        probability="state_probability",
         age=jnp.arange(batch_size, dtype=dtype),
     )
     _block_until_ready(result)
@@ -691,7 +691,7 @@ def _run_analytic_correctness_checks(
         initial_duration=initial_duration,
         horizon=duration_horizon,
         steps_per_unit=duration_steps,
-        probability="collapse_point_no_duration",
+        probability="state_probability",
         record_every=2,
         age=jnp.arange(batch_size, dtype=dtype),
     )
@@ -731,7 +731,7 @@ def _run_e2e_sanity_check(
         initial="s0",
         horizon=config.horizon,
         steps_per_unit=config.steps_per_unit,
-        probability="collapse_point_no_duration",
+        probability="state_probability",
         age=ages,
     )
 
@@ -845,7 +845,7 @@ def _benchmark_e2e(
             initial="s0",
             horizon=config.horizon,
             steps_per_unit=config.steps_per_unit,
-            probability="collapse_point_no_duration",
+            probability="state_probability",
             age=ages,
         )
 

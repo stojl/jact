@@ -127,9 +127,8 @@ class TestInitialDistributionSolveIntegration:
         assert "disabled" not in point_result
         assert "dead" not in point_result
         healthy_point = point_result["healthy"]
-        assert set(healthy_point.keys()) == {"value"}
-        assert healthy_point["value"].shape == (5, 2)
-        assert jnp.allclose(healthy_point["value"][0], jnp.ones((2,)))
+        assert healthy_point.shape == (5, 2)
+        assert jnp.allclose(healthy_point[0], jnp.ones((2,)))
 
     def test_per_individual_none_initial_states_uses_full_model_for_solver(
         self, illness_death
@@ -159,15 +158,12 @@ class TestInitialDistributionSolveIntegration:
 
         assert result["states"] == state_space.states
         assert set(point_result.keys()) == {"healthy", "disabled", "dead"}
-        assert set(point_result["healthy"].keys()) == {"value"}
-        assert set(point_result["disabled"].keys()) == {"value"}
-        assert set(point_result["dead"].keys()) == {"value"}
-        assert point_result["healthy"]["value"].shape == (5, 2)
-        assert point_result["disabled"]["value"].shape == (5, 2)
-        assert point_result["dead"]["value"].shape == (5, 2)
-        assert jnp.allclose(point_result["healthy"]["value"][0], jnp.array([1.0, 0.0]))
-        assert jnp.allclose(point_result["disabled"]["value"][0], jnp.array([0.0, 1.0]))
-        assert jnp.allclose(point_result["dead"]["value"][0], jnp.zeros((2,)))
+        assert point_result["healthy"].shape == (5, 2)
+        assert point_result["disabled"].shape == (5, 2)
+        assert point_result["dead"].shape == (5, 2)
+        assert jnp.allclose(point_result["healthy"][0], jnp.array([1.0, 0.0]))
+        assert jnp.allclose(point_result["disabled"][0], jnp.array([0.0, 1.0]))
+        assert jnp.allclose(point_result["dead"][0], jnp.zeros((2,)))
 
     def test_component_mixture_seeds_only_declared_states(self, illness_death):
         _, model = illness_death
@@ -196,12 +192,10 @@ class TestInitialDistributionSolveIntegration:
 
         assert result["states"] == ("healthy", "disabled", "dead")
         assert set(point_result.keys()) == {"healthy", "disabled"}
-        assert point_result["healthy"]["value"].shape == (5, 2)
-        assert point_result["disabled"]["value"].shape == (5, 2)
-        healthy_value = point_result["healthy"]["value"]
-        disabled_value = point_result["disabled"]["value"]
-        assert set(point_result["healthy"].keys()) == {"value"}
-        assert set(point_result["disabled"].keys()) == {"value"}
+        assert point_result["healthy"].shape == (5, 2)
+        assert point_result["disabled"].shape == (5, 2)
+        healthy_value = point_result["healthy"]
+        disabled_value = point_result["disabled"]
         assert jnp.allclose(healthy_value[0], jnp.array([0.25, 0.75]))
         assert jnp.allclose(disabled_value[0], jnp.array([0.75, 0.25]))
 

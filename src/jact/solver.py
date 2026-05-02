@@ -705,6 +705,9 @@ def _midpoint_solver(
             stream_output,
         )
 
+    # Rematerialize one recorded block at a time during reverse-mode so the
+    # transpose does not need to retain every inner solver step.
+    block_scan = jax.checkpoint(block_scan)
     initial_probability = prob_callback(state_0)
     block_starts = jnp.arange(n_records, dtype=duration_mid.dtype) * (
         record_every * step_size

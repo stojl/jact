@@ -521,9 +521,9 @@ order), and `D` for the duration grid:
 | `state_probability` | `(T, B, S)` tensor — duration-marginal density plus point-mass `value` per state. |
 | `density_probability` | `(T, B, S)` tensor — duration-marginal density only; excludes point masses. |
 | `density` | `(T, B, S, D)` tensor — continuous duration density per state; excludes point masses. |
-| `point_mass` | `{state_name: {"value": (T, B)}}` — only states that carry a point mass appear. |
-| `marginal_components` | `{"density": (T, B, S), "point_mass": {state_name: {"value": (T, B)}}}` |
-| `full` | `{"density": (T, B, S, D), "point_mass": {state_name: {"value": (T, B)}}}` |
+| `point_mass` | `{state_name: (T, B)}` — only states that carry a point mass appear. |
+| `marginal_components` | `{"density": (T, B, S), "point_mass": {state_name: (T, B)}}` |
+| `full` | `{"density": (T, B, S, D), "point_mass": {state_name: (T, B)}}` |
 
 Built-in reducers do not expose point-mass duration. If a downstream consumer
 needs `PointMass.d_0`, use a custom probability callback and read it directly

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -102,6 +103,20 @@ def _rank_one_output_intensity(t, d, **kwargs):
 def _wrong_width_output_intensity(t, d, **kwargs):
     batch = kwargs["age"].shape[0]
     return jnp.full((batch, d.shape[-1] + 1), 0.1)
+
+
+def _rate_parameter_intensity(t, d, **kwargs):
+    del t
+    rate = kwargs["rate"][:, None]
+    return jnp.broadcast_to(rate, (rate.shape[0], d.shape[-1]))
+
+
+def _healthy_probability_callback(state):
+    carry = state[0]
+    total = jnp.sum(carry.density, axis=-1)
+    if carry.point_mass is not None:
+        total = total + carry.point_mass.value
+    return total
 
 
 class TestPointMassValidation:
@@ -245,6 +260,83 @@ class TestSolverAgainstClosedForm:
             rtol=0.0,
         )
         assert jnp.allclose(probability, expected, atol=5e-3, rtol=0.0)
+
+
+class TestSolverAutodiff:
+    @pytest.fixture
+    def autodiff_model(self):
+        state_space = jact.StateSpace(
+            states=["healthy", "dead"],
+            transitions=[("healthy", "dead")],
+        )
+        return state_space.build(
+            transitions={("healthy", "dead"): _rate_parameter_intensity}
+        )
+
+    def test_state_probability_supports_reverse_mode_with_record_every(
+        self, autodiff_model
+    ):
+        horizon = 2
+        rate = jnp.array(0.3, dtype=jnp.float32)
+
+        def loss(rate_scalar):
+            probability = autodiff_model.solve(
+                initial="healthy",
+                horizon=horizon,
+                steps_per_unit=8,
+                record_every=4,
+                probability="state_probability",
+                rate=jnp.array([rate_scalar], dtype=jnp.float32),
+            )["probability"]
+            return probability[-1, 0, 1]
+
+        grad = jax.grad(loss)(rate)
+        expected = horizon * jnp.exp(-rate * horizon)
+
+        assert jnp.allclose(grad, expected, atol=1e-6, rtol=1e-6)
+
+    def test_state_probability_supports_forward_mode(self, autodiff_model):
+        horizon = 2
+        rate = jnp.array(0.3, dtype=jnp.float32)
+
+        def loss(rate_scalar):
+            probability = autodiff_model.solve(
+                initial="healthy",
+                horizon=horizon,
+                steps_per_unit=8,
+                probability="state_probability",
+                rate=jnp.array([rate_scalar], dtype=jnp.float32),
+            )["probability"]
+            return probability[-1, 0, 1]
+
+        primal, tangent = jax.jvp(loss, (rate,), (jnp.array(1.0, dtype=rate.dtype),))
+        expected_primal = 1.0 - jnp.exp(-rate * horizon)
+        expected_tangent = horizon * jnp.exp(-rate * horizon)
+
+        assert jnp.allclose(primal, expected_primal, atol=1e-6, rtol=1e-6)
+        assert jnp.allclose(tangent, expected_tangent, atol=1e-6, rtol=1e-6)
+
+    def test_custom_probability_callback_supports_reverse_mode(
+        self, autodiff_model
+    ):
+        horizon = 2
+        rate = jnp.array(0.3, dtype=jnp.float32)
+
+        def loss(rate_scalar):
+            probability = autodiff_model.solve(
+                initial="healthy",
+                horizon=horizon,
+                steps_per_unit=8,
+                record_every=4,
+                probability=_healthy_probability_callback,
+                rate=jnp.array([rate_scalar], dtype=jnp.float32),
+            )["probability"]
+            return probability[-1, 0]
+
+        grad = jax.grad(loss)(rate)
+        expected = -horizon * jnp.exp(-rate * horizon)
+
+        assert jnp.allclose(grad, expected, atol=1e-6, rtol=1e-6)
 
     def test_solve_conserves_mass_for_two_state_cycle_with_backward_transition(self):
         rate = 0.7
@@ -583,9 +675,8 @@ class TestSolverEntry:
         assert "disabled" not in point_result
         assert "dead" not in point_result
         healthy_point = point_result["healthy"]
-        assert set(healthy_point.keys()) == {"value"}
-        assert healthy_point["value"].shape == (9, 2)
-        assert jnp.allclose(healthy_point["value"][0], jnp.ones((2,)))
+        assert healthy_point.shape == (9, 2)
+        assert jnp.allclose(healthy_point[0], jnp.ones((2,)))
 
     def test_string_shortcut_accepts_batch_initial_duration(
         self, illness_death_model
@@ -600,8 +691,7 @@ class TestSolverEntry:
         )
 
         healthy_point = result["probability"]["healthy"]
-        assert set(healthy_point.keys()) == {"value"}
-        assert healthy_point["value"].shape == (9, 2)
+        assert healthy_point.shape == (9, 2)
 
     def test_integer_shortcut_uses_full_model_state_list(
         self, illness_death_model
@@ -622,12 +712,9 @@ class TestSolverEntry:
         healthy = initial_point["healthy"]
         disabled = initial_point["disabled"]
         dead = initial_point["dead"]
-        assert set(healthy.keys()) == {"value"}
-        assert set(disabled.keys()) == {"value"}
-        assert set(dead.keys()) == {"value"}
-        assert jnp.allclose(healthy["value"][0], jnp.array([1.0, 0.0, 0.0]))
-        assert jnp.allclose(disabled["value"][0], jnp.array([0.0, 1.0, 0.0]))
-        assert jnp.allclose(dead["value"][0], jnp.array([0.0, 0.0, 1.0]))
+        assert jnp.allclose(healthy[0], jnp.array([1.0, 0.0, 0.0]))
+        assert jnp.allclose(disabled[0], jnp.array([0.0, 1.0, 0.0]))
+        assert jnp.allclose(dead[0], jnp.array([0.0, 0.0, 1.0]))
 
     def test_per_individual_distribution_reduces_to_declared_subgraph(
         self, illness_death_model
@@ -870,8 +957,7 @@ class TestBuiltInCallbacks:
         assert "healthy" in full_result["point_mass"]
         assert "disabled" not in full_result["point_mass"]
         assert "dead" not in full_result["point_mass"]
-        assert set(full_result["point_mass"]["healthy"].keys()) == {"value"}
-        assert full_result["point_mass"]["healthy"]["value"].shape == (5, 2)
+        assert full_result["point_mass"]["healthy"].shape == (5, 2)
 
         marginal_components_result = illness_death_model.solve(
             probability="marginal_components", **kwargs
@@ -880,8 +966,7 @@ class TestBuiltInCallbacks:
         assert marginal_components_result["density"].shape == (5, 2, 3)
         marginal_pm = marginal_components_result["point_mass"]
         assert "healthy" in marginal_pm
-        assert set(marginal_pm["healthy"].keys()) == {"value"}
-        assert marginal_pm["healthy"]["value"].shape == (5, 2)
+        assert marginal_pm["healthy"].shape == (5, 2)
 
         state_probability_result = illness_death_model.solve(
             probability="state_probability", **kwargs
@@ -892,8 +977,7 @@ class TestBuiltInCallbacks:
             probability="point_mass", **kwargs
         )["probability"]
         assert set(point_mass_result.keys()) == {"healthy"}
-        assert set(point_mass_result["healthy"].keys()) == {"value"}
-        assert point_mass_result["healthy"]["value"].shape == (5, 2)
+        assert point_mass_result["healthy"].shape == (5, 2)
 
         density_result = illness_death_model.solve(
             probability="density", **kwargs
@@ -912,6 +996,95 @@ class TestBuiltInCallbacks:
 
         disabled_result = illness_death_model.solve(probability=None, **kwargs)
         assert "probability" not in disabled_result
+
+    @pytest.mark.parametrize(
+        "callback_name",
+        [
+            "none",
+            "full",
+            "marginal_components",
+            "state_probability",
+            "point_mass",
+            "density",
+            "density_probability",
+        ],
+    )
+    def test_builtin_callbacks_do_not_recompile_on_repeat(
+        self,
+        illness_death_model,
+        callback_name,
+    ):
+        _midpoint_solver.clear_cache()
+        kwargs = dict(
+            initial="healthy",
+            horizon=1,
+            steps_per_unit=8,
+            record_every=2,
+            age=jnp.arange(2, dtype=jnp.float32),
+        )
+
+        cache_before = _midpoint_solver._cache_size()
+        illness_death_model.solve(probability=callback_name, **kwargs)
+        cache_after_first = _midpoint_solver._cache_size()
+        illness_death_model.solve(probability=callback_name, **kwargs)
+        cache_after_second = _midpoint_solver._cache_size()
+
+        assert cache_after_first == cache_before + 1
+        assert cache_after_second == cache_after_first
+
+    def test_reusing_same_custom_callback_does_not_recompile(
+        self,
+        illness_death_model,
+    ):
+        _midpoint_solver.clear_cache()
+        kwargs = dict(
+            initial="healthy",
+            horizon=1,
+            steps_per_unit=8,
+            record_every=2,
+            age=jnp.arange(2, dtype=jnp.float32),
+        )
+
+        cache_before = _midpoint_solver._cache_size()
+        illness_death_model.solve(
+            probability=_healthy_probability_callback, **kwargs
+        )
+        cache_after_first = _midpoint_solver._cache_size()
+        illness_death_model.solve(
+            probability=_healthy_probability_callback, **kwargs
+        )
+        cache_after_second = _midpoint_solver._cache_size()
+
+        assert cache_after_first == cache_before + 1
+        assert cache_after_second == cache_after_first
+
+    def test_fresh_custom_callback_objects_do_recompile(
+        self,
+        illness_death_model,
+    ):
+        _midpoint_solver.clear_cache()
+        kwargs = dict(
+            initial="healthy",
+            horizon=1,
+            steps_per_unit=8,
+            record_every=2,
+            age=jnp.arange(2, dtype=jnp.float32),
+        )
+
+        def make_callback():
+            def callback(state):
+                return _healthy_probability_callback(state)
+
+            return callback
+
+        cache_before = _midpoint_solver._cache_size()
+        illness_death_model.solve(probability=make_callback(), **kwargs)
+        cache_after_first = _midpoint_solver._cache_size()
+        illness_death_model.solve(probability=make_callback(), **kwargs)
+        cache_after_second = _midpoint_solver._cache_size()
+
+        assert cache_after_first == cache_before + 1
+        assert cache_after_second == cache_after_first + 1
 
     def test_removed_builtin_callbacks_raise_unknown_callback(
         self, illness_death_model
