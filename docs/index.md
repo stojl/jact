@@ -6,6 +6,7 @@ This directory contains the public documentation for `jact`.
 
 - [API specification](api_spec.md): authoritative public API contract.
 - [Example notebook](example_notebook.ipynb): runnable walkthrough of the main workflow.
+- [Autodiff notebook](autodiff_notebook.ipynb): differentiate a terminal present value with respect to an intensity parameter.
 
 ## Maintainer-only material
 
