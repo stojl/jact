@@ -675,9 +675,8 @@ class TestSolverEntry:
         assert "disabled" not in point_result
         assert "dead" not in point_result
         healthy_point = point_result["healthy"]
-        assert set(healthy_point.keys()) == {"value"}
-        assert healthy_point["value"].shape == (9, 2)
-        assert jnp.allclose(healthy_point["value"][0], jnp.ones((2,)))
+        assert healthy_point.shape == (9, 2)
+        assert jnp.allclose(healthy_point[0], jnp.ones((2,)))
 
     def test_string_shortcut_accepts_batch_initial_duration(
         self, illness_death_model
@@ -692,8 +691,7 @@ class TestSolverEntry:
         )
 
         healthy_point = result["probability"]["healthy"]
-        assert set(healthy_point.keys()) == {"value"}
-        assert healthy_point["value"].shape == (9, 2)
+        assert healthy_point.shape == (9, 2)
 
     def test_integer_shortcut_uses_full_model_state_list(
         self, illness_death_model
@@ -714,12 +712,9 @@ class TestSolverEntry:
         healthy = initial_point["healthy"]
         disabled = initial_point["disabled"]
         dead = initial_point["dead"]
-        assert set(healthy.keys()) == {"value"}
-        assert set(disabled.keys()) == {"value"}
-        assert set(dead.keys()) == {"value"}
-        assert jnp.allclose(healthy["value"][0], jnp.array([1.0, 0.0, 0.0]))
-        assert jnp.allclose(disabled["value"][0], jnp.array([0.0, 1.0, 0.0]))
-        assert jnp.allclose(dead["value"][0], jnp.array([0.0, 0.0, 1.0]))
+        assert jnp.allclose(healthy[0], jnp.array([1.0, 0.0, 0.0]))
+        assert jnp.allclose(disabled[0], jnp.array([0.0, 1.0, 0.0]))
+        assert jnp.allclose(dead[0], jnp.array([0.0, 0.0, 1.0]))
 
     def test_per_individual_distribution_reduces_to_declared_subgraph(
         self, illness_death_model
@@ -962,8 +957,7 @@ class TestBuiltInCallbacks:
         assert "healthy" in full_result["point_mass"]
         assert "disabled" not in full_result["point_mass"]
         assert "dead" not in full_result["point_mass"]
-        assert set(full_result["point_mass"]["healthy"].keys()) == {"value"}
-        assert full_result["point_mass"]["healthy"]["value"].shape == (5, 2)
+        assert full_result["point_mass"]["healthy"].shape == (5, 2)
 
         marginal_components_result = illness_death_model.solve(
             probability="marginal_components", **kwargs
@@ -972,8 +966,7 @@ class TestBuiltInCallbacks:
         assert marginal_components_result["density"].shape == (5, 2, 3)
         marginal_pm = marginal_components_result["point_mass"]
         assert "healthy" in marginal_pm
-        assert set(marginal_pm["healthy"].keys()) == {"value"}
-        assert marginal_pm["healthy"]["value"].shape == (5, 2)
+        assert marginal_pm["healthy"].shape == (5, 2)
 
         state_probability_result = illness_death_model.solve(
             probability="state_probability", **kwargs
@@ -984,8 +977,7 @@ class TestBuiltInCallbacks:
             probability="point_mass", **kwargs
         )["probability"]
         assert set(point_mass_result.keys()) == {"healthy"}
-        assert set(point_mass_result["healthy"].keys()) == {"value"}
-        assert point_mass_result["healthy"]["value"].shape == (5, 2)
+        assert point_mass_result["healthy"].shape == (5, 2)
 
         density_result = illness_death_model.solve(
             probability="density", **kwargs

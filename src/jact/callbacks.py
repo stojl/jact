@@ -137,9 +137,9 @@ def _density_probability_callback(state: tuple[StateCarry, ...]):
 def _point_mass_dict(
     state: tuple[StateCarry, ...],
     state_names: tuple[str, ...],
-) -> dict[str, dict[str, jnp.ndarray]]:
+) -> dict[str, jnp.ndarray]:
     return {
-        state_names[i]: {"value": carry.point_mass.value}
+        state_names[i]: carry.point_mass.value
         for i, carry in enumerate(state)
         if carry.point_mass is not None
     }
