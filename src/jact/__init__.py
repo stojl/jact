@@ -49,6 +49,7 @@ from .cashflows import (
 )
 from .initial_distribution import InitialDistribution
 from .model import Model
+from .result import ModelResult
 from .solver import solve
 from .state_space import StateSpace
 
@@ -62,6 +63,7 @@ __all__ = [
     "StateSpace",
     "Model",
     "InitialDistribution",
+    "ModelResult",
     "solve",
     "callbacks",
     "StateRate",

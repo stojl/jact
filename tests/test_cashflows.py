@@ -201,7 +201,7 @@ def test_cashflow_views_accept_rank_zero_array_weight():
         },
     )
 
-    assert jnp.allclose(result["cashflows"]["pv"], jnp.array([1.0]))
+    assert jnp.allclose(result.cashflows["pv"], jnp.array([1.0]))
 
 
 def test_cashflow_views_reject_non_scalar_array_weight():
@@ -240,8 +240,8 @@ def test_empty_cashflow_view_mapping_returns_empty_outputs():
         cashflow_views={},
     )
 
-    assert result["cashflows"] == {}
-    assert "probability" not in result
+    assert result.cashflows == {}
+    assert result.probability is None
 
 
 def test_group_view_members_are_frozen_during_validation():
@@ -284,10 +284,10 @@ def test_state_rate_no_transition_interval_and_terminal_outputs():
         },
     )
 
-    assert "probability" not in result
-    assert result["cashflows"]["premium"].shape == (8, 1)
-    assert jnp.allclose(result["cashflows"]["premium"], 0.5)
-    assert jnp.allclose(result["cashflows"]["pv"], jnp.array([2.0]))
+    assert result.probability is None
+    assert result.cashflows["premium"].shape == (8, 1)
+    assert jnp.allclose(result.cashflows["premium"], 0.5)
+    assert jnp.allclose(result.cashflows["pv"], jnp.array([2.0]))
 
 
 def test_transition_lump_matches_integrated_transition_probability():
@@ -308,7 +308,7 @@ def test_transition_lump_matches_integrated_transition_probability():
     )
 
     expected = benefit * (1.0 - jnp.exp(-rate * 3.0))
-    assert jnp.allclose(result["cashflows"]["death"], expected, atol=2e-4)
+    assert jnp.allclose(result.cashflows["death"], expected, atol=2e-4)
 
 
 def test_state_rate_in_survival_model_uses_midpoint_occupancy():
@@ -329,7 +329,7 @@ def test_state_rate_in_survival_model_uses_midpoint_occupancy():
     )
 
     expected = (1.0 - jnp.exp(-rate * 3.0)) / rate
-    assert jnp.allclose(result["cashflows"]["annuity"], expected, atol=2e-5)
+    assert jnp.allclose(result.cashflows["annuity"], expected, atol=2e-5)
 
 
 def test_constant_intensity_time_duration_state_rate_matches_closed_form():
@@ -363,7 +363,7 @@ def test_constant_intensity_time_duration_state_rate_matches_closed_form():
         (base + duration_coef * initial_duration) * integral_0
         + (time_coef + duration_coef) * integral_1
     )
-    assert jnp.allclose(result["cashflows"]["annuity"], expected, atol=2e-5)
+    assert jnp.allclose(result.cashflows["annuity"], expected, atol=2e-5)
 
 
 def test_point_mass_state_rate_remains_accurate_at_high_resolution_float32():
@@ -397,7 +397,7 @@ def test_point_mass_state_rate_remains_accurate_at_high_resolution_float32():
         (base + duration_coef * initial_duration) * integral_0
         + (time_coef + duration_coef) * integral_1
     )
-    assert jnp.allclose(result["cashflows"]["annuity"], expected, atol=1e-5)
+    assert jnp.allclose(result.cashflows["annuity"], expected, atol=1e-5)
 
 
 def test_time_dependent_intensity_transition_lump_matches_closed_form():
@@ -424,7 +424,7 @@ def test_time_dependent_intensity_transition_lump_matches_closed_form():
 
     cumulative_hazard = base * horizon + 0.5 * time_coef * horizon**2
     expected = benefit * (1.0 - jnp.exp(-cumulative_hazard))
-    assert jnp.allclose(result["cashflows"]["death"], expected, atol=2e-5)
+    assert jnp.allclose(result.cashflows["death"], expected, atol=2e-5)
 
 
 def test_duration_dependent_intensity_cashflows_match_closed_form():
@@ -458,7 +458,7 @@ def test_duration_dependent_intensity_cashflows_match_closed_form():
             "death": jact.Raw("death", terminal=True),
         },
         age=jnp.arange(3.0),
-    )["cashflows"]
+    ).cashflows
 
     cumulative_hazard = _linear_duration_hazard_integral(
         horizon,
@@ -513,7 +513,7 @@ def test_time_duration_dependent_intensity_cashflows_match_closed_form():
             "death": jact.Raw("death", terminal=True),
         },
         age=jnp.arange(2.0),
-    )["cashflows"]
+    ).cashflows
 
     cumulative_hazard = _linear_time_duration_hazard_integral(
         horizon,
@@ -557,7 +557,7 @@ def test_discounted_constant_state_rate_matches_closed_form_present_value():
 
     combined_rate = rate + discount_rate
     expected = payment * (1.0 - jnp.exp(-combined_rate * horizon)) / combined_rate
-    assert jnp.allclose(result["cashflows"]["pv"], expected, atol=3e-5)
+    assert jnp.allclose(result.cashflows["pv"], expected, atol=3e-5)
 
 
 def test_mixed_views_by_state_by_kind_and_weighted_total():
@@ -583,7 +583,7 @@ def test_mixed_views_by_state_by_kind_and_weighted_total():
             "state": jact.ByState(terminal=True),
             "kind": jact.ByKind(terminal=True),
         },
-    )["cashflows"]
+    ).cashflows
 
     raw_sum = result["raw"]["premium"] + result["raw"]["death"]
     assert jnp.allclose(result["total"], raw_sum)
@@ -621,7 +621,7 @@ def test_state_rate_includes_initial_point_mass_duration():
     )
 
     expected = jnp.array([2.5, 5.5])
-    assert jnp.allclose(result["cashflows"]["duration"], expected, atol=1e-6)
+    assert jnp.allclose(result.cashflows["duration"], expected, atol=1e-6)
 
 
 def test_scheduled_event_snapping_individual_times_outside_horizon_and_pre_step():
@@ -648,7 +648,7 @@ def test_scheduled_event_snapping_individual_times_outside_horizon_and_pre_step(
         },
         event_time=jnp.array([0.0, 0.25, 0.49, 2.0]),
         age=jnp.arange(4.0),
-    )["cashflows"]
+    ).cashflows
 
     assert result["bonus"].shape == (4, 4)
     assert jnp.allclose(result["bonus"][0, 0], 7.0)
@@ -684,7 +684,7 @@ def test_scheduled_event_snaps_near_grid_before_flooring():
             -1e-4,
             3.0 - 1e-4,
         ], dtype=jnp.float32),
-    )["cashflows"]["bonus"]
+    ).cashflows["bonus"]
 
     expected = jnp.array([
         [0.0, 0.0, 7.0, 0.0, 0.0],
@@ -708,7 +708,7 @@ def test_probability_none_omits_probability_and_callback_is_rejected():
         probability=None,
         cashflows=cashflows,
     )
-    assert "probability" not in result
+    assert result.probability is None
 
     with pytest.raises(TypeError, match="unexpected keyword argument 'callback'"):
         model.solve(

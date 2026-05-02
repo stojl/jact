@@ -646,8 +646,8 @@ def _run_analytic_correctness_checks(
         age=jnp.arange(batch_size, dtype=dtype),
     )
     _block_until_ready(result)
-    max_abs_diff = float(jnp.max(jnp.abs(result["probability"] - expected)))
-    if not jnp.allclose(result["probability"], expected, atol=1e-2, rtol=0.0):
+    max_abs_diff = float(jnp.max(jnp.abs(result.probability - expected)))
+    if not jnp.allclose(result.probability, expected, atol=1e-2, rtol=0.0):
         raise SystemExit(
             "Analytic correctness failed for illness-death benchmark.\n"
             f"max_abs_diff={max_abs_diff:.3e}"
@@ -697,9 +697,9 @@ def _run_analytic_correctness_checks(
     )
     _block_until_ready(result)
     recorded_expected = expected[::2]
-    max_abs_diff = float(jnp.max(jnp.abs(result["probability"] - recorded_expected)))
+    max_abs_diff = float(jnp.max(jnp.abs(result.probability - recorded_expected)))
     if not jnp.allclose(
-        result["probability"],
+        result.probability,
         recorded_expected,
         atol=2e-3,
         rtol=0.0,
@@ -737,7 +737,7 @@ def _run_e2e_sanity_check(
 
     _block_until_ready(current_result)
 
-    current_probability = current_result["probability"]
+    current_probability = current_result.probability
     if not jnp.all(jnp.isfinite(current_probability)):
         raise SystemExit(
             f"Sanity check failed for topology={topology.name}.\n"
@@ -917,7 +917,7 @@ def _benchmark_cashflows(
     _warmup(run_current, config.warmup_runs)
     result = run_current()
     _block_until_ready(result)
-    cashflow_result = result["cashflows"]
+    cashflow_result = result.cashflows
     if not _all_finite(cashflow_result):
         raise SystemExit(
             f"Cashflow sanity check failed for topology={topology.name} "

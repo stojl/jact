@@ -24,6 +24,7 @@ from .cashflows import (
     validate_cashflow_views,
 )
 from .initial_distribution import InitialDistribution
+from .result import ModelResult
 
 __all__ = ["solve"]
 
@@ -965,7 +966,7 @@ def solve(
     cashflow_views: Mapping[str, Raw | Group | Total | ByState | ByKind] | None = None,
     record_every: int = 1,
     **kwargs: Any,
-) -> dict[str, Any]:
+) -> ModelResult:
     """Compute transition probabilities from a documented initial condition."""
     if "freeze_initial" in kwargs:
         raise TypeError(
@@ -1084,14 +1085,16 @@ def solve(
         prepared_cashflow_components,
         prepared_cashflow_views,
     )
-    if probability_disabled:
-        result.pop("probability", None)
+    probability_out = None if probability_disabled else result["probability"]
+    cashflows_out = None
     if cashflows is not None:
-        result["cashflows"] = _format_cashflow_view_values(
+        cashflows_out = _format_cashflow_view_values(
             result,
             prepared_cashflow_views,
         )
-        result.pop("cashflow_streams", None)
-        result.pop("cashflow_terminal", None)
-    result["states"] = reduced.reachable_states
-    return result
+
+    return ModelResult(
+        states=reduced.reachable_states,
+        probability=probability_out,
+        cashflows=cashflows_out,
+    )

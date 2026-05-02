@@ -380,7 +380,7 @@ Default and validation rules:
 - if `cashflows` is supplied and `cashflow_views` is omitted or `None`, the
   solver uses `{"raw": Raw()}`,
 - if `cashflows is None`, any non-`None` `cashflow_views` is rejected,
-- `cashflow_views={}` is allowed and returns an empty `result["cashflows"]`
+- `cashflow_views={}` is allowed and returns an empty `result.cashflows`
   mapping,
 - view names must be unique non-empty strings,
 - `Raw(name=...)` and `Group(members)` must reference declared component names,
@@ -454,19 +454,26 @@ Initial forms:
 - `initial=InitialDistribution(...)` gives full control over masses, durations,
   and the declared initial-state set used for reduction.
 
-Result keys:
+Result:
+
+`solve()` returns a `ModelResult` dataclass with attribute-only access:
 
 ```python
-result["states"]        # always present
-result["probability"]   # omitted when probability=None
-result["cashflows"]     # omitted when cashflows is None
+result.states         # tuple[str, ...] — always set
+result.probability    # None when probability=None was passed
+result.cashflows      # None when cashflows=None was passed
 ```
 
-`result["states"]` is the tuple of reachable states in reduced order.
-Disabled outputs are omitted entirely rather than filled with `None`.
-`probability="none"` is different from `probability=None`: the string selects a
-callback that returns `None`, while `None` disables probability output and
-omits the key.
+`result.states` is the tuple of reachable states in reduced order. Disabled
+outputs are `None` rather than missing attributes. `probability="none"` is
+different from `probability=None`: the string selects a callback that returns
+`None` per step (so `result.probability` is a stacked tree of `None` leaves),
+while `probability=None` disables probability output and sets
+`result.probability` to `None` itself.
+
+`ModelResult` is registered as a JAX PyTree, so `jax.jit(model.solve)` and
+`jax.tree.map(...)` over the result both work. `states` is treated as static
+aux data; `probability` and `cashflows` are children.
 
 ### Output shapes
 
@@ -512,7 +519,7 @@ Each solver step:
 
 Built-in probability callbacks. Output shapes use `T` for the recorded
 time axis (length `horizon * steps_per_unit / record_every + 1`), `B` for
-batch, `S` for the number of reachable states (in `result["states"]`
+batch, `S` for the number of reachable states (in `result.states`
 order), and `D` for the duration grid:
 
 | Callback | Output |

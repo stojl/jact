@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 from .initial_distribution import InitialDistribution
+from .result import ModelResult
 from .state_space import StateSpace
 
 __all__ = ["Model", "ReducedModel", "TransitionInfo"]
@@ -311,7 +312,7 @@ class Model:
         cashflow_views: Any = None,
         record_every: int = 1,
         **kwargs,
-    ):
+    ) -> ModelResult:
         """Compute transition probabilities from a documented initial condition.
 
         Parameters
@@ -334,7 +335,7 @@ class Model:
             Probability output reducer. Default is
             ``"state_probability"``, which returns a ``(T, batch, S)``
             tensor of per-state occupancy with state-name order given by
-            ``result["states"]``. Other built-in choices are ``"density"``,
+            ``result.states``. Other built-in choices are ``"density"``,
             ``"density_probability"``, ``"point_mass"``,
             ``"marginal_components"``, ``"full"``, and ``"none"``; see
             ``docs/api_spec.md`` for the full output-shape table. Custom
@@ -355,9 +356,11 @@ class Model:
 
         Returns
         -------
-        dict
-            Result dictionary with ``"probability"`` and ``"states"``.
-            Time is the leading axis of every probability leaf.
+        ModelResult
+            Dataclass with ``.states`` (always set), ``.probability``
+            (``None`` when ``probability=None``), and ``.cashflows``
+            (``None`` when ``cashflows=None``). Time is the leading axis
+            of every probability leaf and every streamed cashflow leaf.
         """
         from .solver import solve
 

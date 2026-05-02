@@ -82,8 +82,8 @@ result = model.solve(
     age=ages,
 )
 
-premium_stream = result["cashflows"]["raw"]["premium"]
-present_value = result["cashflows"]["pv_total"]
+premium_stream = result.cashflows["raw"]["premium"]
+present_value = result.cashflows["pv_total"]
 ```
 
 ## Key features

@@ -249,9 +249,9 @@ class TestSolverAgainstClosedForm:
             age=jnp.arange(batch_size, dtype=jnp.float32),
         )
 
-        probability = result["probability"]
+        probability = result.probability
 
-        assert result["states"] == ("healthy", "disabled", "dead")
+        assert result.states == ("healthy", "disabled", "dead")
         assert probability.shape == (times.shape[0], batch_size, 3)
         assert jnp.allclose(
             jnp.sum(probability, axis=-1),
@@ -287,7 +287,7 @@ class TestSolverAutodiff:
                 record_every=4,
                 probability="state_probability",
                 rate=jnp.array([rate_scalar], dtype=jnp.float32),
-            )["probability"]
+            ).probability
             return probability[-1, 0, 1]
 
         grad = jax.grad(loss)(rate)
@@ -306,7 +306,7 @@ class TestSolverAutodiff:
                 steps_per_unit=8,
                 probability="state_probability",
                 rate=jnp.array([rate_scalar], dtype=jnp.float32),
-            )["probability"]
+            ).probability
             return probability[-1, 0, 1]
 
         primal, tangent = jax.jvp(loss, (rate,), (jnp.array(1.0, dtype=rate.dtype),))
@@ -330,7 +330,7 @@ class TestSolverAutodiff:
                 record_every=4,
                 probability=_healthy_probability_callback,
                 rate=jnp.array([rate_scalar], dtype=jnp.float32),
-            )["probability"]
+            ).probability
             return probability[-1, 0]
 
         grad = jax.grad(loss)(rate)
@@ -368,9 +368,10 @@ class TestSolverAutodiff:
             probability="state_probability",
             age=jnp.arange(batch_size, dtype=jnp.float32),
         )
-        probability = result["probability"]
+        probability = result.probability
+        assert probability is not None
 
-        assert result["states"] == ("a", "b")
+        assert result.states == ("a", "b")
         assert probability.shape == (times.shape[0], batch_size, 2)
         assert jnp.allclose(
             jnp.sum(probability, axis=-1),
@@ -465,9 +466,9 @@ class TestSolverContinuityAndStability:
             probability="state_probability",
             age=jnp.arange(batch_size, dtype=jnp.float32),
         )
-        probability = result["probability"]
+        probability = result.probability
 
-        assert result["states"] == ("healthy", "disabled", "dead")
+        assert result.states == ("healthy", "disabled", "dead")
         assert probability.shape == expected.shape
         assert jnp.allclose(probability, expected, atol=2.5e-2, rtol=0.0)
 
@@ -496,9 +497,9 @@ class TestSolverContinuityAndStability:
             age=jnp.arange(batch_size, dtype=jnp.float32),
         )
 
-        probability = result["probability"]
+        probability = result.probability
 
-        assert result["states"] == ("healthy", "disabled", "dead")
+        assert result.states == ("healthy", "disabled", "dead")
         assert probability.shape == expected.shape
         assert jnp.allclose(probability, expected, atol=9e-3, rtol=0.0)
 
@@ -523,7 +524,8 @@ class TestSolverContinuityAndStability:
             steps_per_unit=4,
             probability="state_probability",
             age=jnp.arange(2, dtype=jnp.float32),
-        )["probability"]
+        ).probability
+        assert result is not None
 
         step_hazards = jnp.array([0.05, 0.05, 0.2, 0.2], dtype=jnp.float32)
         expected_survival = jnp.concatenate(
@@ -552,7 +554,8 @@ class TestSolverContinuityAndStability:
             steps_per_unit=6,
             probability="state_probability",
             age=jnp.arange(3, dtype=jnp.float32),
-        )["probability"]
+        ).probability
+        assert probability is not None
 
         assert jnp.all(jnp.isfinite(probability))
         assert jnp.allclose(probability[..., 0], 1.0, atol=1e-7, rtol=0.0)
@@ -587,7 +590,8 @@ class TestSolverContinuityAndStability:
             steps_per_unit=4,
             probability="state_probability",
             age=jnp.arange(2, dtype=jnp.float32),
-        )["probability"]
+        ).probability
+        assert probability is not None
 
         assert jnp.all(jnp.isfinite(probability))
         assert jnp.all(probability >= 0.0)
@@ -621,9 +625,9 @@ class TestSolverContinuityAndStability:
             age=jnp.arange(batch_size, dtype=jnp.float32),
         )
 
-        probability = result["probability"]
+        probability = result.probability
 
-        assert result["states"] == ("disabled", "dead")
+        assert result.states == ("disabled", "dead")
         assert probability.shape == (times.shape[0], batch_size, 2)
         assert jnp.allclose(
             jnp.sum(probability, axis=-1),
@@ -669,8 +673,8 @@ class TestSolverEntry:
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
-        point_result = result["probability"]
-        assert result["states"] == ("healthy", "disabled", "dead")
+        point_result = result.probability
+        assert result.states == ("healthy", "disabled", "dead")
         assert "healthy" in point_result
         assert "disabled" not in point_result
         assert "dead" not in point_result
@@ -690,7 +694,7 @@ class TestSolverEntry:
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
-        healthy_point = result["probability"]["healthy"]
+        healthy_point = result.probability["healthy"]
         assert healthy_point.shape == (9, 2)
 
     def test_integer_shortcut_uses_full_model_state_list(
@@ -706,8 +710,8 @@ class TestSolverEntry:
             age=jnp.arange(3, dtype=jnp.float32),
         )
 
-        initial_point = result["probability"]
-        assert result["states"] == ("healthy", "disabled", "dead")
+        initial_point = result.probability
+        assert result.states == ("healthy", "disabled", "dead")
         assert set(initial_point.keys()) == {"healthy", "disabled", "dead"}
         healthy = initial_point["healthy"]
         disabled = initial_point["disabled"]
@@ -733,8 +737,8 @@ class TestSolverEntry:
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
-        assert result["states"] == ("healthy", "disabled", "dead")
-        assert set(result["probability"].keys()) == {"healthy", "disabled"}
+        assert result.states == ("healthy", "disabled", "dead")
+        assert set(result.probability.keys()) == {"healthy", "disabled"}
 
     def test_mixture_initial_distribution_reduces_to_declared_subgraph(
         self, illness_death_model
@@ -756,8 +760,8 @@ class TestSolverEntry:
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
-        assert result["states"] == ("disabled", "dead")
-        assert result["probability"].shape == (9, 2, 2)
+        assert result.states == ("disabled", "dead")
+        assert result.probability.shape == (9, 2, 2)
 
     def test_initial_duration_is_rejected_for_initial_distribution(
         self, illness_death_model
@@ -872,9 +876,9 @@ class TestSolverEntry:
             age=jnp.arange(1, dtype=jnp.float32),
         )
 
-        probability = result["probability"]
+        probability = result.probability
 
-        assert result["states"] == ("healthy", "dead")
+        assert result.states == ("healthy", "dead")
         assert probability.shape == (times.shape[0], 1, 2)
         assert jnp.allclose(
             probability[:, 0, :],
@@ -924,9 +928,9 @@ class TestSolverEntry:
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
-        probability = result["probability"]
+        probability = result.probability
 
-        assert result["states"] == ("healthy", "disabled", "dead")
+        assert result.states == ("healthy", "disabled", "dead")
         assert probability.shape == (times.shape[0], 2, 3)
         assert jnp.allclose(probability, expected, atol=1e-3, rtol=0.0)
         assert jnp.allclose(
@@ -951,7 +955,7 @@ class TestBuiltInCallbacks:
 
         full_result = illness_death_model.solve(
             probability="full", **kwargs
-        )["probability"]
+        ).probability
         assert set(full_result.keys()) == {"density", "point_mass"}
         assert full_result["density"].shape == (5, 2, 3, 8)
         assert "healthy" in full_result["point_mass"]
@@ -961,7 +965,7 @@ class TestBuiltInCallbacks:
 
         marginal_components_result = illness_death_model.solve(
             probability="marginal_components", **kwargs
-        )["probability"]
+        ).probability
         assert set(marginal_components_result.keys()) == {"density", "point_mass"}
         assert marginal_components_result["density"].shape == (5, 2, 3)
         marginal_pm = marginal_components_result["point_mass"]
@@ -970,32 +974,32 @@ class TestBuiltInCallbacks:
 
         state_probability_result = illness_death_model.solve(
             probability="state_probability", **kwargs
-        )["probability"]
+        ).probability
         assert state_probability_result.shape == (5, 2, 3)
 
         point_mass_result = illness_death_model.solve(
             probability="point_mass", **kwargs
-        )["probability"]
+        ).probability
         assert set(point_mass_result.keys()) == {"healthy"}
         assert point_mass_result["healthy"].shape == (5, 2)
 
         density_result = illness_death_model.solve(
             probability="density", **kwargs
-        )["probability"]
+        ).probability
         assert density_result.shape == (5, 2, 3, 8)
 
         density_probability_result = illness_death_model.solve(
             probability="density_probability", **kwargs
-        )["probability"]
+        ).probability
         assert density_probability_result.shape == (5, 2, 3)
 
         none_result = illness_death_model.solve(
             probability="none", **kwargs
-        )["probability"]
+        ).probability
         assert none_result is None
 
         disabled_result = illness_death_model.solve(probability=None, **kwargs)
-        assert "probability" not in disabled_result
+        assert disabled_result.probability is None
 
     @pytest.mark.parametrize(
         "callback_name",
@@ -1103,3 +1107,64 @@ class TestBuiltInCallbacks:
             illness_death_model.solve(
                 probability="point_only_no_duration", **kwargs
             )
+
+
+class TestModelResultIsPyTree:
+    """`ModelResult` must remain a registered PyTree so users can
+    `jax.jit(model.solve)` and `jax.tree.map` over the result.
+    """
+
+    def _kwargs(self):
+        return dict(
+            initial="healthy",
+            horizon=1,
+            steps_per_unit=8,
+            age=jnp.arange(2, dtype=jnp.float32),
+        )
+
+    def test_jit_round_trip_returns_model_result(self, illness_death_model):
+        kwargs = self._kwargs()
+        out = jax.jit(lambda: illness_death_model.solve(**kwargs))()
+        assert isinstance(out, jact.ModelResult)
+        assert out.states == ("healthy", "disabled", "dead")
+        assert out.probability.shape == (9, 2, 3)
+        assert out.cashflows is None
+
+    def test_jit_round_trip_with_cashflows(self, illness_death_model):
+        kwargs = self._kwargs()
+        cashflows = illness_death_model.state_space.cashflows(
+            {"annuity": jact.StateRate({"healthy": _constant_payment(1.0)})}
+        )
+        out = jax.jit(
+            lambda: illness_death_model.solve(
+                cashflows=cashflows,
+                cashflow_views={"annuity": jact.Raw("annuity")},
+                **kwargs,
+            )
+        )()
+        assert isinstance(out, jact.ModelResult)
+        assert out.cashflows["annuity"].shape == (8, 2)
+
+    def test_jit_round_trip_with_disabled_probability(
+        self, illness_death_model
+    ):
+        kwargs = self._kwargs()
+        out = jax.jit(
+            lambda: illness_death_model.solve(probability=None, **kwargs)
+        )()
+        assert isinstance(out, jact.ModelResult)
+        assert out.probability is None
+
+    def test_tree_map_reaches_array_leaves(self, illness_death_model):
+        out = illness_death_model.solve(**self._kwargs())
+        doubled = jax.tree.map(lambda x: x * 2, out)
+        assert isinstance(doubled, jact.ModelResult)
+        assert doubled.states == out.states
+        assert jnp.allclose(doubled.probability, out.probability * 2)
+
+
+def _constant_payment(amount: float):
+    def fn(t, d, **kwargs):
+        return jnp.full_like(d, amount)
+
+    return fn

@@ -120,9 +120,9 @@ class TestInitialDistributionSolveIntegration:
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
-        point_result = result["probability"]
+        point_result = result.probability
 
-        assert result["states"] == ("healthy", "disabled", "dead")
+        assert result.states == ("healthy", "disabled", "dead")
         assert "healthy" in point_result
         assert "disabled" not in point_result
         assert "dead" not in point_result
@@ -154,9 +154,9 @@ class TestInitialDistributionSolveIntegration:
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
-        point_result = result["probability"]
+        point_result = result.probability
 
-        assert result["states"] == state_space.states
+        assert result.states == state_space.states
         assert set(point_result.keys()) == {"healthy", "disabled", "dead"}
         assert point_result["healthy"].shape == (5, 2)
         assert point_result["disabled"].shape == (5, 2)
@@ -188,9 +188,9 @@ class TestInitialDistributionSolveIntegration:
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
-        point_result = result["probability"]
+        point_result = result.probability
 
-        assert result["states"] == ("healthy", "disabled", "dead")
+        assert result.states == ("healthy", "disabled", "dead")
         assert set(point_result.keys()) == {"healthy", "disabled"}
         assert point_result["healthy"].shape == (5, 2)
         assert point_result["disabled"].shape == (5, 2)
