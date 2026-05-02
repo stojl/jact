@@ -318,12 +318,14 @@ class Model:
         Parameters
         ----------
         initial : str, (batch,) int array, or InitialDistribution
-            Initial condition. ``str`` means all individuals start in
-            that state; a ``(batch,)`` integer array gives per-individual
-            initial-state indices into the full model state list; an
-            ``InitialDistribution`` gives full control over per-state
-            mass and duration and declares the structural initial-state
-            set used for model reduction.
+            Initial condition. ``str`` is shorthand for one declared
+            structural initial state with all mass there and duration
+            ``initial_duration``. A ``(batch,)`` integer array is
+            shorthand for per-individual initial-state indices into the
+            full model state list. An ``InitialDistribution`` separates
+            the structural initial-state declaration from the runtime
+            mass and duration values within it; model reduction follows
+            the declared structural set, not runtime mass support.
         horizon : int
             Number of time units to solve over.
         steps_per_unit : int

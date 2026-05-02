@@ -308,6 +308,12 @@ class StateSpace:
         state: str,
         duration: Any = 0.0,
     ) -> InitialDistribution:
+        """Create an explicit one-state `InitialDistribution`.
+
+        The returned distribution declares `state` structurally as the only
+        initial state. `duration` is runtime data within that one-state
+        structure.
+        """
         self._check_state(state)
         return InitialDistribution.at(state, duration=duration)
 
@@ -316,6 +322,12 @@ class StateSpace:
         components: Dict[str, Dict[str, Any]],
         normalise: bool = True,
     ) -> InitialDistribution:
+        """Create a validated multi-state `InitialDistribution`.
+
+        The keys of `components` are the declared structural initial-state set.
+        Runtime mass values do not shrink that set, so a zero-mass key still
+        remains structurally declared.
+        """
         for state in components:
             self._check_state(state)
         return InitialDistribution(components=components, normalise=normalise)
@@ -328,6 +340,13 @@ class StateSpace:
         duration: Any = 0.0,
         initial_states: Optional[Sequence[str]] = None,
     ) -> InitialDistribution:
+        """Create a per-individual `InitialDistribution` with eager validation.
+
+        If `initial_states` is supplied, per-individual indices refer to that
+        declared tuple. Otherwise they refer to the full model state list. In
+        both modes, reduction follows the declared structural set rather than
+        realized runtime index values.
+        """
         if (state_names is None) == (state_indices is None):
             raise ValueError(
                 "Exactly one of state_names or state_indices must be provided."

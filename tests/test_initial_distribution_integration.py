@@ -215,6 +215,32 @@ class TestInitialDistributionSolveIntegration:
         assert jnp.array_equal(canonical.masses[0], jnp.asarray(0.0))
         assert jnp.array_equal(canonical.masses[1], jnp.asarray(0.0))
 
+    def test_zero_mass_declared_state_still_appears_in_point_mass_output(
+        self, illness_death
+    ):
+        _, model = illness_death
+        dist = jact.InitialDistribution(
+            components={
+                "healthy": {"mass": 1.0, "duration": 0.0},
+                "disabled": {"mass": 0.0, "duration": 2.0},
+            }
+        )
+
+        result = model.solve(
+            initial=dist,
+            horizon=1,
+            steps_per_unit=4,
+            probability="point_mass",
+            age=jnp.arange(1, dtype=jnp.float32),
+        )
+
+        point_result = result.probability
+
+        assert result.states == ("healthy", "disabled", "dead")
+        assert set(point_result.keys()) == {"healthy", "disabled"}
+        assert jnp.allclose(point_result["healthy"][0], jnp.array([1.0]))
+        assert jnp.allclose(point_result["disabled"][0], jnp.array([0.0]))
+
     def test_initial_distribution_batch_mismatch_fails_at_solver_entry(
         self, illness_death
     ):

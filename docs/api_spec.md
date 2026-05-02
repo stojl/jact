@@ -146,10 +146,51 @@ TransitionInfo(source, target, assignment, callable, index)
 
 ## InitialDistribution
 
-`InitialDistribution` encodes the joint `(state, duration)` distribution at
-`t = 0`.
+`InitialDistribution` has two jobs at `t = 0`:
 
-Construction:
+1. declare the structural initial-state set,
+2. provide the runtime `(state, duration)` distribution within that set.
+
+That structural set drives model reduction. Reduction follows the states
+declared by construction:
+
+- the keys of `components`,
+- the state passed to `at()`,
+- the `initial_states` tuple passed to `per_individual()`,
+- or the model's full state list when `per_individual(initial_states=None)`.
+
+Runtime masses and runtime index values never shrink that structure. A declared
+state with zero mass still remains part of the structural initial-state set.
+
+Teach the constructors as a ladder from simple to powerful:
+
+### 1. Single-state shorthand at solve entry
+
+```python
+model.solve(initial="healthy", horizon=30, steps_per_unit=12, ...)
+```
+
+This is the simplest entry path:
+
+- one declared structural initial state,
+- all mass starts there,
+- duration is zero unless `initial_duration` is supplied.
+
+It is convenience syntax for the explicit single-state form below.
+
+### 2. Single-state explicit form
+
+```python
+jact.InitialDistribution.at("healthy", duration=2.0)
+```
+
+This exposes the object model directly:
+
+- one declared structural initial state,
+- one runtime duration assignment,
+- reduction follows the declared state `"healthy"`.
+
+### 3. Mixture over declared initial states
 
 ```python
 jact.InitialDistribution(
@@ -159,9 +200,27 @@ jact.InitialDistribution(
     },
     normalise=True,
 )
+```
 
-jact.InitialDistribution.at("healthy", duration=0.0)
+Here the state names are the declared structural initial-state set. `mass` and
+`duration` are runtime numeric values attached to those states.
 
+### 4. Per-individual indices into a declared initial-state tuple
+
+```python
+jact.InitialDistribution.per_individual(
+    states=idx_array,
+    duration=d_0_array,
+    initial_states=("healthy", "disabled"),
+)
+```
+
+`states` does not name model states directly in this mode. It indexes into the
+declared `initial_states` tuple, and reduction follows that tuple.
+
+### 5. Per-individual indices into the full model state list
+
+```python
 jact.InitialDistribution.per_individual(
     states=idx_array,
     duration=d_0_array,
@@ -169,7 +228,10 @@ jact.InitialDistribution.per_individual(
 )
 ```
 
-Key rules:
+`initial_states=None` changes what the indices mean: they now refer to the
+model's full state list, so no reduction is performed.
+
+Core rules:
 
 - `mass` and `duration` values may be scalars or `(batch,)` arrays.
 - masses are normalised per individual by default.
@@ -178,12 +240,30 @@ Key rules:
   and the solver reduces to the union of states reachable from it.
 - `per_individual.initial_states=None` means the indices are into the model's
   full state list and no reduction is performed.
-- the declared initial-state set is structural. It is the keys of
-  `components`, the state passed to `at()`, or the `initial_states` tuple on
-  `per_individual()`. It is never inferred from runtime masses or runtime index
-  values.
-- declaring a state with zero mass still keeps that state in the structural
-  initial-state set.
+
+Reduction example:
+
+```python
+initial = jact.InitialDistribution(
+    components={
+        "healthy": {"mass": 1.0, "duration": 0.0},
+        "disabled": {"mass": 0.0, "duration": 2.0},
+    }
+)
+```
+
+`"disabled"` is still part of the declared structural initial-state set even
+though its runtime mass is zero, so reduction still follows the declared keys
+`("healthy", "disabled")`.
+
+Common confusions:
+
+- Zero mass does not remove a declared state.
+- Declared states are not inferred from runtime mass support.
+- `per_individual(initial_states=(...))` and
+  `per_individual(initial_states=None)` use different index spaces.
+- `initial="healthy"` and `InitialDistribution.at("healthy", ...)` are the same
+  model of the world; one is shorthand and the other is explicit.
 
 State-space helpers perform eager name validation:
 
