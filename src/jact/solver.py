@@ -9,7 +9,6 @@ from typing import Any, Callable, Dict, Mapping, NamedTuple, Sequence, Union
 import jax
 import jax.numpy as jnp
 
-from .callbacks import PointMass, StateCarry, resolve_callback
 from .cashflows import (
     ByKind,
     ByState,
@@ -24,6 +23,14 @@ from .cashflows import (
     validate_cashflow_views,
 )
 from .initial_distribution import InitialDistribution
+from .probability import (
+    ProbabilityOutput,
+    StateCarry,
+    StateProbability,
+    _PointMass,
+    resolve_callback,
+)
+from .result import ModelResult
 
 __all__ = ["solve"]
 
@@ -92,7 +99,7 @@ def _dense_state_to_tuple(
     for i, has_point_mass in enumerate(point_mask):
         point_mass = None
         if has_point_mass:
-            point_mass = PointMass(
+            point_mass = _PointMass(
                 value=point_values[i],
                 d_0=point_d_0[i],
                 log_value=point_log_values[i],
@@ -806,8 +813,8 @@ def _seed_point_mass(
     mass: Any,
     duration: Any,
     batch_size: int,
-) -> PointMass:
-    return PointMass(
+) -> _PointMass:
+    return _PointMass(
         value=_broadcast_batch(mass, batch_size),
         d_0=_broadcast_batch(duration, batch_size),
     )
@@ -960,12 +967,12 @@ def solve(
     horizon: int,
     steps_per_unit: int,
     initial_duration: Any = 0.0,
-    probability: Union[None, str, Callable] = "state_probability",
+    probability: Union[None, ProbabilityOutput, Callable] = StateProbability(),
     cashflows: CashflowDeclaration | None = None,
     cashflow_views: Mapping[str, Raw | Group | Total | ByState | ByKind] | None = None,
     record_every: int = 1,
     **kwargs: Any,
-) -> dict[str, Any]:
+) -> ModelResult:
     """Compute transition probabilities from a documented initial condition."""
     if "freeze_initial" in kwargs:
         raise TypeError(
@@ -1084,14 +1091,16 @@ def solve(
         prepared_cashflow_components,
         prepared_cashflow_views,
     )
-    if probability_disabled:
-        result.pop("probability", None)
+    probability_out = None if probability_disabled else result["probability"]
+    cashflows_out = None
     if cashflows is not None:
-        result["cashflows"] = _format_cashflow_view_values(
+        cashflows_out = _format_cashflow_view_values(
             result,
             prepared_cashflow_views,
         )
-        result.pop("cashflow_streams", None)
-        result.pop("cashflow_terminal", None)
-    result["states"] = reduced.reachable_states
-    return result
+
+    return ModelResult(
+        states=reduced.reachable_states,
+        probability=probability_out,
+        cashflows=cashflows_out,
+    )

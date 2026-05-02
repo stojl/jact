@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 from .initial_distribution import InitialDistribution
+from .probability import ProbabilityOutput, StateProbability
+from .result import ModelResult
 from .state_space import StateSpace
 
 __all__ = ["Model", "ReducedModel", "TransitionInfo"]
@@ -306,23 +308,25 @@ class Model:
         horizon: int,
         steps_per_unit: int,
         initial_duration: Any = 0.0,
-        probability: Union[None, str, Callable] = "state_probability",
+        probability: Union[None, ProbabilityOutput, Callable] = StateProbability(),
         cashflows: Any = None,
         cashflow_views: Any = None,
         record_every: int = 1,
         **kwargs,
-    ):
+    ) -> ModelResult:
         """Compute transition probabilities from a documented initial condition.
 
         Parameters
         ----------
         initial : str, (batch,) int array, or InitialDistribution
-            Initial condition. ``str`` means all individuals start in
-            that state; a ``(batch,)`` integer array gives per-individual
-            initial-state indices into the full model state list; an
-            ``InitialDistribution`` gives full control over per-state
-            mass and duration and declares the structural initial-state
-            set used for model reduction.
+            Initial condition. ``str`` is shorthand for one declared
+            structural initial state with all mass there and duration
+            ``initial_duration``. A ``(batch,)`` integer array is
+            shorthand for per-individual initial-state indices into the
+            full model state list. An ``InitialDistribution`` separates
+            the structural initial-state declaration from the runtime
+            mass and duration values within it; model reduction follows
+            the declared structural set, not runtime mass support.
         horizon : int
             Number of time units to solve over.
         steps_per_unit : int
@@ -330,13 +334,13 @@ class Model:
         initial_duration : float or (batch,) array, optional
             Per-individual ``d_0`` for the ``str`` and ``(batch,)``
             shorthand forms of ``initial``. Default is ``0.0``.
-        probability : str, callable, or None, optional
+        probability : ProbabilityOutput, callable, or None, optional
             Probability output reducer. Default is
-            ``"state_probability"``, which returns a ``(T, batch, S)``
-            tensor of per-state occupancy with state-name order given by
-            ``result["states"]``. Other built-in choices are ``"density"``,
-            ``"density_probability"``, ``"point_mass"``,
-            ``"marginal_components"``, ``"full"``, and ``"none"``; see
+            ``jact.probability.StateProbability()``, which returns a
+            ``(T, batch, S)`` tensor of per-state occupancy with state-name
+            order given by ``result.states``. Other built-in choices are
+            ``jact.probability.Density()``, ``DensityProbability()``,
+            ``PointMass()``, ``MarginalComponents()``, and ``Full()``; see
             ``docs/api_spec.md`` for the full output-shape table. Custom
             callables receive ``tuple[StateCarry, ...]`` and may return any
             PyTree, which is stacked along the leading time axis. ``None``
@@ -355,9 +359,11 @@ class Model:
 
         Returns
         -------
-        dict
-            Result dictionary with ``"probability"`` and ``"states"``.
-            Time is the leading axis of every probability leaf.
+        ModelResult
+            Dataclass with ``.states`` (always set), ``.probability``
+            (``None`` when ``probability=None``), and ``.cashflows``
+            (``None`` when ``cashflows=None``). Time is the leading axis
+            of every probability leaf and every streamed cashflow leaf.
         """
         from .solver import solve
 

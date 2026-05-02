@@ -6,8 +6,8 @@ This file provides guidance to coding agents when working with code in this repo
 
 ```bash
 pip install -e ".[dev]"           # install with dev deps (pyright, ruff, pytest)
-pyright jact                      # type check public API
-ruff check jact                   # lint (imports, style, unused code)
+pyright                           # type check (uses pyproject include = src/jact, tests)
+ruff check src/jact               # lint (imports, style, unused code)
 pytest                            # run all tests
 pytest tests/test_state_space.py  # run one file
 pytest -k test_reachable_from     # run tests matching a name
@@ -17,7 +17,7 @@ pytest -x                         # stop on first failure
 **Quality checks:**
 - **pyright** (basic mode) catches type mismatches and undefined names
 - **ruff** enforces import order, detects unused code, and flags common errors
-- Run both before committing: `pyright jact && ruff check jact`
+- Run both before committing: `pyright && ruff check src/jact`
 
 ## Architecture
 
@@ -38,6 +38,9 @@ specification in the repo.
 - `solve()` reduces to the reachable subgraph, advances one `StateCarry` per
   reachable state with midpoint quadrature, and can emit probability output and
   cashflows together.
+- `solve()` returns a `ModelResult` dataclass with attribute access
+  (`result.states`, `result.probability`, `result.cashflows`). It is registered
+  as a JAX PyTree, with `states` as static aux data.
 - Cashflows are declared from a `StateSpace` and aggregated per solve through
   `cashflow_views`. Streamed cashflows use interval accumulation; probability
   output uses snapshot semantics.
@@ -49,18 +52,27 @@ specification in the repo.
 - `archive/original_prototype/` and `notes/` are background material, not API.
 - Time is the leading axis of every probability leaf and every streamed
   cashflow leaf. Terminal cashflow leaves drop the time axis entirely.
-- `probability=None` omits the `"probability"` key. `cashflows=None` omits the
-  `"cashflows"` key.
+- `probability=None` sets `result.probability` to `None`; `cashflows=None`
+  sets `result.cashflows` to `None`.
+- The `probability` kwarg accepts a `jact.probability.*` output type
+  (`StateProbability`, `DensityProbability`, `Density`, `PointMass`,
+  `MarginalComponents`, `Full`), a custom callable
+  `(state) -> PyTree`, or `None`. Strings are rejected.
+- Public types live under two submodules: `jact.cashflows` (declarations
+  and views) and `jact.probability` (output reducers). The top level only
+  exposes `StateSpace`, `Model`, `InitialDistribution`, `ModelResult`,
+  `solve`, and the two submodules. There are no flat aliases.
 - If `cashflows` is supplied and `cashflow_views` is omitted or `None`, the
-  solver defaults to `{"raw": Raw()}`. `cashflow_views={}` is allowed and
-  returns an empty mapping.
+  solver defaults to `{"raw": jact.cashflows.Raw()}`. `cashflow_views={}`
+  is allowed and returns an empty mapping.
 - Cashflow view weights are plain user-supplied scalars or callables evaluated
   at each inner-step midpoint. Discount construction belongs in caller code.
 - Reserved covariate names `initial` and `initial_duration` are rejected, as
   are legacy kwargs `callback` and `freeze_initial`.
-- `collapse_point_no_duration` is the canonical compact probability output for
-  actuarial work. Pick `probability` and `record_every` before scaling batch
-  size.
+- `jact.probability.StateProbability()` is the default probability reducer
+  and the canonical compact output for actuarial work (continuous density
+  marginalized over duration plus point-mass occupancy, summed per state).
+  Pick `probability` and `record_every` before scaling batch size.
 - `archive/original_prototype/prototype_8.py` is historical reference code for
   solver behavior, not public API.
 - Python >= 3.10 is required.

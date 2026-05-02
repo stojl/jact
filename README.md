@@ -55,8 +55,8 @@ def death_benefit(t, d, *, age):
 
 cashflows = state_space.cashflows(
     {
-        "premium": jact.StateRate({"healthy": annual_premium}),
-        "death_benefit": jact.TransitionLump(
+        "premium": jact.cashflows.StateRate({"healthy": annual_premium}),
+        "death_benefit": jact.cashflows.TransitionLump(
             {
                 ("healthy", "dead"): death_benefit,
                 ("disabled", "dead"): death_benefit,
@@ -73,8 +73,8 @@ result = model.solve(
     probability=None,
     cashflows=cashflows,
     cashflow_views={
-        "raw": jact.Raw(),
-        "pv_total": jact.Total(
+        "raw": jact.cashflows.Raw(),
+        "pv_total": jact.cashflows.Total(
             weight=lambda t, **kwargs: jnp.exp(-0.03 * t),
             terminal=True,
         ),
@@ -82,8 +82,8 @@ result = model.solve(
     age=ages,
 )
 
-premium_stream = result["cashflows"]["raw"]["premium"]
-present_value = result["cashflows"]["pv_total"]
+premium_stream = result.cashflows["raw"]["premium"]
+present_value = result.cashflows["pv_total"]
 ```
 
 ## Key features
@@ -108,11 +108,19 @@ For a fitting-to-solver workflow with neural-network intensities, see the
 
 ## Namespace
 
-The recommended user API is the top-level `jact` namespace:
-`jact.StateSpace`, `jact.InitialDistribution`, `jact.solve`, and the
-cashflow declarations such as `jact.StateRate` and `jact.Total`.
-Advanced callback state objects remain available from submodules, for
-example `jact.callbacks.PointMass` and `jact.model.ReducedModel`.
+The top-level `jact` namespace exposes the core types: `jact.StateSpace`,
+`jact.Model`, `jact.InitialDistribution`, `jact.ModelResult`, and
+`jact.solve`. Domain types live under two submodules:
+
+- `jact.cashflows` for declarations and views (`StateRate`,
+  `TransitionLump`, `ScheduledEvent`, `Raw`, `Group`, `Total`, `ByState`,
+  `ByKind`).
+- `jact.probability` for output reducers (`StateProbability`,
+  `DensityProbability`, `Density`, `PointMass`, `MarginalComponents`,
+  `Full`).
+
+Advanced inspection types stay in private modules — for example
+`jact.probability.StateCarry` and `jact.model.ReducedModel`.
 
 ## Installation
 

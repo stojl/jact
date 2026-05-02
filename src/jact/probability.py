@@ -1,7 +1,14 @@
-"""Probability callbacks for extracting results from the solver state."""
+"""Probability output types and dispatch.
+
+The public surface is six frozen-dataclass output types
+(``StateProbability``, ``DensityProbability``, ``Density``, ``PointMass``,
+``MarginalComponents``, ``Full``) plus the ``ProbabilityOutput`` union and
+support for arbitrary user-supplied callables.
+"""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Callable, NamedTuple, Union
 
@@ -9,13 +16,14 @@ import jax
 import jax.numpy as jnp
 
 __all__ = [
-    "density",
-    "density_probability",
-    "full",
-    "marginal_components",
-    "none_callback",
-    "point_mass",
-    "state_probability",
+    "StateProbability",
+    "DensityProbability",
+    "Density",
+    "PointMass",
+    "MarginalComponents",
+    "Full",
+    "ProbabilityOutput",
+    "CallbackFn",
     "resolve_callback",
 ]
 
@@ -48,11 +56,11 @@ def _validate_non_negative_if_concrete(value: jnp.ndarray) -> None:
 
 
 @jax.tree_util.register_pytree_node_class
-class PointMass:
+class _PointMass:
     """Per-individual point mass carried along a characteristic.
 
     Internal solver pytree; not part of the public output surface. The
-    user-facing callbacks expose point-mass data as plain dicts.
+    user-facing reducers expose point-mass data as plain dicts.
     """
 
     __slots__ = ("value", "d_0", "log_value")
@@ -96,10 +104,80 @@ class StateCarry(NamedTuple):
     """
 
     density: jnp.ndarray
-    point_mass: PointMass | None
+    point_mass: _PointMass | None
 
 
 CallbackFn = Callable[[tuple[StateCarry, ...]], Any]
+
+
+# --------------------------------------------------------------------------- #
+# Public output types                                                         #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class StateProbability:
+    """Total state occupancy after marginalizing over duration.
+
+    Returns a ``(T, B, S)`` tensor of duration-marginal density plus
+    point-mass value per state.
+    """
+
+
+@dataclass(frozen=True)
+class DensityProbability:
+    """Duration-marginal density per state, stacked into a tensor.
+
+    Returns a ``(T, B, S)`` tensor; excludes point masses.
+    """
+
+
+@dataclass(frozen=True)
+class Density:
+    """Absolutely continuous duration density per state, stacked.
+
+    Returns a ``(T, B, S, D)`` tensor of raw duration density per state.
+    """
+
+
+@dataclass(frozen=True)
+class PointMass:
+    """Point-mass component per state, keyed by state name.
+
+    Returns ``{state_name: (T, B)}``, including only states that carry a
+    point mass.
+    """
+
+
+@dataclass(frozen=True)
+class MarginalComponents:
+    """Duration-marginal density per state plus point masses.
+
+    Returns ``{"density": (T, B, S), "point_mass": {state_name: (T, B)}}``.
+    """
+
+
+@dataclass(frozen=True)
+class Full:
+    """Per-state duration density and point masses, keyed by state name.
+
+    Returns ``{"density": (T, B, S, D), "point_mass": {state_name: (T, B)}}``.
+    """
+
+
+ProbabilityOutput = Union[
+    StateProbability,
+    DensityProbability,
+    Density,
+    PointMass,
+    MarginalComponents,
+    Full,
+]
+
+
+# --------------------------------------------------------------------------- #
+# Internal jit'd reducer implementations                                      #
+# --------------------------------------------------------------------------- #
 
 
 @jax.jit
@@ -182,74 +260,40 @@ def _point_mass_callback(state_names: tuple[str, ...]) -> CallbackFn:
     return fn
 
 
-def none_callback(state_names: tuple[str, ...]) -> CallbackFn:
-    """Return nothing. Use when only side effects of the solve matter."""
-    del state_names
-    return _none_callback
-
-
-def full(state_names: tuple[str, ...]) -> CallbackFn:
-    """Per-state duration density and point masses, keyed by state name."""
-    return _full_callback(state_names)
-
-
-def marginal_components(state_names: tuple[str, ...]) -> CallbackFn:
-    """Duration-marginalized density per state plus point masses."""
-    return _marginal_components_callback(state_names)
-
-
-def state_probability(state_names: tuple[str, ...]) -> CallbackFn:
-    """Total state occupancy after marginalizing over duration."""
-    del state_names
-    return _state_probability_callback
-
-
-def point_mass(state_names: tuple[str, ...]) -> CallbackFn:
-    """Point-mass component per state, keyed by state name."""
-    return _point_mass_callback(state_names)
-
-
-def density(state_names: tuple[str, ...]) -> CallbackFn:
-    """Absolutely continuous duration density per state, stacked into a tensor."""
-    del state_names
-    return _density_callback
-
-
-def density_probability(state_names: tuple[str, ...]) -> CallbackFn:
-    """Duration-marginal density per state, stacked into a tensor."""
-    del state_names
-    return _density_probability_callback
-
-
-_CALLBACKS = {
-    "none": none_callback,
-    "full": full,
-    "marginal_components": marginal_components,
-    "state_probability": state_probability,
-    "point_mass": point_mass,
-    "density": density,
-    "density_probability": density_probability,
-}
+# --------------------------------------------------------------------------- #
+# Dispatch                                                                    #
+# --------------------------------------------------------------------------- #
 
 
 def resolve_callback(
-    callback: Union[None, str, CallbackFn],
+    output: Union[None, ProbabilityOutput, CallbackFn],
     state_names: tuple[str, ...],
 ) -> CallbackFn:
-    """Resolve a callback specification to a callable bound to ``state_names``."""
-    if callback is None:
-        return none_callback(state_names)
-    if callable(callback):
-        return callback
-    if isinstance(callback, str):
-        if callback not in _CALLBACKS:
-            available = ", ".join(sorted(_CALLBACKS.keys()))
-            raise ValueError(
-                f"Unknown callback '{callback}'. "
-                f"Available callbacks: {available}"
-            )
-        return _CALLBACKS[callback](state_names)
-    raise TypeError(
-        "callback must be None, a string, or a callable, "
-        f"got {type(callback)}"
+    """Resolve a probability output specification to a JIT-friendly callable.
+
+    Returns a callable bound to ``state_names`` for the reducers that need
+    the names. ``output=None`` resolves to a private no-op so the solver can
+    still scan; the result is discarded by the caller.
+    """
+    if output is None:
+        return _none_callback
+    if isinstance(output, StateProbability):
+        return _state_probability_callback
+    if isinstance(output, DensityProbability):
+        return _density_probability_callback
+    if isinstance(output, Density):
+        return _density_callback
+    if isinstance(output, PointMass):
+        return _point_mass_callback(state_names)
+    if isinstance(output, MarginalComponents):
+        return _marginal_components_callback(state_names)
+    if isinstance(output, Full):
+        return _full_callback(state_names)
+    if callable(output):
+        return output
+    raise TypeError(  # pyright: ignore[reportUnreachable]
+        "probability must be None, a probability-output instance "
+        "(StateProbability, DensityProbability, Density, PointMass, "
+        "MarginalComponents, Full), or a callable; "
+        f"got {type(output).__name__}."
     )

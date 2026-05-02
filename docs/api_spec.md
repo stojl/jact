@@ -16,13 +16,21 @@ The public API has four layers:
 - `solve()`: a midpoint-quadrature solver over the reachable subgraph that can
   emit both probabilities and cashflows in one fused JAX program.
 
-Use `import jact` for the main surface: `jact.StateSpace`,
-`jact.InitialDistribution`, `jact.solve`, `jact.StateRate`,
-`jact.TransitionLump`, `jact.ScheduledEvent`, `jact.Raw`, `jact.Group`,
-`jact.Total`, `jact.ByState`, and `jact.ByKind`.
-Advanced inspection and callback objects stay in submodules such as
-`jact.callbacks.StateCarry`, `jact.callbacks.PointMass`,
-`jact.model.ReducedModel`, and `jact.model.TransitionInfo`.
+Use `import jact` for the main surface. The top-level names are
+`jact.StateSpace`, `jact.Model`, `jact.InitialDistribution`,
+`jact.ModelResult`, and `jact.solve`. Domain-specific types live under two
+public submodules:
+
+- `jact.cashflows` — declarations (`StateRate`, `TransitionLump`,
+  `ScheduledEvent`, `CashflowDeclaration`) and views (`Raw`, `Group`,
+  `Total`, `ByState`, `ByKind`).
+- `jact.probability` — output reducers (`StateProbability`,
+  `DensityProbability`, `Density`, `PointMass`, `MarginalComponents`,
+  `Full`) and the `ProbabilityOutput` union.
+
+Advanced inspection types stay in private modules: `StateCarry` is
+available as `jact.probability.StateCarry`; `ReducedModel` and
+`TransitionInfo` live under `jact.model`.
 
 Files under `archive/original_prototype/` and `notes/` are background material
 only. They are not part of the public contract.
@@ -146,10 +154,51 @@ TransitionInfo(source, target, assignment, callable, index)
 
 ## InitialDistribution
 
-`InitialDistribution` encodes the joint `(state, duration)` distribution at
-`t = 0`.
+`InitialDistribution` has two jobs at `t = 0`:
 
-Construction:
+1. declare the structural initial-state set,
+2. provide the runtime `(state, duration)` distribution within that set.
+
+That structural set drives model reduction. Reduction follows the states
+declared by construction:
+
+- the keys of `components`,
+- the state passed to `at()`,
+- the `initial_states` tuple passed to `per_individual()`,
+- or the model's full state list when `per_individual(initial_states=None)`.
+
+Runtime masses and runtime index values never shrink that structure. A declared
+state with zero mass still remains part of the structural initial-state set.
+
+Teach the constructors as a ladder from simple to powerful:
+
+### 1. Single-state shorthand at solve entry
+
+```python
+model.solve(initial="healthy", horizon=30, steps_per_unit=12, ...)
+```
+
+This is the simplest entry path:
+
+- one declared structural initial state,
+- all mass starts there,
+- duration is zero unless `initial_duration` is supplied.
+
+It is convenience syntax for the explicit single-state form below.
+
+### 2. Single-state explicit form
+
+```python
+jact.InitialDistribution.at("healthy", duration=2.0)
+```
+
+This exposes the object model directly:
+
+- one declared structural initial state,
+- one runtime duration assignment,
+- reduction follows the declared state `"healthy"`.
+
+### 3. Mixture over declared initial states
 
 ```python
 jact.InitialDistribution(
@@ -159,9 +208,27 @@ jact.InitialDistribution(
     },
     normalise=True,
 )
+```
 
-jact.InitialDistribution.at("healthy", duration=0.0)
+Here the state names are the declared structural initial-state set. `mass` and
+`duration` are runtime numeric values attached to those states.
 
+### 4. Per-individual indices into a declared initial-state tuple
+
+```python
+jact.InitialDistribution.per_individual(
+    states=idx_array,
+    duration=d_0_array,
+    initial_states=("healthy", "disabled"),
+)
+```
+
+`states` does not name model states directly in this mode. It indexes into the
+declared `initial_states` tuple, and reduction follows that tuple.
+
+### 5. Per-individual indices into the full model state list
+
+```python
 jact.InitialDistribution.per_individual(
     states=idx_array,
     duration=d_0_array,
@@ -169,7 +236,10 @@ jact.InitialDistribution.per_individual(
 )
 ```
 
-Key rules:
+`initial_states=None` changes what the indices mean: they now refer to the
+model's full state list, so no reduction is performed.
+
+Core rules:
 
 - `mass` and `duration` values may be scalars or `(batch,)` arrays.
 - masses are normalised per individual by default.
@@ -178,12 +248,30 @@ Key rules:
   and the solver reduces to the union of states reachable from it.
 - `per_individual.initial_states=None` means the indices are into the model's
   full state list and no reduction is performed.
-- the declared initial-state set is structural. It is the keys of
-  `components`, the state passed to `at()`, or the `initial_states` tuple on
-  `per_individual()`. It is never inferred from runtime masses or runtime index
-  values.
-- declaring a state with zero mass still keeps that state in the structural
-  initial-state set.
+
+Reduction example:
+
+```python
+initial = jact.InitialDistribution(
+    components={
+        "healthy": {"mass": 1.0, "duration": 0.0},
+        "disabled": {"mass": 0.0, "duration": 2.0},
+    }
+)
+```
+
+`"disabled"` is still part of the declared structural initial-state set even
+though its runtime mass is zero, so reduction still follows the declared keys
+`("healthy", "disabled")`.
+
+Common confusions:
+
+- Zero mass does not remove a declared state.
+- Declared states are not inferred from runtime mass support.
+- `per_individual(initial_states=(...))` and
+  `per_individual(initial_states=None)` use different index spaces.
+- `initial="healthy"` and `InitialDistribution.at("healthy", ...)` are the same
+  model of the world; one is shorthand and the other is explicit.
 
 State-space helpers perform eager name validation:
 
@@ -244,9 +332,9 @@ Cashflows are declared from a `StateSpace`, not from a `Model`:
 
 ```python
 cashflows = state_space.cashflows({
-    "premium": jact.StateRate({"healthy": premium_fn}),
-    "death": jact.TransitionLump({("healthy", "dead"): death_fn}),
-    "bonus": jact.ScheduledEvent(
+    "premium": jact.cashflows.StateRate({"healthy": premium_fn}),
+    "death": jact.cashflows.TransitionLump({("healthy", "dead"): death_fn}),
+    "bonus": jact.cashflows.ScheduledEvent(
         when=event_time_fn,
         payments={"healthy": bonus_fn},
     ),
@@ -343,11 +431,11 @@ Aggregation and time-only weighting are declared per solve through
 
 ```python
 cashflow_views = {
-    "raw": jact.Raw(),
-    "benefits": jact.Group(["death", "bonus"]),
-    "total": jact.Total(),
-    "by_state": jact.ByState(),
-    "by_kind": jact.ByKind(),
+    "raw": jact.cashflows.Raw(),
+    "benefits": jact.cashflows.Group(["death", "bonus"]),
+    "total": jact.cashflows.Total(),
+    "by_state": jact.cashflows.ByState(),
+    "by_kind": jact.cashflows.ByKind(),
 }
 ```
 
@@ -380,7 +468,7 @@ Default and validation rules:
 - if `cashflows` is supplied and `cashflow_views` is omitted or `None`, the
   solver uses `{"raw": Raw()}`,
 - if `cashflows is None`, any non-`None` `cashflow_views` is rejected,
-- `cashflow_views={}` is allowed and returns an empty `result["cashflows"]`
+- `cashflow_views={}` is allowed and returns an empty `result.cashflows`
   mapping,
 - view names must be unique non-empty strings,
 - `Raw(name=...)` and `Group(members)` must reference declared component names,
@@ -414,9 +502,9 @@ result = model.solve(
     initial="healthy",
     horizon=10,
     steps_per_unit=12,
-    probability="state_probability",
+    probability=jact.probability.StateProbability(),
     cashflows=cashflows,
-    cashflow_views={"pv": jact.Total(weight=flat_discount, terminal=True)},
+    cashflow_views={"pv": jact.cashflows.Total(weight=flat_discount, terminal=True)},
     record_every=12,
     age=age_array,
 )
@@ -430,7 +518,7 @@ Parameters:
 | `initial_duration` | float or `(batch,)` array | Only valid with `str` and `(batch,)` `initial` forms |
 | `horizon` | positive int | Number of time units |
 | `steps_per_unit` | positive int | Solver steps per time unit |
-| `probability` | `str`, callable, or `None` | Probability reducer; default is `"state_probability"` |
+| `probability` | `ProbabilityOutput`, callable, or `None` | Probability reducer; default is `jact.probability.StateProbability()` |
 | `cashflows` | `CashflowDeclaration` or `None` | Cashflow components to evaluate |
 | `cashflow_views` | mapping or `None` | Solve-time views; requires `cashflows` |
 | `record_every` | positive int | Must divide `horizon * steps_per_unit` |
@@ -454,19 +542,23 @@ Initial forms:
 - `initial=InitialDistribution(...)` gives full control over masses, durations,
   and the declared initial-state set used for reduction.
 
-Result keys:
+Result:
+
+`solve()` returns a `ModelResult` dataclass with attribute-only access:
 
 ```python
-result["states"]        # always present
-result["probability"]   # omitted when probability=None
-result["cashflows"]     # omitted when cashflows is None
+result.states         # tuple[str, ...] — always set
+result.probability    # None when probability=None was passed
+result.cashflows      # None when cashflows=None was passed
 ```
 
-`result["states"]` is the tuple of reachable states in reduced order.
-Disabled outputs are omitted entirely rather than filled with `None`.
-`probability="none"` is different from `probability=None`: the string selects a
-callback that returns `None`, while `None` disables probability output and
-omits the key.
+`result.states` is the tuple of reachable states in reduced order. Disabled
+outputs are `None` rather than missing attributes. `probability=None`
+disables probability output entirely.
+
+`ModelResult` is registered as a JAX PyTree, so `jax.jit(model.solve)` and
+`jax.tree.map(...)` over the result both work. `states` is treated as static
+aux data; `probability` and `cashflows` are children.
 
 ### Output shapes
 
@@ -494,11 +586,11 @@ The reduced solver state is one `StateCarry` per reachable state:
 ```python
 class StateCarry(NamedTuple):
     density: jnp.ndarray
-    point_mass: PointMass | None
+    point_mass: _PointMass | None
 ```
 
 - `density` is the duration density on the solver grid, shape `(batch, D)`,
-- `point_mass` is a per-individual Dirac `PointMass(value, d_0)` or `None`.
+- `point_mass` is a per-individual Dirac `_PointMass(value, d_0)` or `None`.
 
 Each solver step:
 
@@ -510,31 +602,32 @@ Each solver step:
 5. evolves point masses along `(t, d_0 + t)` with the same competing-risks
    logic and routes their outgoing mass into duration-zero density.
 
-Built-in probability callbacks. Output shapes use `T` for the recorded
-time axis (length `horizon * steps_per_unit / record_every + 1`), `B` for
-batch, `S` for the number of reachable states (in `result["states"]`
+Built-in probability output reducers. Output shapes use `T` for the
+recorded time axis (length `horizon * steps_per_unit / record_every + 1`),
+`B` for batch, `S` for the number of reachable states (in `result.states`
 order), and `D` for the duration grid:
 
-| Callback | Output |
+| Reducer | Output |
 |---|---|
-| `none` | `None` |
-| `state_probability` | `(T, B, S)` tensor — duration-marginal density plus point-mass `value` per state. |
-| `density_probability` | `(T, B, S)` tensor — duration-marginal density only; excludes point masses. |
-| `density` | `(T, B, S, D)` tensor — continuous duration density per state; excludes point masses. |
-| `point_mass` | `{state_name: (T, B)}` — only states that carry a point mass appear. |
-| `marginal_components` | `{"density": (T, B, S), "point_mass": {state_name: (T, B)}}` |
-| `full` | `{"density": (T, B, S, D), "point_mass": {state_name: (T, B)}}` |
+| `StateProbability()` | `(T, B, S)` tensor — duration-marginal density plus point-mass `value` per state. |
+| `DensityProbability()` | `(T, B, S)` tensor — duration-marginal density only; excludes point masses. |
+| `Density()` | `(T, B, S, D)` tensor — continuous duration density per state; excludes point masses. |
+| `PointMass()` | `{state_name: (T, B)}` — only states that carry a point mass appear. |
+| `MarginalComponents()` | `{"density": (T, B, S), "point_mass": {state_name: (T, B)}}` |
+| `Full()` | `{"density": (T, B, S, D), "point_mass": {state_name: (T, B)}}` |
 
-Built-in reducers do not expose point-mass duration. If a downstream consumer
-needs `PointMass.d_0`, use a custom probability callback and read it directly
-from the internal `StateCarry` objects.
-After marginalizing over duration, `state_probability` combines continuous
+These types live under `jact.probability` and form the
+`ProbabilityOutput` union. Built-in reducers do not expose point-mass
+duration. If a downstream consumer needs `_PointMass.d_0`, supply a custom
+probability callable and read it directly from the internal `StateCarry`
+objects.
+After marginalizing over duration, `StateProbability` combines continuous
 and point-mass probability into total state occupancy.
 
-Custom probability callbacks have signature
+Custom probability callables have signature
 `(state: tuple[StateCarry, ...]) -> PyTree`. Their returned PyTree is
 stacked by `jax.lax.scan` along a new leading time axis. `StateCarry` and
-`PointMass` are internal solver types and live under `jact.callbacks`;
+`_PointMass` are internal solver types and live under `jact.probability`;
 they are not part of the documented public API surface but remain
 importable for advanced use.
 

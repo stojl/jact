@@ -109,7 +109,14 @@ class _CanonicalDistribution:
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
 class InitialDistribution:
-    """Joint `(state, duration)` distribution at `t = 0`, per individual."""
+    """Structural initial states plus runtime `(state, duration)` values.
+
+    `InitialDistribution` has two jobs at solver entry: declare which states
+    count as initial structurally, and attach runtime mass and duration values
+    within that declared set. Model reduction follows the declared structure,
+    not runtime mass support, so a declared zero-mass state still counts as an
+    initial state structurally.
+    """
 
     _kind: str
     _declared_states: tuple[str, ...] | None
@@ -194,6 +201,12 @@ class InitialDistribution:
         state: str,
         duration: ArrayLike = 0.0,
     ) -> InitialDistribution:
+        """Declare one structural initial state with all mass at `state`.
+
+        This is the explicit single-state form of the `initial="state"`
+        shorthand at solve entry. `duration` is runtime data inside that
+        declared one-state structure.
+        """
         return cls(
             components={state: {"mass": jnp.asarray(1.0), "duration": duration}},
             normalise=False,
@@ -206,6 +219,14 @@ class InitialDistribution:
         duration: ArrayLike = 0.0,
         initial_states: Sequence[str] | None = None,
     ) -> InitialDistribution:
+        """Declare per-individual initial states by index.
+
+        If `initial_states` is a tuple, `states` indexes into that declared
+        tuple and reduction follows that structural set. If
+        `initial_states is None`, `states` indexes into the model's full state
+        list. In either mode, runtime index values do not change the declared
+        structural initial-state set.
+        """
         state_shape = _array_shape(states)
         if len(state_shape) != 1:
             raise ValueError(
