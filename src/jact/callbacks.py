@@ -106,7 +106,7 @@ def _point_mass_dict(
     state_names: tuple[str, ...],
 ) -> dict[str, dict[str, jnp.ndarray]]:
     return {
-        state_names[i]: {"value": carry.point_mass.value, "d_0": carry.point_mass.d_0}
+        state_names[i]: {"value": carry.point_mass.value}
         for i, carry in enumerate(state)
         if carry.point_mass is not None
     }

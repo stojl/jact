@@ -127,9 +127,9 @@ class TestInitialDistributionSolveIntegration:
         assert "disabled" not in point_result
         assert "dead" not in point_result
         healthy_point = point_result["healthy"]
+        assert set(healthy_point.keys()) == {"value"}
         assert healthy_point["value"].shape == (5, 2)
         assert jnp.allclose(healthy_point["value"][0], jnp.ones((2,)))
-        assert jnp.allclose(healthy_point["d_0"][0], jnp.array([0.0, 1.0]))
 
     def test_per_individual_none_initial_states_uses_full_model_for_solver(
         self, illness_death
@@ -159,6 +159,9 @@ class TestInitialDistributionSolveIntegration:
 
         assert result["states"] == state_space.states
         assert set(point_result.keys()) == {"healthy", "disabled", "dead"}
+        assert set(point_result["healthy"].keys()) == {"value"}
+        assert set(point_result["disabled"].keys()) == {"value"}
+        assert set(point_result["dead"].keys()) == {"value"}
         assert point_result["healthy"]["value"].shape == (5, 2)
         assert point_result["disabled"]["value"].shape == (5, 2)
         assert point_result["dead"]["value"].shape == (5, 2)
@@ -197,10 +200,10 @@ class TestInitialDistributionSolveIntegration:
         assert point_result["disabled"]["value"].shape == (5, 2)
         healthy_value = point_result["healthy"]["value"]
         disabled_value = point_result["disabled"]["value"]
-        disabled_d_0 = point_result["disabled"]["d_0"]
+        assert set(point_result["healthy"].keys()) == {"value"}
+        assert set(point_result["disabled"].keys()) == {"value"}
         assert jnp.allclose(healthy_value[0], jnp.array([0.25, 0.75]))
         assert jnp.allclose(disabled_value[0], jnp.array([0.75, 0.25]))
-        assert jnp.allclose(disabled_d_0[0], jnp.array([1.0, 0.0]))
 
     def test_component_mixture_all_zero_normalized_mass_stays_zero(self, illness_death):
         state_space, _ = illness_death

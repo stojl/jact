@@ -521,12 +521,13 @@ order), and `D` for the duration grid:
 | `state_probability` | `(T, B, S)` tensor — duration-marginal density plus point-mass `value` per state. |
 | `density_probability` | `(T, B, S)` tensor — duration-marginal density only; excludes point masses. |
 | `density` | `(T, B, S, D)` tensor — continuous duration density per state; excludes point masses. |
-| `point_mass` | `{state_name: {"value": (T, B), "d_0": (T, B)}}` — only states that carry a point mass appear. |
-| `marginal_components` | `{"density": (T, B, S), "point_mass": {state_name: {"value": (T, B), "d_0": (T, B)}}}` |
-| `full` | `{"density": (T, B, S, D), "point_mass": {state_name: {"value": (T, B), "d_0": (T, B)}}}` |
+| `point_mass` | `{state_name: {"value": (T, B)}}` — only states that carry a point mass appear. |
+| `marginal_components` | `{"density": (T, B, S), "point_mass": {state_name: {"value": (T, B)}}}` |
+| `full` | `{"density": (T, B, S, D), "point_mass": {state_name: {"value": (T, B)}}}` |
 
-Per-individual starting durations (`PointMass.d_0`) are preserved as the
-per-batch `"d_0"` field rather than being projected onto the duration grid.
+Built-in reducers do not expose point-mass duration. If a downstream consumer
+needs `PointMass.d_0`, use a custom probability callback and read it directly
+from the internal `StateCarry` objects.
 After marginalizing over duration, `state_probability` combines continuous
 and point-mass probability into total state occupancy.
 
