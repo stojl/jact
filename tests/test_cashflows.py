@@ -106,11 +106,11 @@ def test_cashflow_declaration_validation():
     ss = jact.StateSpace(["healthy", "dead"], [("healthy", "dead")])
 
     with pytest.raises(ValueError, match="not a declared state"):
-        ss.cashflows({"bad": jact.StateRate({"disabled": _constant_payment(1.0)})})
+        ss.cashflows({"bad": jact.cashflows.StateRate({"disabled": _constant_payment(1.0)})})
 
     with pytest.raises(ValueError, match="unknown transition"):
         ss.cashflows({
-            "bad": jact.TransitionLump({
+            "bad": jact.cashflows.TransitionLump({
                 ("dead", "healthy"): _constant_payment(1.0)
             })
         })
@@ -118,7 +118,7 @@ def test_cashflow_declaration_validation():
     with pytest.raises(TypeError, match="cashflow components"):
         ss.cashflows({"bad": object()})
 
-    cashflows = ss.cashflows({"premium": jact.StateRate({
+    cashflows = ss.cashflows({"premium": jact.cashflows.StateRate({
         "healthy": _constant_payment(1.0)
     })})
 
@@ -129,7 +129,7 @@ def test_cashflow_declaration_validation():
             horizon=1,
             steps_per_unit=1,
             cashflows=cashflows,
-            cashflow_views={"bad": jact.Raw("missing")},
+            cashflow_views={"bad": jact.cashflows.Raw("missing")},
         )
 
     with pytest.raises(ValueError, match="unknown component"):
@@ -139,7 +139,7 @@ def test_cashflow_declaration_validation():
             horizon=1,
             steps_per_unit=1,
             cashflows=cashflows,
-            cashflow_views={"bad": jact.Group(["missing"])},
+            cashflow_views={"bad": jact.cashflows.Group(["missing"])},
         )
 
     with pytest.raises(TypeError, match="terminal"):
@@ -149,7 +149,7 @@ def test_cashflow_declaration_validation():
             horizon=1,
             steps_per_unit=1,
             cashflows=cashflows,
-            cashflow_views={"bad": jact.Total(terminal="yes")},  # type: ignore[arg-type]
+            cashflow_views={"bad": jact.cashflows.Total(terminal="yes")},  # type: ignore[arg-type]
         )
 
     with pytest.raises(TypeError, match="weight"):
@@ -159,7 +159,7 @@ def test_cashflow_declaration_validation():
             horizon=1,
             steps_per_unit=1,
             cashflows=cashflows,
-            cashflow_views={"bad": jact.Total(weight=object())},  # type: ignore[arg-type]
+            cashflow_views={"bad": jact.cashflows.Total(weight=object())},  # type: ignore[arg-type]
         )
 
 
@@ -167,11 +167,11 @@ def test_cashflow_declaration_copies_payment_mappings():
     ss = jact.StateSpace(["healthy", "dead"], [("healthy", "dead")])
     payments = {"healthy": _constant_payment(1.0)}
 
-    declaration = ss.cashflows({"premium": jact.StateRate(payments)})
+    declaration = ss.cashflows({"premium": jact.cashflows.StateRate(payments)})
     payments["dead"] = _constant_payment(2.0)
 
     component = declaration.component("premium")
-    assert isinstance(component, jact.StateRate)
+    assert isinstance(component, jact.cashflows.StateRate)
     assert set(component.payments) == {"healthy"}
 
 
@@ -186,7 +186,7 @@ def test_discount_factor_removed_from_public_api():
 def test_cashflow_views_accept_rank_zero_array_weight():
     ss = jact.StateSpace(["active"], [])
     model = ss.build(transitions={})
-    cashflows = ss.cashflows({"premium": jact.StateRate({
+    cashflows = ss.cashflows({"premium": jact.cashflows.StateRate({
         "active": _constant_payment(2.0)
     })})
 
@@ -197,7 +197,7 @@ def test_cashflow_views_accept_rank_zero_array_weight():
         probability=None,
         cashflows=cashflows,
         cashflow_views={
-            "pv": jact.Total(weight=jnp.array(0.5), terminal=True),
+            "pv": jact.cashflows.Total(weight=jnp.array(0.5), terminal=True),
         },
     )
 
@@ -207,7 +207,7 @@ def test_cashflow_views_accept_rank_zero_array_weight():
 def test_cashflow_views_reject_non_scalar_array_weight():
     ss = jact.StateSpace(["active"], [])
     model = ss.build(transitions={})
-    cashflows = ss.cashflows({"premium": jact.StateRate({
+    cashflows = ss.cashflows({"premium": jact.cashflows.StateRate({
         "active": _constant_payment(2.0)
     })})
 
@@ -219,7 +219,7 @@ def test_cashflow_views_reject_non_scalar_array_weight():
             probability=None,
             cashflows=cashflows,
             cashflow_views={
-                "pv": jact.Total(weight=jnp.array([0.5, 1.0]), terminal=True),
+                "pv": jact.cashflows.Total(weight=jnp.array([0.5, 1.0]), terminal=True),
             },
         )
 
@@ -227,7 +227,7 @@ def test_cashflow_views_reject_non_scalar_array_weight():
 def test_empty_cashflow_view_mapping_returns_empty_outputs():
     ss = jact.StateSpace(["active"], [])
     model = ss.build(transitions={})
-    cashflows = ss.cashflows({"premium": jact.StateRate({
+    cashflows = ss.cashflows({"premium": jact.cashflows.StateRate({
         "active": _constant_payment(2.0)
     })})
 
@@ -247,28 +247,28 @@ def test_empty_cashflow_view_mapping_returns_empty_outputs():
 def test_group_view_members_are_frozen_during_validation():
     ss = jact.StateSpace(["healthy", "dead"], [("healthy", "dead")])
     cashflows = ss.cashflows({
-        "premium": jact.StateRate({"healthy": _constant_payment(1.0)}),
-        "death": jact.TransitionLump({
+        "premium": jact.cashflows.StateRate({"healthy": _constant_payment(1.0)}),
+        "death": jact.cashflows.TransitionLump({
             ("healthy", "dead"): _constant_payment(5.0)
         }),
     })
     members = ["death"]
     frozen_views = validate_cashflow_views(
         cashflows,
-        {"benefits": jact.Group(members)},
+        {"benefits": jact.cashflows.Group(members)},
     )
     members.append("premium")
 
     name, view = frozen_views[0]
     assert name == "benefits"
-    assert isinstance(view, jact.Group)
+    assert isinstance(view, jact.cashflows.Group)
     assert view.members == ("death",)
 
 
 def test_state_rate_no_transition_interval_and_terminal_outputs():
     ss = jact.StateSpace(["active"], [])
     model = ss.build(transitions={})
-    cashflows = ss.cashflows({"premium": jact.StateRate({
+    cashflows = ss.cashflows({"premium": jact.cashflows.StateRate({
         "active": _constant_payment(2.0)
     })})
 
@@ -279,8 +279,8 @@ def test_state_rate_no_transition_interval_and_terminal_outputs():
         probability=None,
         cashflows=cashflows,
         cashflow_views={
-            "premium": jact.Raw("premium"),
-            "pv": jact.Total(weight=0.5, terminal=True),
+            "premium": jact.cashflows.Raw("premium"),
+            "pv": jact.cashflows.Total(weight=0.5, terminal=True),
         },
     )
 
@@ -295,7 +295,7 @@ def test_transition_lump_matches_integrated_transition_probability():
     benefit = 10.0
     ss = jact.StateSpace(["alive", "dead"], [("alive", "dead")])
     model = ss.build(transitions={("alive", "dead"): _constant_intensity(rate)})
-    cashflows = ss.cashflows({"death": jact.TransitionLump({
+    cashflows = ss.cashflows({"death": jact.cashflows.TransitionLump({
         ("alive", "dead"): _constant_payment(benefit)
     })})
 
@@ -304,7 +304,7 @@ def test_transition_lump_matches_integrated_transition_probability():
         horizon=3,
         steps_per_unit=64,
         cashflows=cashflows,
-        cashflow_views={"death": jact.Raw("death", terminal=True)},
+        cashflow_views={"death": jact.cashflows.Raw("death", terminal=True)},
     )
 
     expected = benefit * (1.0 - jnp.exp(-rate * 3.0))
@@ -315,7 +315,7 @@ def test_state_rate_in_survival_model_uses_midpoint_occupancy():
     rate = 0.2
     ss = jact.StateSpace(["alive", "dead"], [("alive", "dead")])
     model = ss.build(transitions={("alive", "dead"): _constant_intensity(rate)})
-    cashflows = ss.cashflows({"annuity": jact.StateRate({
+    cashflows = ss.cashflows({"annuity": jact.cashflows.StateRate({
         "alive": _constant_payment(1.0)
     })})
 
@@ -325,7 +325,7 @@ def test_state_rate_in_survival_model_uses_midpoint_occupancy():
         steps_per_unit=128,
         probability=None,
         cashflows=cashflows,
-        cashflow_views={"annuity": jact.Raw("annuity", terminal=True)},
+        cashflow_views={"annuity": jact.cashflows.Raw("annuity", terminal=True)},
     )
 
     expected = (1.0 - jnp.exp(-rate * 3.0)) / rate
@@ -341,7 +341,7 @@ def test_constant_intensity_time_duration_state_rate_matches_closed_form():
     duration_coef = 0.2
     ss = jact.StateSpace(["alive", "dead"], [("alive", "dead")])
     model = ss.build(transitions={("alive", "dead"): _constant_intensity(rate, 2)})
-    cashflows = ss.cashflows({"annuity": jact.StateRate({
+    cashflows = ss.cashflows({"annuity": jact.cashflows.StateRate({
         "alive": _time_duration_payment(base, time_coef, duration_coef, 2)
     })})
 
@@ -352,7 +352,7 @@ def test_constant_intensity_time_duration_state_rate_matches_closed_form():
         steps_per_unit=256,
         probability=None,
         cashflows=cashflows,
-        cashflow_views={"annuity": jact.Raw("annuity", terminal=True)},
+        cashflow_views={"annuity": jact.cashflows.Raw("annuity", terminal=True)},
         age=jnp.arange(2.0),
     )
 
@@ -375,7 +375,7 @@ def test_point_mass_state_rate_remains_accurate_at_high_resolution_float32():
     duration_coef = 0.2
     ss = jact.StateSpace(["alive", "dead"], [("alive", "dead")])
     model = ss.build(transitions={("alive", "dead"): _constant_intensity(rate, 2)})
-    cashflows = ss.cashflows({"annuity": jact.StateRate({
+    cashflows = ss.cashflows({"annuity": jact.cashflows.StateRate({
         "alive": _time_duration_payment(base, time_coef, duration_coef, 2)
     })})
 
@@ -386,7 +386,7 @@ def test_point_mass_state_rate_remains_accurate_at_high_resolution_float32():
         steps_per_unit=1024,
         probability=None,
         cashflows=cashflows,
-        cashflow_views={"annuity": jact.Raw("annuity", terminal=True)},
+        cashflow_views={"annuity": jact.cashflows.Raw("annuity", terminal=True)},
         age=jnp.arange(2.0, dtype=jnp.float32),
     )
 
@@ -409,7 +409,7 @@ def test_time_dependent_intensity_transition_lump_matches_closed_form():
     model = ss.build(
         transitions={("alive", "dead"): _time_intensity(base, time_coef)}
     )
-    cashflows = ss.cashflows({"death": jact.TransitionLump({
+    cashflows = ss.cashflows({"death": jact.cashflows.TransitionLump({
         ("alive", "dead"): _constant_payment(benefit)
     })})
 
@@ -419,7 +419,7 @@ def test_time_dependent_intensity_transition_lump_matches_closed_form():
         steps_per_unit=512,
         probability=None,
         cashflows=cashflows,
-        cashflow_views={"death": jact.Raw("death", terminal=True)},
+        cashflow_views={"death": jact.cashflows.Raw("death", terminal=True)},
     )
 
     cumulative_hazard = base * horizon + 0.5 * time_coef * horizon**2
@@ -438,10 +438,10 @@ def test_duration_dependent_intensity_cashflows_match_closed_form():
         transitions={("alive", "dead"): _duration_intensity(base, duration_coef, 3)}
     )
     cashflows = ss.cashflows({
-        "hazard_rate": jact.StateRate({
+        "hazard_rate": jact.cashflows.StateRate({
             "alive": _duration_payment(base, duration_coef, 3)
         }),
-        "death": jact.TransitionLump({
+        "death": jact.cashflows.TransitionLump({
             ("alive", "dead"): _constant_payment(benefit, 3)
         }),
     })
@@ -454,8 +454,8 @@ def test_duration_dependent_intensity_cashflows_match_closed_form():
         probability=None,
         cashflows=cashflows,
         cashflow_views={
-            "hazard_rate": jact.Raw("hazard_rate", terminal=True),
-            "death": jact.Raw("death", terminal=True),
+            "hazard_rate": jact.cashflows.Raw("hazard_rate", terminal=True),
+            "death": jact.cashflows.Raw("death", terminal=True),
         },
         age=jnp.arange(3.0),
     ).cashflows
@@ -493,10 +493,10 @@ def test_time_duration_dependent_intensity_cashflows_match_closed_form():
         }
     )
     cashflows = ss.cashflows({
-        "hazard_rate": jact.StateRate({
+        "hazard_rate": jact.cashflows.StateRate({
             "alive": _time_duration_payment(base, time_coef, duration_coef, 2)
         }),
-        "death": jact.TransitionLump({
+        "death": jact.cashflows.TransitionLump({
             ("alive", "dead"): _constant_payment(1.0, 2)
         }),
     })
@@ -509,8 +509,8 @@ def test_time_duration_dependent_intensity_cashflows_match_closed_form():
         probability=None,
         cashflows=cashflows,
         cashflow_views={
-            "hazard_rate": jact.Raw("hazard_rate", terminal=True),
-            "death": jact.Raw("death", terminal=True),
+            "hazard_rate": jact.cashflows.Raw("hazard_rate", terminal=True),
+            "death": jact.cashflows.Raw("death", terminal=True),
         },
         age=jnp.arange(2.0),
     ).cashflows
@@ -534,7 +534,7 @@ def test_discounted_constant_state_rate_matches_closed_form_present_value():
     horizon = 5
     ss = jact.StateSpace(["alive", "dead"], [("alive", "dead")])
     model = ss.build(transitions={("alive", "dead"): _constant_intensity(rate)})
-    cashflows = ss.cashflows({"annuity": jact.StateRate({
+    cashflows = ss.cashflows({"annuity": jact.cashflows.StateRate({
         "alive": _constant_payment(payment)
     })})
 
@@ -548,7 +548,7 @@ def test_discounted_constant_state_rate_matches_closed_form_present_value():
         probability=None,
         cashflows=cashflows,
         cashflow_views={
-            "pv": jact.Total(
+            "pv": jact.cashflows.Total(
                 weight=flat_discount_weight,
                 terminal=True,
             )
@@ -564,8 +564,8 @@ def test_mixed_views_by_state_by_kind_and_weighted_total():
     ss = jact.StateSpace(["healthy", "dead"], [("healthy", "dead")])
     model = ss.build(transitions={("healthy", "dead"): _constant_intensity(0.1)})
     cashflows = ss.cashflows({
-        "premium": jact.StateRate({"healthy": _constant_payment(1.0)}),
-        "death": jact.TransitionLump({
+        "premium": jact.cashflows.StateRate({"healthy": _constant_payment(1.0)}),
+        "death": jact.cashflows.TransitionLump({
             ("healthy", "dead"): _constant_payment(5.0)
         }),
     })
@@ -576,12 +576,12 @@ def test_mixed_views_by_state_by_kind_and_weighted_total():
         steps_per_unit=8,
         cashflows=cashflows,
         cashflow_views={
-            "raw": jact.Raw(),
-            "benefits": jact.Group(["death"]),
-            "total": jact.Total(),
-            "half": jact.Total(weight=0.5, terminal=True),
-            "state": jact.ByState(terminal=True),
-            "kind": jact.ByKind(terminal=True),
+            "raw": jact.cashflows.Raw(),
+            "benefits": jact.cashflows.Group(["death"]),
+            "total": jact.cashflows.Total(),
+            "half": jact.cashflows.Total(weight=0.5, terminal=True),
+            "state": jact.cashflows.ByState(terminal=True),
+            "kind": jact.cashflows.ByKind(terminal=True),
         },
     ).cashflows
 
@@ -606,7 +606,7 @@ def test_state_rate_includes_initial_point_mass_duration():
     def duration_payment(t, d, **kwargs):
         return jnp.broadcast_to(d, (2, d.shape[-1]))
 
-    cashflows = ss.cashflows({"duration": jact.StateRate({
+    cashflows = ss.cashflows({"duration": jact.cashflows.StateRate({
         "active": duration_payment
     })})
 
@@ -617,7 +617,7 @@ def test_state_rate_includes_initial_point_mass_duration():
         steps_per_unit=32,
         probability=None,
         cashflows=cashflows,
-        cashflow_views={"duration": jact.Raw("duration", terminal=True)},
+        cashflow_views={"duration": jact.cashflows.Raw("duration", terminal=True)},
     )
 
     expected = jnp.array([2.5, 5.5])
@@ -631,7 +631,7 @@ def test_scheduled_event_snapping_individual_times_outside_horizon_and_pre_step(
     def when(**kwargs):
         return kwargs["event_time"]
 
-    cashflows = ss.cashflows({"bonus": jact.ScheduledEvent(
+    cashflows = ss.cashflows({"bonus": jact.cashflows.ScheduledEvent(
         when=when,
         payments={"active": _constant_payment(7.0, 4)},
     )})
@@ -643,8 +643,8 @@ def test_scheduled_event_snapping_individual_times_outside_horizon_and_pre_step(
         probability=None,
         cashflows=cashflows,
         cashflow_views={
-            "bonus": jact.Raw("bonus"),
-            "state": jact.ByState(terminal=True),
+            "bonus": jact.cashflows.Raw("bonus"),
+            "state": jact.cashflows.ByState(terminal=True),
         },
         event_time=jnp.array([0.0, 0.25, 0.49, 2.0]),
         age=jnp.arange(4.0),
@@ -665,7 +665,7 @@ def test_scheduled_event_snaps_near_grid_before_flooring():
     def when(**kwargs):
         return kwargs["event_time"]
 
-    cashflows = ss.cashflows({"bonus": jact.ScheduledEvent(
+    cashflows = ss.cashflows({"bonus": jact.cashflows.ScheduledEvent(
         when=when,
         payments={"active": _constant_payment(7.0, 5)},
     )})
@@ -676,7 +676,7 @@ def test_scheduled_event_snaps_near_grid_before_flooring():
         steps_per_unit=1,
         probability=None,
         cashflows=cashflows,
-        cashflow_views={"bonus": jact.Raw("bonus")},
+        cashflow_views={"bonus": jact.cashflows.Raw("bonus")},
         event_time=jnp.array([
             1.0 - 1e-4,
             1.0 + 1e-4,
@@ -697,7 +697,7 @@ def test_scheduled_event_snaps_near_grid_before_flooring():
 def test_probability_none_omits_probability_and_callback_is_rejected():
     ss = jact.StateSpace(["active"], [])
     model = ss.build(transitions={})
-    cashflows = ss.cashflows({"premium": jact.StateRate({
+    cashflows = ss.cashflows({"premium": jact.cashflows.StateRate({
         "active": _constant_payment(1.0)
     })})
 

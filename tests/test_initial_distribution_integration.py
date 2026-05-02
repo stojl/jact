@@ -116,7 +116,7 @@ class TestInitialDistributionSolveIntegration:
             ),
             horizon=1,
             steps_per_unit=4,
-            probability="point_mass",
+            probability=jact.probability.PointMass(),
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
@@ -150,7 +150,7 @@ class TestInitialDistributionSolveIntegration:
             initial=dist,
             horizon=1,
             steps_per_unit=4,
-            probability="point_mass",
+            probability=jact.probability.PointMass(),
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
@@ -184,7 +184,7 @@ class TestInitialDistributionSolveIntegration:
             initial=dist,
             horizon=1,
             steps_per_unit=4,
-            probability="point_mass",
+            probability=jact.probability.PointMass(),
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
@@ -230,7 +230,7 @@ class TestInitialDistributionSolveIntegration:
             initial=dist,
             horizon=1,
             steps_per_unit=4,
-            probability="point_mass",
+            probability=jact.probability.PointMass(),
             age=jnp.arange(1, dtype=jnp.float32),
         )
 

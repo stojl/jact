@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 from .initial_distribution import InitialDistribution
+from .probability import ProbabilityOutput, StateProbability
 from .result import ModelResult
 from .state_space import StateSpace
 
@@ -307,7 +308,7 @@ class Model:
         horizon: int,
         steps_per_unit: int,
         initial_duration: Any = 0.0,
-        probability: Union[None, str, Callable] = "state_probability",
+        probability: Union[None, ProbabilityOutput, Callable] = StateProbability(),
         cashflows: Any = None,
         cashflow_views: Any = None,
         record_every: int = 1,
@@ -333,13 +334,13 @@ class Model:
         initial_duration : float or (batch,) array, optional
             Per-individual ``d_0`` for the ``str`` and ``(batch,)``
             shorthand forms of ``initial``. Default is ``0.0``.
-        probability : str, callable, or None, optional
+        probability : ProbabilityOutput, callable, or None, optional
             Probability output reducer. Default is
-            ``"state_probability"``, which returns a ``(T, batch, S)``
-            tensor of per-state occupancy with state-name order given by
-            ``result.states``. Other built-in choices are ``"density"``,
-            ``"density_probability"``, ``"point_mass"``,
-            ``"marginal_components"``, ``"full"``, and ``"none"``; see
+            ``jact.probability.StateProbability()``, which returns a
+            ``(T, batch, S)`` tensor of per-state occupancy with state-name
+            order given by ``result.states``. Other built-in choices are
+            ``jact.probability.Density()``, ``DensityProbability()``,
+            ``PointMass()``, ``MarginalComponents()``, and ``Full()``; see
             ``docs/api_spec.md`` for the full output-shape table. Custom
             callables receive ``tuple[StateCarry, ...]`` and may return any
             PyTree, which is stacked along the leading time axis. ``None``

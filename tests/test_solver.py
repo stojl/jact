@@ -10,7 +10,16 @@ import jax.numpy as jnp
 import pytest
 
 import jact
-from jact.callbacks import PointMass, StateCarry
+from jact.probability import (
+    Density,
+    DensityProbability,
+    Full,
+    MarginalComponents,
+    PointMass,
+    StateCarry,
+    StateProbability,
+    _PointMass,
+)
 from jact.solver import _KIND_STATE_RATE, _SOURCE_COMPONENT, _midpoint_solver
 
 # JAX's JitWrapped exposes .clear_cache()/._cache_size() at runtime but they
@@ -128,7 +137,7 @@ def _healthy_probability_callback(state):
 class TestPointMassValidation:
     def test_rejects_incompatible_value_and_duration_shapes(self):
         with pytest.raises(ValueError, match=r"d_0 must have shape \(2, 3\)"):
-            PointMass(
+            _PointMass(
                 value=jnp.ones((2, 3)),
                 d_0=jnp.zeros((3, 2)),
             )
@@ -138,7 +147,7 @@ class TestPointMassValidation:
             ValueError,
             match=r"log_value must have shape \(2, 3\)",
         ):
-            PointMass(
+            _PointMass(
                 value=jnp.ones((2, 3)),
                 d_0=jnp.zeros((2, 3)),
                 log_value=jnp.zeros((2, 2)),
@@ -146,7 +155,7 @@ class TestPointMassValidation:
 
     def test_rejects_negative_concrete_value(self):
         with pytest.raises(ValueError, match="value must be non-negative"):
-            PointMass(
+            _PointMass(
                 value=jnp.array([[1.0, -0.1]]),
                 d_0=jnp.zeros((1, 2)),
             )
@@ -251,7 +260,7 @@ class TestSolverAgainstClosedForm:
             initial="healthy",
             horizon=horizon,
             steps_per_unit=steps_per_unit,
-            probability="state_probability",
+            probability=StateProbability(),
             age=jnp.arange(batch_size, dtype=jnp.float32),
         )
 
@@ -291,7 +300,7 @@ class TestSolverAutodiff:
                 horizon=horizon,
                 steps_per_unit=8,
                 record_every=4,
-                probability="state_probability",
+                probability=StateProbability(),
                 rate=jnp.array([rate_scalar], dtype=jnp.float32),
             ).probability
             return probability[-1, 0, 1]
@@ -310,7 +319,7 @@ class TestSolverAutodiff:
                 initial="healthy",
                 horizon=horizon,
                 steps_per_unit=8,
-                probability="state_probability",
+                probability=StateProbability(),
                 rate=jnp.array([rate_scalar], dtype=jnp.float32),
             ).probability
             return probability[-1, 0, 1]
@@ -371,7 +380,7 @@ class TestSolverAutodiff:
             initial="a",
             horizon=horizon,
             steps_per_unit=steps_per_unit,
-            probability="state_probability",
+            probability=StateProbability(),
             age=jnp.arange(batch_size, dtype=jnp.float32),
         )
         probability = result.probability
@@ -469,7 +478,7 @@ class TestSolverContinuityAndStability:
             initial="healthy",
             horizon=horizon,
             steps_per_unit=steps_per_unit,
-            probability="state_probability",
+            probability=StateProbability(),
             age=jnp.arange(batch_size, dtype=jnp.float32),
         )
         probability = result.probability
@@ -499,7 +508,7 @@ class TestSolverContinuityAndStability:
             horizon=horizon,
             steps_per_unit=steps_per_unit,
             record_every=record_every,
-            probability="state_probability",
+            probability=StateProbability(),
             age=jnp.arange(batch_size, dtype=jnp.float32),
         )
 
@@ -528,7 +537,7 @@ class TestSolverContinuityAndStability:
             initial="healthy",
             horizon=1,
             steps_per_unit=4,
-            probability="state_probability",
+            probability=StateProbability(),
             age=jnp.arange(2, dtype=jnp.float32),
         ).probability
         assert result is not None
@@ -558,7 +567,7 @@ class TestSolverContinuityAndStability:
             initial="healthy",
             horizon=2,
             steps_per_unit=6,
-            probability="state_probability",
+            probability=StateProbability(),
             age=jnp.arange(3, dtype=jnp.float32),
         ).probability
         assert probability is not None
@@ -577,7 +586,7 @@ class TestSolverContinuityAndStability:
                 horizon=2,
                 steps_per_unit=6,
                 freeze_initial=False,
-                probability="state_probability",
+                probability=StateProbability(),
                 age=jnp.arange(3, dtype=jnp.float32),
             )
 
@@ -594,7 +603,7 @@ class TestSolverContinuityAndStability:
             initial="healthy",
             horizon=1,
             steps_per_unit=4,
-            probability="state_probability",
+            probability=StateProbability(),
             age=jnp.arange(2, dtype=jnp.float32),
         ).probability
         assert probability is not None
@@ -627,7 +636,7 @@ class TestSolverContinuityAndStability:
             initial="disabled",
             horizon=horizon,
             steps_per_unit=steps_per_unit,
-            probability="state_probability",
+            probability=StateProbability(),
             age=jnp.arange(batch_size, dtype=jnp.float32),
         )
 
@@ -675,7 +684,7 @@ class TestSolverEntry:
             initial_duration=2.0,
             horizon=1,
             steps_per_unit=8,
-            probability="point_mass",
+            probability=PointMass(),
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
@@ -696,7 +705,7 @@ class TestSolverEntry:
             initial_duration=jnp.array([0.0, 0.37]),
             horizon=1,
             steps_per_unit=8,
-            probability="point_mass",
+            probability=PointMass(),
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
@@ -712,7 +721,7 @@ class TestSolverEntry:
             initial=initial,
             horizon=1,
             steps_per_unit=8,
-            probability="point_mass",
+            probability=PointMass(),
             age=jnp.arange(3, dtype=jnp.float32),
         )
 
@@ -739,7 +748,7 @@ class TestSolverEntry:
             initial=dist,
             horizon=1,
             steps_per_unit=8,
-            probability="point_mass",
+            probability=PointMass(),
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
@@ -762,7 +771,7 @@ class TestSolverEntry:
             initial=dist,
             horizon=1,
             steps_per_unit=8,
-            probability="state_probability",
+            probability=StateProbability(),
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
@@ -878,7 +887,7 @@ class TestSolverEntry:
             initial_duration=d_0,
             horizon=horizon,
             steps_per_unit=steps_per_unit,
-            probability="state_probability",
+            probability=StateProbability(),
             age=jnp.arange(1, dtype=jnp.float32),
         )
 
@@ -930,7 +939,7 @@ class TestSolverEntry:
             ),
             horizon=horizon,
             steps_per_unit=steps_per_unit,
-            probability="state_probability",
+            probability=StateProbability(),
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
@@ -960,7 +969,7 @@ class TestBuiltInCallbacks:
         )
 
         full_result = illness_death_model.solve(
-            probability="full", **kwargs
+            probability=Full(), **kwargs
         ).probability
         assert set(full_result.keys()) == {"density", "point_mass"}
         assert full_result["density"].shape == (5, 2, 3, 8)
@@ -970,7 +979,7 @@ class TestBuiltInCallbacks:
         assert full_result["point_mass"]["healthy"].shape == (5, 2)
 
         marginal_components_result = illness_death_model.solve(
-            probability="marginal_components", **kwargs
+            probability=MarginalComponents(), **kwargs
         ).probability
         assert set(marginal_components_result.keys()) == {"density", "point_mass"}
         assert marginal_components_result["density"].shape == (5, 2, 3)
@@ -979,50 +988,44 @@ class TestBuiltInCallbacks:
         assert marginal_pm["healthy"].shape == (5, 2)
 
         state_probability_result = illness_death_model.solve(
-            probability="state_probability", **kwargs
+            probability=StateProbability(), **kwargs
         ).probability
         assert state_probability_result.shape == (5, 2, 3)
 
         point_mass_result = illness_death_model.solve(
-            probability="point_mass", **kwargs
+            probability=PointMass(), **kwargs
         ).probability
         assert set(point_mass_result.keys()) == {"healthy"}
         assert point_mass_result["healthy"].shape == (5, 2)
 
         density_result = illness_death_model.solve(
-            probability="density", **kwargs
+            probability=Density(), **kwargs
         ).probability
         assert density_result.shape == (5, 2, 3, 8)
 
         density_probability_result = illness_death_model.solve(
-            probability="density_probability", **kwargs
+            probability=DensityProbability(), **kwargs
         ).probability
         assert density_probability_result.shape == (5, 2, 3)
-
-        none_result = illness_death_model.solve(
-            probability="none", **kwargs
-        ).probability
-        assert none_result is None
 
         disabled_result = illness_death_model.solve(probability=None, **kwargs)
         assert disabled_result.probability is None
 
     @pytest.mark.parametrize(
-        "callback_name",
+        "probability_output",
         [
-            "none",
-            "full",
-            "marginal_components",
-            "state_probability",
-            "point_mass",
-            "density",
-            "density_probability",
+            Full(),
+            MarginalComponents(),
+            StateProbability(),
+            PointMass(),
+            Density(),
+            DensityProbability(),
         ],
     )
     def test_builtin_callbacks_do_not_recompile_on_repeat(
         self,
         illness_death_model,
-        callback_name,
+        probability_output,
     ):
         _solver_cache.clear_cache()
         kwargs = dict(
@@ -1034,9 +1037,9 @@ class TestBuiltInCallbacks:
         )
 
         cache_before = _solver_cache._cache_size()
-        illness_death_model.solve(probability=callback_name, **kwargs)
+        illness_death_model.solve(probability=probability_output, **kwargs)
         cache_after_first = _solver_cache._cache_size()
-        illness_death_model.solve(probability=callback_name, **kwargs)
+        illness_death_model.solve(probability=probability_output, **kwargs)
         cache_after_second = _solver_cache._cache_size()
 
         assert cache_after_first == cache_before + 1
@@ -1096,7 +1099,7 @@ class TestBuiltInCallbacks:
         assert cache_after_first == cache_before + 1
         assert cache_after_second == cache_after_first + 1
 
-    def test_removed_builtin_callbacks_raise_unknown_callback(
+    def test_string_probability_raises_type_error(
         self, illness_death_model
     ):
         kwargs = dict(
@@ -1106,13 +1109,11 @@ class TestBuiltInCallbacks:
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
-        with pytest.raises(ValueError, match="collapse_point"):
-            illness_death_model.solve(probability="collapse_point", **kwargs)
+        with pytest.raises(TypeError, match="probability must be"):
+            illness_death_model.solve(probability="state_probability", **kwargs)
 
-        with pytest.raises(ValueError, match="point_only_no_duration"):
-            illness_death_model.solve(
-                probability="point_only_no_duration", **kwargs
-            )
+        with pytest.raises(TypeError, match="probability must be"):
+            illness_death_model.solve(probability="collapse_point", **kwargs)
 
 
 class TestModelResultIsPyTree:
@@ -1139,12 +1140,12 @@ class TestModelResultIsPyTree:
     def test_jit_round_trip_with_cashflows(self, illness_death_model):
         kwargs = self._kwargs()
         cashflows = illness_death_model.state_space.cashflows(
-            {"annuity": jact.StateRate({"healthy": _constant_payment(1.0)})}
+            {"annuity": jact.cashflows.StateRate({"healthy": _constant_payment(1.0)})}
         )
         out = jax.jit(
             lambda: illness_death_model.solve(
                 cashflows=cashflows,
-                cashflow_views={"annuity": jact.Raw("annuity")},
+                cashflow_views={"annuity": jact.cashflows.Raw("annuity")},
                 **kwargs,
             )
         )()

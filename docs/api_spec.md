@@ -16,13 +16,21 @@ The public API has four layers:
 - `solve()`: a midpoint-quadrature solver over the reachable subgraph that can
   emit both probabilities and cashflows in one fused JAX program.
 
-Use `import jact` for the main surface: `jact.StateSpace`,
-`jact.InitialDistribution`, `jact.solve`, `jact.StateRate`,
-`jact.TransitionLump`, `jact.ScheduledEvent`, `jact.Raw`, `jact.Group`,
-`jact.Total`, `jact.ByState`, and `jact.ByKind`.
-Advanced inspection and callback objects stay in submodules such as
-`jact.callbacks.StateCarry`, `jact.callbacks.PointMass`,
-`jact.model.ReducedModel`, and `jact.model.TransitionInfo`.
+Use `import jact` for the main surface. The top-level names are
+`jact.StateSpace`, `jact.Model`, `jact.InitialDistribution`,
+`jact.ModelResult`, and `jact.solve`. Domain-specific types live under two
+public submodules:
+
+- `jact.cashflows` — declarations (`StateRate`, `TransitionLump`,
+  `ScheduledEvent`, `CashflowDeclaration`) and views (`Raw`, `Group`,
+  `Total`, `ByState`, `ByKind`).
+- `jact.probability` — output reducers (`StateProbability`,
+  `DensityProbability`, `Density`, `PointMass`, `MarginalComponents`,
+  `Full`) and the `ProbabilityOutput` union.
+
+Advanced inspection types stay in private modules: `StateCarry` is
+available as `jact.probability.StateCarry`; `ReducedModel` and
+`TransitionInfo` live under `jact.model`.
 
 Files under `archive/original_prototype/` and `notes/` are background material
 only. They are not part of the public contract.
@@ -324,9 +332,9 @@ Cashflows are declared from a `StateSpace`, not from a `Model`:
 
 ```python
 cashflows = state_space.cashflows({
-    "premium": jact.StateRate({"healthy": premium_fn}),
-    "death": jact.TransitionLump({("healthy", "dead"): death_fn}),
-    "bonus": jact.ScheduledEvent(
+    "premium": jact.cashflows.StateRate({"healthy": premium_fn}),
+    "death": jact.cashflows.TransitionLump({("healthy", "dead"): death_fn}),
+    "bonus": jact.cashflows.ScheduledEvent(
         when=event_time_fn,
         payments={"healthy": bonus_fn},
     ),
@@ -423,11 +431,11 @@ Aggregation and time-only weighting are declared per solve through
 
 ```python
 cashflow_views = {
-    "raw": jact.Raw(),
-    "benefits": jact.Group(["death", "bonus"]),
-    "total": jact.Total(),
-    "by_state": jact.ByState(),
-    "by_kind": jact.ByKind(),
+    "raw": jact.cashflows.Raw(),
+    "benefits": jact.cashflows.Group(["death", "bonus"]),
+    "total": jact.cashflows.Total(),
+    "by_state": jact.cashflows.ByState(),
+    "by_kind": jact.cashflows.ByKind(),
 }
 ```
 
@@ -494,9 +502,9 @@ result = model.solve(
     initial="healthy",
     horizon=10,
     steps_per_unit=12,
-    probability="state_probability",
+    probability=jact.probability.StateProbability(),
     cashflows=cashflows,
-    cashflow_views={"pv": jact.Total(weight=flat_discount, terminal=True)},
+    cashflow_views={"pv": jact.cashflows.Total(weight=flat_discount, terminal=True)},
     record_every=12,
     age=age_array,
 )
@@ -510,7 +518,7 @@ Parameters:
 | `initial_duration` | float or `(batch,)` array | Only valid with `str` and `(batch,)` `initial` forms |
 | `horizon` | positive int | Number of time units |
 | `steps_per_unit` | positive int | Solver steps per time unit |
-| `probability` | `str`, callable, or `None` | Probability reducer; default is `"state_probability"` |
+| `probability` | `ProbabilityOutput`, callable, or `None` | Probability reducer; default is `jact.probability.StateProbability()` |
 | `cashflows` | `CashflowDeclaration` or `None` | Cashflow components to evaluate |
 | `cashflow_views` | mapping or `None` | Solve-time views; requires `cashflows` |
 | `record_every` | positive int | Must divide `horizon * steps_per_unit` |
@@ -545,11 +553,8 @@ result.cashflows      # None when cashflows=None was passed
 ```
 
 `result.states` is the tuple of reachable states in reduced order. Disabled
-outputs are `None` rather than missing attributes. `probability="none"` is
-different from `probability=None`: the string selects a callback that returns
-`None` per step (so `result.probability` is a stacked tree of `None` leaves),
-while `probability=None` disables probability output and sets
-`result.probability` to `None` itself.
+outputs are `None` rather than missing attributes. `probability=None`
+disables probability output entirely.
 
 `ModelResult` is registered as a JAX PyTree, so `jax.jit(model.solve)` and
 `jax.tree.map(...)` over the result both work. `states` is treated as static
@@ -581,11 +586,11 @@ The reduced solver state is one `StateCarry` per reachable state:
 ```python
 class StateCarry(NamedTuple):
     density: jnp.ndarray
-    point_mass: PointMass | None
+    point_mass: _PointMass | None
 ```
 
 - `density` is the duration density on the solver grid, shape `(batch, D)`,
-- `point_mass` is a per-individual Dirac `PointMass(value, d_0)` or `None`.
+- `point_mass` is a per-individual Dirac `_PointMass(value, d_0)` or `None`.
 
 Each solver step:
 
@@ -597,31 +602,32 @@ Each solver step:
 5. evolves point masses along `(t, d_0 + t)` with the same competing-risks
    logic and routes their outgoing mass into duration-zero density.
 
-Built-in probability callbacks. Output shapes use `T` for the recorded
-time axis (length `horizon * steps_per_unit / record_every + 1`), `B` for
-batch, `S` for the number of reachable states (in `result.states`
+Built-in probability output reducers. Output shapes use `T` for the
+recorded time axis (length `horizon * steps_per_unit / record_every + 1`),
+`B` for batch, `S` for the number of reachable states (in `result.states`
 order), and `D` for the duration grid:
 
-| Callback | Output |
+| Reducer | Output |
 |---|---|
-| `none` | `None` |
-| `state_probability` | `(T, B, S)` tensor — duration-marginal density plus point-mass `value` per state. |
-| `density_probability` | `(T, B, S)` tensor — duration-marginal density only; excludes point masses. |
-| `density` | `(T, B, S, D)` tensor — continuous duration density per state; excludes point masses. |
-| `point_mass` | `{state_name: (T, B)}` — only states that carry a point mass appear. |
-| `marginal_components` | `{"density": (T, B, S), "point_mass": {state_name: (T, B)}}` |
-| `full` | `{"density": (T, B, S, D), "point_mass": {state_name: (T, B)}}` |
+| `StateProbability()` | `(T, B, S)` tensor — duration-marginal density plus point-mass `value` per state. |
+| `DensityProbability()` | `(T, B, S)` tensor — duration-marginal density only; excludes point masses. |
+| `Density()` | `(T, B, S, D)` tensor — continuous duration density per state; excludes point masses. |
+| `PointMass()` | `{state_name: (T, B)}` — only states that carry a point mass appear. |
+| `MarginalComponents()` | `{"density": (T, B, S), "point_mass": {state_name: (T, B)}}` |
+| `Full()` | `{"density": (T, B, S, D), "point_mass": {state_name: (T, B)}}` |
 
-Built-in reducers do not expose point-mass duration. If a downstream consumer
-needs `PointMass.d_0`, use a custom probability callback and read it directly
-from the internal `StateCarry` objects.
-After marginalizing over duration, `state_probability` combines continuous
+These types live under `jact.probability` and form the
+`ProbabilityOutput` union. Built-in reducers do not expose point-mass
+duration. If a downstream consumer needs `_PointMass.d_0`, supply a custom
+probability callable and read it directly from the internal `StateCarry`
+objects.
+After marginalizing over duration, `StateProbability` combines continuous
 and point-mass probability into total state occupancy.
 
-Custom probability callbacks have signature
+Custom probability callables have signature
 `(state: tuple[StateCarry, ...]) -> PyTree`. Their returned PyTree is
 stacked by `jax.lax.scan` along a new leading time axis. `StateCarry` and
-`PointMass` are internal solver types and live under `jact.callbacks`;
+`_PointMass` are internal solver types and live under `jact.probability`;
 they are not part of the documented public API surface but remain
 importable for advanced use.
 

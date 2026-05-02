@@ -29,24 +29,14 @@ Example
 ...     initial="healthy",
 ...     horizon=10,
 ...     steps_per_unit=12,
+...     probability=jact.probability.StateProbability(),
 ...     age=ages,
 ... )
 """
 
 from importlib.metadata import PackageNotFoundError, version
 
-from . import callbacks
-from .cashflows import (
-    ByKind,
-    ByState,
-    CashflowDeclaration,
-    Group,
-    Raw,
-    ScheduledEvent,
-    StateRate,
-    Total,
-    TransitionLump,
-)
+from . import cashflows, probability
 from .initial_distribution import InitialDistribution
 from .model import Model
 from .result import ModelResult
@@ -65,14 +55,6 @@ __all__ = [
     "InitialDistribution",
     "ModelResult",
     "solve",
-    "callbacks",
-    "StateRate",
-    "TransitionLump",
-    "ScheduledEvent",
-    "Raw",
-    "Group",
-    "Total",
-    "ByState",
-    "ByKind",
-    "CashflowDeclaration",
+    "cashflows",
+    "probability",
 ]
