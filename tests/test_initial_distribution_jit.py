@@ -20,7 +20,11 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import pytest
-from jaxlib.xla_extension import XlaRuntimeError
+
+try:
+    from jax.errors import JaxRuntimeError as XlaRuntimeError
+except ImportError:
+    from jaxlib.xla_extension import XlaRuntimeError
 
 import jact
 

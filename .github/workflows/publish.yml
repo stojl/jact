@@ -40,8 +40,8 @@ jobs:
               )
           PY
 
-      - name: Run core release tests
-        run: pytest tests/test_solver.py tests/test_initial_distribution_integration.py -q
+      - name: Run full test suite
+        run: pytest -q
 
       - name: Build distributions
         run: python -m build

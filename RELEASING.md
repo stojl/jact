@@ -23,7 +23,7 @@ rm -rf build dist src/*.egg-info
 pip install -e '.[dev]'
 python -m build --no-isolation
 python -m twine check dist/*
-pytest tests/test_solver.py tests/test_initial_distribution_integration.py -q
+pytest -q
 ```
 
 5. Commit the version bump and related release notes.
@@ -47,8 +47,7 @@ python -m venv /tmp/jact-release-check
 ## Notes
 
 - The release workflow rebuilds the sdist and wheel on GitHub before upload.
-- The release workflow runs the same core solver/integration test slice used in
-  the checklist above.
+- The release workflow runs the full test suite used in the checklist above.
 - `twine check` is part of the release gate to catch metadata and README
   rendering issues before publish.
 - If you need a dry run before the first real release, publish the same artifacts
