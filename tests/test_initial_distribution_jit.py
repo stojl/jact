@@ -252,6 +252,9 @@ class TestStaticVsTracedSeparation:
 
         with pytest.raises(
             XlaRuntimeError,
-            match="per_individual states must index into the declared initial-state set",
+            match=(
+                "per_individual states must index into the declared "
+                "initial-state set"
+            ),
         ):
             compiled(jnp.array([0, 2], dtype=jnp.int32))

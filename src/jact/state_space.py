@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import jax.numpy as jnp
 
@@ -23,10 +23,10 @@ class StateSpace:
 
     Parameters
     ----------
-    states : Sequence[str]
-        Ordered list of state names.
-    transitions : Sequence[tuple[str, str]]
-        List of allowed transitions as (source, target) pairs.
+    states : Iterable[str]
+        Ordered iterable of state names.
+    transitions : Iterable[tuple[str, str]]
+        Iterable of allowed transitions as (source, target) pairs.
 
     Examples
     --------
@@ -46,8 +46,8 @@ class StateSpace:
 
     def __init__(
         self,
-        states: Sequence[str],
-        transitions: Sequence[tuple[str, str]],
+        states: Iterable[str],
+        transitions: Iterable[tuple[str, str]],
     ):
         states = tuple(states)
         transitions = tuple(transitions)

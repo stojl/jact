@@ -111,7 +111,9 @@ class Model:
         # Groups
         for fn, trans_list in self._groups_map.items():
             if not trans_list:
-                raise ValueError("Group assignments must cover at least one transition.")
+                raise ValueError(
+                    "Group assignments must cover at least one transition."
+                )
             for i, (src, tgt) in enumerate(trans_list):
                 self._register_transition(
                     src, tgt, "groups", fn, index=i, covered=covered
@@ -417,9 +419,6 @@ def _make_slice_wrapper(fn: Callable, index: int) -> Callable:
                 "Multi-output assignment returned too few transition "
                 f"outputs: expected at least {index + 1}, got {size}."
             )
-        try:
-            return full_output[index]
-        except Exception as exc:
-            raise
+        return full_output[index]
 
     return wrapper
