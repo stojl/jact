@@ -101,6 +101,38 @@ class StateCarry(NamedTuple):
 CallbackFn = Callable[[tuple[StateCarry, ...]], Any]
 
 
+@jax.jit
+def _none_callback(state: tuple[StateCarry, ...]):
+    del state
+    return None
+
+
+@jax.jit
+def _state_probability_callback(state: tuple[StateCarry, ...]):
+    return jnp.stack(
+        tuple(
+            jnp.sum(carry.density, axis=-1)
+            if carry.point_mass is None
+            else jnp.sum(carry.density, axis=-1) + carry.point_mass.value
+            for carry in state
+        ),
+        axis=-1,
+    )
+
+
+@jax.jit
+def _density_callback(state: tuple[StateCarry, ...]):
+    return jnp.stack(tuple(carry.density for carry in state), axis=-2)
+
+
+@jax.jit
+def _density_probability_callback(state: tuple[StateCarry, ...]):
+    return jnp.stack(
+        tuple(jnp.sum(carry.density, axis=-1) for carry in state),
+        axis=-1,
+    )
+
+
 def _point_mass_dict(
     state: tuple[StateCarry, ...],
     state_names: tuple[str, ...],
@@ -115,12 +147,7 @@ def _point_mass_dict(
 def none_callback(state_names: tuple[str, ...]) -> CallbackFn:
     """Return nothing. Use when only side effects of the solve matter."""
     del state_names
-
-    def fn(state: tuple[StateCarry, ...]):
-        del state
-        return None
-
-    return fn
+    return _none_callback
 
 
 def full(state_names: tuple[str, ...]) -> CallbackFn:
@@ -155,19 +182,7 @@ def marginal_components(state_names: tuple[str, ...]) -> CallbackFn:
 def state_probability(state_names: tuple[str, ...]) -> CallbackFn:
     """Total state occupancy after marginalizing over duration."""
     del state_names
-
-    def fn(state: tuple[StateCarry, ...]):
-        return jnp.stack(
-            tuple(
-                jnp.sum(carry.density, axis=-1)
-                if carry.point_mass is None
-                else jnp.sum(carry.density, axis=-1) + carry.point_mass.value
-                for carry in state
-            ),
-            axis=-1,
-        )
-
-    return fn
+    return _state_probability_callback
 
 
 def point_mass(state_names: tuple[str, ...]) -> CallbackFn:
@@ -182,24 +197,13 @@ def point_mass(state_names: tuple[str, ...]) -> CallbackFn:
 def density(state_names: tuple[str, ...]) -> CallbackFn:
     """Absolutely continuous duration density per state, stacked into a tensor."""
     del state_names
-
-    def fn(state: tuple[StateCarry, ...]):
-        return jnp.stack(tuple(carry.density for carry in state), axis=-2)
-
-    return fn
+    return _density_callback
 
 
 def density_probability(state_names: tuple[str, ...]) -> CallbackFn:
     """Duration-marginal density per state, stacked into a tensor."""
     del state_names
-
-    def fn(state: tuple[StateCarry, ...]):
-        return jnp.stack(
-            tuple(jnp.sum(carry.density, axis=-1) for carry in state),
-            axis=-1,
-        )
-
-    return fn
+    return _density_probability_callback
 
 
 _CALLBACKS = {
