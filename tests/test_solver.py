@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -102,6 +103,20 @@ def _rank_one_output_intensity(t, d, **kwargs):
 def _wrong_width_output_intensity(t, d, **kwargs):
     batch = kwargs["age"].shape[0]
     return jnp.full((batch, d.shape[-1] + 1), 0.1)
+
+
+def _rate_parameter_intensity(t, d, **kwargs):
+    del t
+    rate = kwargs["rate"][:, None]
+    return jnp.broadcast_to(rate, (rate.shape[0], d.shape[-1]))
+
+
+def _healthy_probability_callback(state):
+    carry = state[0]
+    total = jnp.sum(carry.density, axis=-1)
+    if carry.point_mass is not None:
+        total = total + carry.point_mass.value
+    return total
 
 
 class TestPointMassValidation:
@@ -245,6 +260,83 @@ class TestSolverAgainstClosedForm:
             rtol=0.0,
         )
         assert jnp.allclose(probability, expected, atol=5e-3, rtol=0.0)
+
+
+class TestSolverAutodiff:
+    @pytest.fixture
+    def autodiff_model(self):
+        state_space = jact.StateSpace(
+            states=["healthy", "dead"],
+            transitions=[("healthy", "dead")],
+        )
+        return state_space.build(
+            transitions={("healthy", "dead"): _rate_parameter_intensity}
+        )
+
+    def test_state_probability_supports_reverse_mode_with_record_every(
+        self, autodiff_model
+    ):
+        horizon = 2
+        rate = jnp.array(0.3, dtype=jnp.float32)
+
+        def loss(rate_scalar):
+            probability = autodiff_model.solve(
+                initial="healthy",
+                horizon=horizon,
+                steps_per_unit=8,
+                record_every=4,
+                probability="state_probability",
+                rate=jnp.array([rate_scalar], dtype=jnp.float32),
+            )["probability"]
+            return probability[-1, 0, 1]
+
+        grad = jax.grad(loss)(rate)
+        expected = horizon * jnp.exp(-rate * horizon)
+
+        assert jnp.allclose(grad, expected, atol=1e-6, rtol=1e-6)
+
+    def test_state_probability_supports_forward_mode(self, autodiff_model):
+        horizon = 2
+        rate = jnp.array(0.3, dtype=jnp.float32)
+
+        def loss(rate_scalar):
+            probability = autodiff_model.solve(
+                initial="healthy",
+                horizon=horizon,
+                steps_per_unit=8,
+                probability="state_probability",
+                rate=jnp.array([rate_scalar], dtype=jnp.float32),
+            )["probability"]
+            return probability[-1, 0, 1]
+
+        primal, tangent = jax.jvp(loss, (rate,), (jnp.array(1.0, dtype=rate.dtype),))
+        expected_primal = 1.0 - jnp.exp(-rate * horizon)
+        expected_tangent = horizon * jnp.exp(-rate * horizon)
+
+        assert jnp.allclose(primal, expected_primal, atol=1e-6, rtol=1e-6)
+        assert jnp.allclose(tangent, expected_tangent, atol=1e-6, rtol=1e-6)
+
+    def test_custom_probability_callback_supports_reverse_mode(
+        self, autodiff_model
+    ):
+        horizon = 2
+        rate = jnp.array(0.3, dtype=jnp.float32)
+
+        def loss(rate_scalar):
+            probability = autodiff_model.solve(
+                initial="healthy",
+                horizon=horizon,
+                steps_per_unit=8,
+                record_every=4,
+                probability=_healthy_probability_callback,
+                rate=jnp.array([rate_scalar], dtype=jnp.float32),
+            )["probability"]
+            return probability[-1, 0]
+
+        grad = jax.grad(loss)(rate)
+        expected = -horizon * jnp.exp(-rate * horizon)
+
+        assert jnp.allclose(grad, expected, atol=1e-6, rtol=1e-6)
 
     def test_solve_conserves_mass_for_two_state_cycle_with_backward_transition(self):
         rate = 0.7
