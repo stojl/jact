@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any, cast
 
 import pytest
 
@@ -66,8 +67,8 @@ class TestConstruction:
     def test_non_string_state_raises(self):
         with pytest.raises(TypeError, match="State names must be strings"):
             jact.StateSpace(
-                states=["a", 1],
-                transitions=[("a", "a")],  # type: ignore[list-item]
+                states=cast(Any, ["a", 1]),
+                transitions=[("a", "a")],
             )
 
     def test_duplicate_states_raise(self):

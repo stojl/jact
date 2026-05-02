@@ -510,24 +510,33 @@ Each solver step:
 5. evolves point masses along `(t, d_0 + t)` with the same competing-risks
    logic and routes their outgoing mass into duration-zero density.
 
-Built-in probability callbacks:
+Built-in probability callbacks. Output shapes use `T` for the recorded
+time axis (length `horizon * steps_per_unit / record_every + 1`), `B` for
+batch, `S` for the number of reachable states (in `result["states"]`
+order), and `D` for the duration grid:
 
-- `full`,
-- `marginal_components`,
-- `state_probability`,
-- `point_mass`,
-- `density`,
-- `density_probability`,
-- `none`.
+| Callback | Output |
+|---|---|
+| `none` | `None` |
+| `state_probability` | `(T, B, S)` tensor — duration-marginal density plus point-mass `value` per state. |
+| `density_probability` | `(T, B, S)` tensor — duration-marginal density only; excludes point masses. |
+| `density` | `(T, B, S, D)` tensor — continuous duration density per state; excludes point masses. |
+| `point_mass` | `{state_name: {"value": (T, B)}}` — only states that carry a point mass appear. |
+| `marginal_components` | `{"density": (T, B, S), "point_mass": {state_name: {"value": (T, B)}}}` |
+| `full` | `{"density": (T, B, S, D), "point_mass": {state_name: {"value": (T, B)}}}` |
 
-When duration is retained, the singular component remains explicit as
-`PointMass(value, d_0)` rather than being projected onto the duration grid.
-After marginalizing over duration, `state_probability` combines continuous and
-point-mass probability into total state occupancy.
+Built-in reducers do not expose point-mass duration. If a downstream consumer
+needs `PointMass.d_0`, use a custom probability callback and read it directly
+from the internal `StateCarry` objects.
+After marginalizing over duration, `state_probability` combines continuous
+and point-mass probability into total state occupancy.
 
 Custom probability callbacks have signature
-`(state: tuple[StateCarry, ...]) -> PyTree`. Their returned PyTree is stacked by
-`jax.lax.scan` along a new leading time axis.
+`(state: tuple[StateCarry, ...]) -> PyTree`. Their returned PyTree is
+stacked by `jax.lax.scan` along a new leading time axis. `StateCarry` and
+`PointMass` are internal solver types and live under `jact.callbacks`;
+they are not part of the documented public API surface but remain
+importable for advanced use.
 
 ## Numerical and JIT contract
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jact"
-version = "0.1.0"
+version = "0.1.1"
 description = "JAX-based transition probability computation for multi-state models"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -75,6 +75,13 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 88
 target-version = "py310"
+extend-exclude = [
+    "archive",
+    "benchmarks",
+    "docs",
+    "notes",
+    "tools",
+]
 
 [tool.ruff.lint]
 select = [

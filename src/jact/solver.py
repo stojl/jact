@@ -1007,7 +1007,7 @@ def solve(
     duration_left = grid[:, :-1]
     duration_mid = 0.5 * (duration_left + grid[:, 1:])
     step_size = 1 / steps_per_unit
-    prob_callback = resolve_callback(probability)
+    prob_callback = resolve_callback(probability, reduced.reachable_states)
     prepared_cashflow_components = _prepare_cashflow_components(
         cashflows,
         reduced.reachable_states,

@@ -8,8 +8,6 @@ import jax
 import jax.numpy as jnp
 
 __all__ = [
-    "PointMass",
-    "StateCarry",
     "density",
     "density_probability",
     "full",
@@ -50,7 +48,11 @@ def _validate_non_negative_if_concrete(value: jnp.ndarray) -> None:
 
 @jax.tree_util.register_pytree_node_class
 class PointMass:
-    """Per-individual point mass carried along a characteristic."""
+    """Per-individual point mass carried along a characteristic.
+
+    Internal solver pytree; not part of the public output surface. The
+    user-facing callbacks expose point-mass data as plain dicts.
+    """
 
     __slots__ = ("value", "d_0", "log_value")
 
@@ -87,69 +89,117 @@ class PointMass:
 
 
 class StateCarry(NamedTuple):
-    """Per-state solver carry."""
+    """Per-state solver carry.
+
+    Internal solver pytree; not part of the public output surface.
+    """
 
     density: jnp.ndarray
     point_mass: PointMass | None
 
 
-@jax.jit
-def none_callback(state: tuple[StateCarry, ...]):
+CallbackFn = Callable[[tuple[StateCarry, ...]], Any]
+
+
+def _point_mass_dict(
+    state: tuple[StateCarry, ...],
+    state_names: tuple[str, ...],
+) -> dict[str, dict[str, jnp.ndarray]]:
+    return {
+        state_names[i]: {"value": carry.point_mass.value}
+        for i, carry in enumerate(state)
+        if carry.point_mass is not None
+    }
+
+
+def none_callback(state_names: tuple[str, ...]) -> CallbackFn:
     """Return nothing. Use when only side effects of the solve matter."""
-    return None
+    del state_names
+
+    def fn(state: tuple[StateCarry, ...]):
+        del state
+        return None
+
+    return fn
 
 
-@jax.jit
-def full(state: tuple[StateCarry, ...]):
-    """Return the full pytree state unchanged."""
-    return state
+def full(state_names: tuple[str, ...]) -> CallbackFn:
+    """Per-state duration density and point masses, keyed by state name."""
+
+    def fn(state: tuple[StateCarry, ...]):
+        return {
+            "density": jnp.stack(
+                tuple(carry.density for carry in state), axis=-2
+            ),
+            "point_mass": _point_mass_dict(state, state_names),
+        }
+
+    return fn
 
 
-@jax.jit
-def marginal_components(state: tuple[StateCarry, ...]):
-    """Marginalize density over duration while keeping point masses explicit."""
-    return tuple(
-        StateCarry(
-            density=jnp.sum(carry.density, axis=-1),
-            point_mass=carry.point_mass,
+def marginal_components(state_names: tuple[str, ...]) -> CallbackFn:
+    """Duration-marginalized density per state plus point masses."""
+
+    def fn(state: tuple[StateCarry, ...]):
+        return {
+            "density": jnp.stack(
+                tuple(jnp.sum(carry.density, axis=-1) for carry in state),
+                axis=-1,
+            ),
+            "point_mass": _point_mass_dict(state, state_names),
+        }
+
+    return fn
+
+
+def state_probability(state_names: tuple[str, ...]) -> CallbackFn:
+    """Total state occupancy after marginalizing over duration."""
+    del state_names
+
+    def fn(state: tuple[StateCarry, ...]):
+        return jnp.stack(
+            tuple(
+                jnp.sum(carry.density, axis=-1)
+                if carry.point_mass is None
+                else jnp.sum(carry.density, axis=-1) + carry.point_mass.value
+                for carry in state
+            ),
+            axis=-1,
         )
-        for carry in state
-    )
+
+    return fn
 
 
-@jax.jit
-def state_probability(state: tuple[StateCarry, ...]):
-    """Return total state occupancy after marginalizing over duration."""
-    return jnp.stack(
-        tuple(
-            jnp.sum(carry.density, axis=-1)
-            if carry.point_mass is None
-            else jnp.sum(carry.density, axis=-1) + carry.point_mass.value
-            for carry in state
-        ),
-        axis=-1,
-    )
+def point_mass(state_names: tuple[str, ...]) -> CallbackFn:
+    """Point-mass component per state, keyed by state name."""
+
+    def fn(state: tuple[StateCarry, ...]):
+        return _point_mass_dict(state, state_names)
+
+    return fn
 
 
-@jax.jit
-def point_mass(state: tuple[StateCarry, ...]):
-    """Return only the point-mass component per state."""
-    return tuple(carry.point_mass for carry in state)
+def density(state_names: tuple[str, ...]) -> CallbackFn:
+    """Absolutely continuous duration density per state, stacked into a tensor."""
+    del state_names
+
+    def fn(state: tuple[StateCarry, ...]):
+        return jnp.stack(tuple(carry.density for carry in state), axis=-2)
+
+    return fn
 
 
-@jax.jit
-def density(state: tuple[StateCarry, ...]):
-    """Return only the absolutely continuous density per state."""
-    return tuple(carry.density for carry in state)
+def density_probability(state_names: tuple[str, ...]) -> CallbackFn:
+    """Duration-marginal density per state, stacked into a tensor."""
+    del state_names
 
+    def fn(state: tuple[StateCarry, ...]):
+        return jnp.stack(
+            tuple(jnp.sum(carry.density, axis=-1) for carry in state),
+            axis=-1,
+        )
 
-@jax.jit
-def density_probability(state: tuple[StateCarry, ...]):
-    """Return the duration-marginal density, restacked across states."""
-    return jnp.stack(
-        tuple(jnp.sum(carry.density, axis=-1) for carry in state),
-        axis=-1,
-    )
+    return fn
 
 
 _CALLBACKS = {
@@ -164,11 +214,12 @@ _CALLBACKS = {
 
 
 def resolve_callback(
-    callback: Union[None, str, Callable[[tuple[StateCarry, ...]], Any]],
-) -> Callable[[tuple[StateCarry, ...]], Any]:
-    """Resolve a callback specification to a callable."""
+    callback: Union[None, str, CallbackFn],
+    state_names: tuple[str, ...],
+) -> CallbackFn:
+    """Resolve a callback specification to a callable bound to ``state_names``."""
     if callback is None:
-        return none_callback
+        return none_callback(state_names)
     if callable(callback):
         return callback
     if isinstance(callback, str):
@@ -178,7 +229,7 @@ def resolve_callback(
                 f"Unknown callback '{callback}'. "
                 f"Available callbacks: {available}"
             )
-        return _CALLBACKS[callback]
+        return _CALLBACKS[callback](state_names)
     raise TypeError(
         "callback must be None, a string, or a callable, "
         f"got {type(callback)}"

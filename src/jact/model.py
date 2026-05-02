@@ -111,7 +111,9 @@ class Model:
         # Groups
         for fn, trans_list in self._groups_map.items():
             if not trans_list:
-                raise ValueError("Group assignments must cover at least one transition.")
+                raise ValueError(
+                    "Group assignments must cover at least one transition."
+                )
             for i, (src, tgt) in enumerate(trans_list):
                 self._register_transition(
                     src, tgt, "groups", fn, index=i, covered=covered
@@ -330,8 +332,15 @@ class Model:
             shorthand forms of ``initial``. Default is ``0.0``.
         probability : str, callable, or None, optional
             Probability output reducer. Default is
-            ``"state_probability"``. ``None`` disables
-            probability output.
+            ``"state_probability"``, which returns a ``(T, batch, S)``
+            tensor of per-state occupancy with state-name order given by
+            ``result["states"]``. Other built-in choices are ``"density"``,
+            ``"density_probability"``, ``"point_mass"``,
+            ``"marginal_components"``, ``"full"``, and ``"none"``; see
+            ``docs/api_spec.md`` for the full output-shape table. Custom
+            callables receive ``tuple[StateCarry, ...]`` and may return any
+            PyTree, which is stacked along the leading time axis. ``None``
+            disables probability output entirely.
         cashflows : CashflowDeclaration, optional
             Cashflow declaration to evaluate.
         cashflow_views : dict, optional
@@ -410,9 +419,6 @@ def _make_slice_wrapper(fn: Callable, index: int) -> Callable:
                 "Multi-output assignment returned too few transition "
                 f"outputs: expected at least {index + 1}, got {size}."
             )
-        try:
-            return full_output[index]
-        except Exception as exc:
-            raise
+        return full_output[index]
 
     return wrapper

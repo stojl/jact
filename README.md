@@ -92,7 +92,7 @@ Before cutting a PyPI release:
 rm -rf build dist src/*.egg-info
 python -m build --no-isolation
 python -m twine check dist/*
-pytest tests/test_solver.py tests/test_initial_distribution_integration.py -q
+pytest -q
 ```
 
 The tag-driven publish flow is documented in [RELEASING.md](RELEASING.md).
