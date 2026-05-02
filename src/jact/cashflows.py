@@ -9,6 +9,7 @@ from typing import Any, Callable, Mapping, Sequence
 import jax.numpy as jnp
 
 Scalar = int | float
+Weight = Callable[..., jnp.ndarray] | Scalar | jnp.ndarray | None
 
 __all__ = [
     "ByKind",
@@ -50,7 +51,7 @@ class Raw:
     """Return one raw component or all raw components."""
 
     name: str | None = None
-    weight: Callable[..., jnp.ndarray] | Scalar | None = None
+    weight: Weight = None
     terminal: bool = False
 
 
@@ -59,7 +60,7 @@ class Group:
     """Return the sum of selected raw components."""
 
     members: Sequence[str]
-    weight: Callable[..., jnp.ndarray] | Scalar | None = None
+    weight: Weight = None
     terminal: bool = False
 
 
@@ -67,7 +68,7 @@ class Group:
 class Total:
     """Return the sum of all raw components."""
 
-    weight: Callable[..., jnp.ndarray] | Scalar | None = None
+    weight: Weight = None
     terminal: bool = False
 
 
@@ -75,7 +76,7 @@ class Total:
 class ByState:
     """Return cashflows split by reachable state."""
 
-    weight: Callable[..., jnp.ndarray] | Scalar | None = None
+    weight: Weight = None
     terminal: bool = False
 
 
@@ -83,7 +84,7 @@ class ByState:
 class ByKind:
     """Return cashflows split by component kind."""
 
-    weight: Callable[..., jnp.ndarray] | Scalar | None = None
+    weight: Weight = None
     terminal: bool = False
 
 

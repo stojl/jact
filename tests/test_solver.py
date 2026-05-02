@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -10,6 +12,10 @@ import pytest
 import jact
 from jact.callbacks import PointMass, StateCarry
 from jact.solver import _KIND_STATE_RATE, _SOURCE_COMPONENT, _midpoint_solver
+
+# JAX's JitWrapped exposes .clear_cache()/._cache_size() at runtime but they
+# aren't in pyright's stubs — alias to Any for the cache-management tests.
+_solver_cache: Any = _midpoint_solver
 
 LAMBDA_HD = 0.3
 MU_HM = 0.2
@@ -1018,7 +1024,7 @@ class TestBuiltInCallbacks:
         illness_death_model,
         callback_name,
     ):
-        _midpoint_solver.clear_cache()
+        _solver_cache.clear_cache()
         kwargs = dict(
             initial="healthy",
             horizon=1,
@@ -1027,11 +1033,11 @@ class TestBuiltInCallbacks:
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
-        cache_before = _midpoint_solver._cache_size()
+        cache_before = _solver_cache._cache_size()
         illness_death_model.solve(probability=callback_name, **kwargs)
-        cache_after_first = _midpoint_solver._cache_size()
+        cache_after_first = _solver_cache._cache_size()
         illness_death_model.solve(probability=callback_name, **kwargs)
-        cache_after_second = _midpoint_solver._cache_size()
+        cache_after_second = _solver_cache._cache_size()
 
         assert cache_after_first == cache_before + 1
         assert cache_after_second == cache_after_first
@@ -1040,7 +1046,7 @@ class TestBuiltInCallbacks:
         self,
         illness_death_model,
     ):
-        _midpoint_solver.clear_cache()
+        _solver_cache.clear_cache()
         kwargs = dict(
             initial="healthy",
             horizon=1,
@@ -1049,15 +1055,15 @@ class TestBuiltInCallbacks:
             age=jnp.arange(2, dtype=jnp.float32),
         )
 
-        cache_before = _midpoint_solver._cache_size()
+        cache_before = _solver_cache._cache_size()
         illness_death_model.solve(
             probability=_healthy_probability_callback, **kwargs
         )
-        cache_after_first = _midpoint_solver._cache_size()
+        cache_after_first = _solver_cache._cache_size()
         illness_death_model.solve(
             probability=_healthy_probability_callback, **kwargs
         )
-        cache_after_second = _midpoint_solver._cache_size()
+        cache_after_second = _solver_cache._cache_size()
 
         assert cache_after_first == cache_before + 1
         assert cache_after_second == cache_after_first
@@ -1066,7 +1072,7 @@ class TestBuiltInCallbacks:
         self,
         illness_death_model,
     ):
-        _midpoint_solver.clear_cache()
+        _solver_cache.clear_cache()
         kwargs = dict(
             initial="healthy",
             horizon=1,
@@ -1081,11 +1087,11 @@ class TestBuiltInCallbacks:
 
             return callback
 
-        cache_before = _midpoint_solver._cache_size()
+        cache_before = _solver_cache._cache_size()
         illness_death_model.solve(probability=make_callback(), **kwargs)
-        cache_after_first = _midpoint_solver._cache_size()
+        cache_after_first = _solver_cache._cache_size()
         illness_death_model.solve(probability=make_callback(), **kwargs)
-        cache_after_second = _midpoint_solver._cache_size()
+        cache_after_second = _solver_cache._cache_size()
 
         assert cache_after_first == cache_before + 1
         assert cache_after_second == cache_after_first + 1
