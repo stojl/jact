@@ -46,13 +46,19 @@ def _validate_non_negative_if_concrete(value: jnp.ndarray) -> None:
         if bool(jnp.any(arr < 0)):
             raise ValueError("value must be non-negative.")
     except Exception as exc:  # pragma: no cover - tracer path
-        if "tracer" not in type(exc).__name__.lower():
-            try:
-                message = str(exc).lower()
-            except Exception:  # pragma: no cover
-                message = ""
-            if "tracer" not in message and "concret" not in message:
-                raise
+        if not _is_tracer_or_concretization_error(exc):
+            raise
+
+
+def _is_tracer_or_concretization_error(exc: Exception) -> bool:
+    exc_type = type(exc).__name__.lower()
+    if "tracer" in exc_type:
+        return True
+    try:
+        message = str(exc).lower()
+    except Exception:  # pragma: no cover
+        message = ""
+    return "tracer" in message or "concret" in message
 
 
 @jax.tree_util.register_pytree_node_class

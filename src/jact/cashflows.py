@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from numbers import Number
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 
 import jax.numpy as jnp
 
@@ -124,6 +125,11 @@ def _validate_payment_mapping(payments: Any, field: str) -> Mapping[Any, Any]:
     return dict(payments)
 
 
+def _validate_state_payments(state_space: Any, payments: Mapping[Any, Any]) -> None:
+    for state in payments:
+        state_space._check_state(state)
+
+
 def _is_scalar_array_like(value: Any) -> bool:
     if value is None:
         return False
@@ -162,8 +168,7 @@ def validate_cashflow_components(
                 component.payments,
                 f"StateRate('{name}').payments",
             )
-            for state in payments:
-                state_space._check_state(state)
+            _validate_state_payments(state_space, payments)
             frozen_component = StateRate(payments=payments)
         elif isinstance(component, TransitionLump):
             payments = _validate_payment_mapping(
@@ -187,8 +192,7 @@ def validate_cashflow_components(
                 component.payments,
                 f"ScheduledEvent('{name}').payments",
             )
-            for state in payments:
-                state_space._check_state(state)
+            _validate_state_payments(state_space, payments)
             frozen_component = ScheduledEvent(
                 when=component.when,
                 payments=payments,
@@ -214,6 +218,14 @@ def _validate_view_common(view: Any) -> None:
     raise TypeError("cashflow view weight must be None, a scalar, or callable.")
 
 
+def _normalised_view_kwargs(view: Any) -> dict[str, Any]:
+    _validate_view_common(view)
+    return {
+        "weight": _normalise_weight(view.weight),
+        "terminal": view.terminal,
+    }
+
+
 def validate_cashflow_views(
     declaration: CashflowDeclaration,
     views: Mapping[str, Raw | Group | Total | ByState | ByKind] | None,
@@ -235,11 +247,9 @@ def validate_cashflow_views(
         seen.add(name)
 
         if isinstance(view, Raw):
-            _validate_view_common(view)
             view = Raw(
                 name=view.name,
-                weight=_normalise_weight(view.weight),
-                terminal=view.terminal,
+                **_normalised_view_kwargs(view),
             )
             if view.name is not None and view.name not in component_names:
                 raise ValueError(
@@ -247,7 +257,6 @@ def validate_cashflow_views(
                     f"'{view.name}'."
                 )
         elif isinstance(view, Group):
-            _validate_view_common(view)
             if isinstance(view.members, str) or not view.members:
                 raise ValueError(f"Group view '{name}' requires members.")
             members = tuple(view.members)
@@ -259,15 +268,10 @@ def validate_cashflow_views(
                     )
             view = Group(
                 members=members,
-                weight=_normalise_weight(view.weight),
-                terminal=view.terminal,
+                **_normalised_view_kwargs(view),
             )
         elif isinstance(view, (Total, ByState, ByKind)):
-            _validate_view_common(view)
-            view = type(view)(
-                weight=_normalise_weight(view.weight),
-                terminal=view.terminal,
-            )
+            view = type(view)(**_normalised_view_kwargs(view))
         else:
             raise TypeError(
                 "cashflow views must be Raw, Group, Total, ByState, or ByKind; "

@@ -29,7 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-import jact
+import jact  # noqa: E402,I001
 
 
 MAX_BATCH_SIZE = 1_000
@@ -407,18 +407,23 @@ def _build_cashflow_scenarios(
         return config.cashflow_scenarios in ("all", name)
 
     def unit_state_cashflows():
-        return model.state_space.cashflows({
-            "annuity": jact.StateRate({
-                state: _constant_payment(1.0, dtype) for state in transient_states
-            })
-        })
+        return model.state_space.cashflows(
+            {
+                "annuity": jact.cashflows.StateRate(
+                    {
+                        state: _constant_payment(1.0, dtype)
+                        for state in transient_states
+                    }
+                )
+            }
+        )
 
     if include("unit-state-terminal"):
         scenarios.append(
             CashflowScenario(
                 name="unit-state-terminal",
                 cashflows=unit_state_cashflows(),
-                views={"pv": jact.Total(terminal=True)},
+                views={"pv": jact.cashflows.Total(terminal=True)},
                 record_every=step_count,
             )
         )
@@ -428,8 +433,8 @@ def _build_cashflow_scenarios(
             CashflowScenario(
                 name="unit-state-terminal-with-probability",
                 cashflows=unit_state_cashflows(),
-                views={"pv": jact.Total(terminal=True)},
-                probability="state_probability",
+                views={"pv": jact.cashflows.Total(terminal=True)},
+                probability=jact.probability.StateProbability(),
                 record_every=step_count,
             )
         )
@@ -439,7 +444,7 @@ def _build_cashflow_scenarios(
             CashflowScenario(
                 name="unit-state-stream",
                 cashflows=unit_state_cashflows(),
-                views={"pv": jact.Total()},
+                views={"pv": jact.cashflows.Total()},
             )
         )
 
@@ -448,52 +453,64 @@ def _build_cashflow_scenarios(
             CashflowScenario(
                 name="unit-state-stream-with-probability",
                 cashflows=unit_state_cashflows(),
-                views={"pv": jact.Total()},
-                probability="state_probability",
+                views={"pv": jact.cashflows.Total()},
+                probability=jact.probability.StateProbability(),
             )
         )
 
     if include("unit-transition-terminal"):
-        cashflows = model.state_space.cashflows({
-            "benefit": jact.TransitionLump({
-                transition: _constant_payment(1.0, dtype)
-                for transition in transitions
-            })
-        })
+        cashflows = model.state_space.cashflows(
+            {
+                "benefit": jact.cashflows.TransitionLump(
+                    {
+                        transition: _constant_payment(1.0, dtype)
+                        for transition in transitions
+                    }
+                )
+            }
+        )
         scenarios.append(
             CashflowScenario(
                 name="unit-transition-terminal",
                 cashflows=cashflows,
-                views={"pv": jact.Total(terminal=True)},
+                views={"pv": jact.cashflows.Total(terminal=True)},
                 record_every=step_count,
             )
         )
 
     if include("mixed-streams"):
         event_states = transient_states[: max(1, min(2, len(transient_states)))]
-        cashflows = model.state_space.cashflows({
-            "premium": jact.StateRate({
-                state: _constant_payment(-1.0, dtype) for state in transient_states
-            }),
-            "benefit": jact.TransitionLump({
-                transition: _constant_payment(10.0, dtype)
-                for transition in transitions
-            }),
-            "bonus": jact.ScheduledEvent(
-                when=_event_time,
-                payments={
-                    state: _constant_payment(2.0, dtype) for state in event_states
-                },
-            ),
-        })
+        cashflows = model.state_space.cashflows(
+            {
+                "premium": jact.cashflows.StateRate(
+                    {
+                        state: _constant_payment(-1.0, dtype)
+                        for state in transient_states
+                    }
+                ),
+                "benefit": jact.cashflows.TransitionLump(
+                    {
+                        transition: _constant_payment(10.0, dtype)
+                        for transition in transitions
+                    }
+                ),
+                "bonus": jact.cashflows.ScheduledEvent(
+                    when=_event_time,
+                    payments={
+                        state: _constant_payment(2.0, dtype)
+                        for state in event_states
+                    },
+                ),
+            }
+        )
         scenarios.append(
             CashflowScenario(
                 name="mixed-streams",
                 cashflows=cashflows,
                 views={
-                    "raw": jact.Raw(),
-                    "total": jact.Total(),
-                    "terminal": jact.Total(terminal=True),
+                    "raw": jact.cashflows.Raw(),
+                    "total": jact.cashflows.Total(),
+                    "terminal": jact.cashflows.Total(terminal=True),
                 },
             )
         )
@@ -507,40 +524,56 @@ def _build_cashflow_scenarios(
             transition: _involved_payment(5.0 + index, dtype)
             for index, transition in enumerate(transitions)
         }
-        cashflows = model.state_space.cashflows({
-            "salary_rate": jact.StateRate(state_payments),
-            "claim": jact.TransitionLump(transition_payments),
-        })
+        cashflows = model.state_space.cashflows(
+            {
+                "salary_rate": jact.cashflows.StateRate(state_payments),
+                "claim": jact.cashflows.TransitionLump(transition_payments),
+            }
+        )
         scenarios.append(
             CashflowScenario(
                 name="involved-payments",
                 cashflows=cashflows,
                 views={
-                    "net": jact.Total(weight=_involved_weight),
-                    "state": jact.ByState(weight=_involved_weight, terminal=True),
-                    "kind": jact.ByKind(weight=_involved_weight, terminal=True),
+                    "net": jact.cashflows.Total(weight=_involved_weight),
+                    "state": jact.cashflows.ByState(
+                        weight=_involved_weight,
+                        terminal=True,
+                    ),
+                    "kind": jact.cashflows.ByKind(
+                        weight=_involved_weight,
+                        terminal=True,
+                    ),
                 },
             )
         )
 
     if include("scheduled-terminal"):
         event_states = transient_states[: max(1, min(3, len(transient_states)))]
-        cashflows = model.state_space.cashflows({
-            "scheduled": jact.ScheduledEvent(
-                when=_event_time,
-                payments={
-                    state: _involved_payment(1.5 + index, dtype)
-                    for index, state in enumerate(event_states)
-                },
-            )
-        })
+        cashflows = model.state_space.cashflows(
+            {
+                "scheduled": jact.cashflows.ScheduledEvent(
+                    when=_event_time,
+                    payments={
+                        state: _involved_payment(1.5 + index, dtype)
+                        for index, state in enumerate(event_states)
+                    },
+                )
+            }
+        )
         scenarios.append(
             CashflowScenario(
                 name="scheduled-terminal",
                 cashflows=cashflows,
                 views={
-                    "pv": jact.Total(weight=_involved_weight, terminal=True),
-                    "state": jact.ByState(weight=_involved_weight, terminal=True),
+                    "pv": jact.cashflows.Total(
+                        weight=_involved_weight,
+                        terminal=True,
+                    ),
+                    "state": jact.cashflows.ByState(
+                        weight=_involved_weight,
+                        terminal=True,
+                    ),
                 },
                 record_every=step_count,
             )
@@ -642,7 +675,7 @@ def _run_analytic_correctness_checks(
         initial="healthy",
         horizon=horizon,
         steps_per_unit=steps_per_unit,
-        probability="state_probability",
+        probability=jact.probability.StateProbability(),
         age=jnp.arange(batch_size, dtype=dtype),
     )
     _block_until_ready(result)
@@ -655,7 +688,7 @@ def _run_analytic_correctness_checks(
     print(
         "analytic correctness passed: "
         "scenario=illness-death "
-        f"shape={result['probability'].shape} "
+        f"shape={result.probability.shape} "
         f"max_abs_diff={max_abs_diff:.3e}"
     )
 
@@ -691,7 +724,7 @@ def _run_analytic_correctness_checks(
         initial_duration=initial_duration,
         horizon=duration_horizon,
         steps_per_unit=duration_steps,
-        probability="state_probability",
+        probability=jact.probability.StateProbability(),
         record_every=2,
         age=jnp.arange(batch_size, dtype=dtype),
     )
@@ -711,7 +744,7 @@ def _run_analytic_correctness_checks(
     print(
         "analytic correctness passed: "
         "scenario=duration-hazard-recorded "
-        f"shape={result['probability'].shape} "
+        f"shape={result.probability.shape} "
         f"max_abs_diff={max_abs_diff:.3e}"
     )
     print()
@@ -731,7 +764,7 @@ def _run_e2e_sanity_check(
         initial="s0",
         horizon=config.horizon,
         steps_per_unit=config.steps_per_unit,
-        probability="state_probability",
+        probability=jact.probability.StateProbability(),
         age=ages,
     )
 
@@ -845,7 +878,7 @@ def _benchmark_e2e(
             initial="s0",
             horizon=config.horizon,
             steps_per_unit=config.steps_per_unit,
-            probability="state_probability",
+            probability=jact.probability.StateProbability(),
             age=ages,
         )
 

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from collections import deque
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 import jax.numpy as jnp
 
@@ -13,6 +14,16 @@ if TYPE_CHECKING:
     from .model import Model
 
 __all__ = ["StateSpace"]
+
+
+def _duplicates(values: Sequence[Any]) -> set[Any]:
+    seen = set()
+    repeated = set()
+    for value in values:
+        if value in seen:
+            repeated.add(value)
+        seen.add(value)
+    return repeated
 
 
 class StateSpace:
@@ -73,10 +84,9 @@ class StateSpace:
                     f"got {type(state)}."
                 )
 
-        # No duplicate state names
-        if len(states) != len(set(states)):
-            dupes = [s for s in states if states.count(s) > 1]
-            raise ValueError(f"Duplicate state names: {set(dupes)}")
+        duplicate_states = _duplicates(states)
+        if duplicate_states:
+            raise ValueError(f"Duplicate state names: {duplicate_states}")
 
         state_set = set(states)
 
@@ -94,10 +104,9 @@ class StateSpace:
                     f"Self-transition '{src}' -> '{src}' is not allowed."
                 )
 
-        # No duplicate transitions
-        if len(transitions) != len(set(transitions)):
-            dupes = [t for t in transitions if transitions.count(t) > 1]
-            raise ValueError(f"Duplicate transitions: {set(dupes)}")
+        duplicate_transitions = _duplicates(transitions)
+        if duplicate_transitions:
+            raise ValueError(f"Duplicate transitions: {duplicate_transitions}")
 
     # ------------------------------------------------------------------ #
     # Properties                                                          #
@@ -237,9 +246,9 @@ class StateSpace:
         """
         self._check_state(state)
         visited = {state}
-        queue = [state]
+        queue = deque([state])
         while queue:
-            current = queue.pop(0)
+            current = queue.popleft()
             for tgt in self.targets(current):
                 if tgt not in visited:
                     visited.add(tgt)
@@ -262,9 +271,9 @@ class StateSpace:
 
     def build(
         self,
-        transitions: Optional[Dict[Tuple[str, str], Any]] = None,
-        exits: Optional[Dict[str, Any]] = None,
-        groups: Optional[Dict[Any, List[Tuple[str, str]]]] = None,
+        transitions: Mapping[tuple[str, str], Any] | None = None,
+        exits: Mapping[str, Any] | None = None,
+        groups: Mapping[Any, Sequence[tuple[str, str]]] | None = None,
     ) -> Model:
         """Create a Model by assigning intensity callables to transitions.
 
@@ -293,7 +302,7 @@ class StateSpace:
             groups=groups,
         )
 
-    def cashflows(self, components: Dict[str, Any]):
+    def cashflows(self, components: Mapping[str, Any]):
         """Create a validated cashflow declaration for this state space."""
         from .cashflows import validate_cashflow_components
 
@@ -319,7 +328,7 @@ class StateSpace:
 
     def initial_distribution(
         self,
-        components: Dict[str, Dict[str, Any]],
+        components: Mapping[str, Mapping[str, Any]],
         normalise: bool = True,
     ) -> InitialDistribution:
         """Create a validated multi-state `InitialDistribution`.
@@ -335,10 +344,10 @@ class StateSpace:
     def initial_per_individual(
         self,
         *,
-        state_names: Optional[Sequence[str]] = None,
+        state_names: Sequence[str] | None = None,
         state_indices: Any = None,
         duration: Any = 0.0,
-        initial_states: Optional[Sequence[str]] = None,
+        initial_states: Sequence[str] | None = None,
     ) -> InitialDistribution:
         """Create a per-individual `InitialDistribution` with eager validation.
 

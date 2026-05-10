@@ -106,7 +106,9 @@ def test_cashflow_declaration_validation():
     ss = jact.StateSpace(["healthy", "dead"], [("healthy", "dead")])
 
     with pytest.raises(ValueError, match="not a declared state"):
-        ss.cashflows({"bad": jact.cashflows.StateRate({"disabled": _constant_payment(1.0)})})
+        ss.cashflows(
+            {"bad": jact.cashflows.StateRate({"disabled": _constant_payment(1.0)})}
+        )
 
     with pytest.raises(ValueError, match="unknown transition"):
         ss.cashflows({

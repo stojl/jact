@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any
 
 from .initial_distribution import InitialDistribution
 from .probability import ProbabilityOutput, StateProbability
@@ -21,7 +22,7 @@ class TransitionInfo:
     target: str
     assignment: str  # "transitions", "exits", or "groups"
     callable: Any
-    index: Optional[int]  # index into multi-output callable, None for single
+    index: int | None  # index into multi-output callable, None for single
 
 
 @dataclass(frozen=True)
@@ -69,15 +70,15 @@ class Model:
     def __init__(
         self,
         state_space: StateSpace,
-        transitions: Optional[Dict[Tuple[str, str], Any]] = None,
-        exits: Optional[Dict[str, Any]] = None,
-        groups: Optional[Dict[Any, List[Tuple[str, str]]]] = None,
+        transitions: Mapping[tuple[str, str], Any] | None = None,
+        exits: Mapping[str, Any] | None = None,
+        groups: Mapping[Any, Sequence[tuple[str, str]]] | None = None,
     ):
         self._state_space = state_space
         self._transitions_map = transitions or {}
         self._exits_map = exits or {}
         self._groups_map = groups or {}
-        self._transition_info: Dict[Tuple[str, str], TransitionInfo] = {}
+        self._transition_info: dict[tuple[str, str], TransitionInfo] = {}
 
         self._validate_and_register()
         self._build_full_solver_matrix()
@@ -88,7 +89,7 @@ class Model:
 
     def _validate_and_register(self) -> None:
         """Check that every transition is covered exactly once."""
-        covered: Dict[Tuple[str, str], str] = {}
+        covered: dict[tuple[str, str], str] = {}
 
         # Single transitions
         for (src, tgt), fn in self._transitions_map.items():
@@ -138,8 +139,8 @@ class Model:
         tgt: str,
         assignment: str,
         fn: Any,
-        index: Optional[int],
-        covered: Dict[Tuple[str, str], str],
+        index: int | None,
+        covered: dict[tuple[str, str], str],
     ) -> None:
         """Register a single transition, checking for conflicts."""
         if not callable(fn):
@@ -197,7 +198,7 @@ class Model:
 
     def reduce(
         self,
-        initial: Union[str, Iterable[str]],
+        initial: str | Iterable[str],
     ) -> ReducedModel:
         """Build a reduced solver matrix for a declared initial-state set.
 
@@ -218,12 +219,7 @@ class Model:
             A solver-ready object with the reduced intensity matrix
             and reachable state metadata.
         """
-        if isinstance(initial, str):
-            declared_initial = (initial,)
-        else:
-            declared_initial = tuple(initial)
-            if not declared_initial:
-                raise ValueError("initial must contain at least one state.")
+        declared_initial = _normalise_initial_states(initial)
         for state in declared_initial:
             self._state_space._check_state(state)
         if len(declared_initial) != len(set(declared_initial)):
@@ -245,9 +241,7 @@ class Model:
         n_reachable = len(reachable)
 
         # Map reachable state names to their indices in the full matrix
-        full_indices = [
-            self._state_space.state_index(s) for s in reachable
-        ]
+        full_indices = [self._state_space.state_index(s) for s in reachable]
 
         # Extract the submatrix
         reduced_matrix = tuple(
@@ -304,11 +298,11 @@ class Model:
 
     def solve(
         self,
-        initial: Union[str, Any, InitialDistribution],
+        initial: str | Any | InitialDistribution,
         horizon: int,
         steps_per_unit: int,
         initial_duration: Any = 0.0,
-        probability: Union[None, ProbabilityOutput, Callable] = StateProbability(),
+        probability: None | ProbabilityOutput | Callable = StateProbability(),
         cashflows: Any = None,
         cashflow_views: Any = None,
         record_every: int = 1,
@@ -428,3 +422,12 @@ def _make_slice_wrapper(fn: Callable, index: int) -> Callable:
         return full_output[index]
 
     return wrapper
+
+
+def _normalise_initial_states(initial: str | Iterable[str]) -> tuple[str, ...]:
+    if isinstance(initial, str):
+        return (initial,)
+    states = tuple(initial)
+    if not states:
+        raise ValueError("initial must contain at least one state.")
+    return states

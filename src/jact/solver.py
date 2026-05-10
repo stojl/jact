@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from numbers import Integral
-from typing import Any, Callable, Dict, Mapping, NamedTuple, Sequence, Union
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -112,7 +113,7 @@ def _evaluate_intensity_at_point(
     fn: Callable[..., jnp.ndarray],
     t: jnp.ndarray,
     d_per_individual: jnp.ndarray,
-    intensity_kwargs: Dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, jnp.ndarray],
 ) -> jnp.ndarray:
     """Evaluate a point intensity, preferring a batched call shape."""
     d_batched = d_per_individual[:, None]
@@ -146,7 +147,7 @@ def _integrated_density_hazard(
     t: jnp.ndarray,
     duration_mid: jnp.ndarray,
     step_size: float,
-    intensity_kwargs: Dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, jnp.ndarray],
 ) -> jnp.ndarray:
     midpoint = jnp.asarray(fn(t + 0.5 * step_size, duration_mid, **intensity_kwargs))
     return jnp.maximum(step_size * midpoint, 0.0)
@@ -157,7 +158,7 @@ def _integrated_point_hazard(
     t: jnp.ndarray,
     point_d_0: jnp.ndarray,
     step_size: float,
-    intensity_kwargs: Dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, jnp.ndarray],
 ) -> jnp.ndarray:
     midpoint = _evaluate_intensity_at_point(
         fn,
@@ -212,11 +213,34 @@ def _add_leaf(
     return tuple(leaf + value if i == index else leaf for i, leaf in enumerate(leaves))
 
 
+def _add_cashflow_contribution(
+    component_total: jnp.ndarray,
+    by_state: tuple[jnp.ndarray, ...],
+    by_kind: tuple[jnp.ndarray, ...],
+    *,
+    state_index: int,
+    kind: int,
+    contribution: jnp.ndarray,
+) -> tuple[jnp.ndarray, tuple[jnp.ndarray, ...], tuple[jnp.ndarray, ...]]:
+    return (
+        component_total + contribution,
+        _add_leaf(by_state, state_index, contribution),
+        _add_leaf(by_kind, kind, contribution),
+    )
+
+
+def _sum_leaves(values: tuple[jnp.ndarray, ...]) -> jnp.ndarray:
+    total = jnp.zeros_like(values[0])
+    for value in values:
+        total = total + value
+    return total
+
+
 def _call_payment(
     fn: Callable[..., jnp.ndarray],
     t: jnp.ndarray,
     d: jnp.ndarray,
-    intensity_kwargs: Dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, jnp.ndarray],
 ) -> jnp.ndarray:
     return jnp.asarray(fn(t, d, **intensity_kwargs))
 
@@ -239,7 +263,7 @@ def _solver_step_dynamics(
     duration_mid: jnp.ndarray,
     step_size: float,
     solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
-    intensity_kwargs: Dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, jnp.ndarray],
 ) -> tuple[
     jnp.ndarray,
     jnp.ndarray,
@@ -361,7 +385,7 @@ def _compute_cashflow_step(
     duration_mid: jnp.ndarray,
     duration_left: jnp.ndarray,
     step_size: float,
-    intensity_kwargs: Dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, jnp.ndarray],
     cashflow_components: tuple[Any, ...],
     scheduled_events: tuple[Any, ...],
 ) -> tuple[tuple[jnp.ndarray, ...], tuple[jnp.ndarray, ...], tuple[jnp.ndarray, ...]]:
@@ -403,9 +427,14 @@ def _compute_cashflow_step(
                     contribution = contribution + (
                         step_size * point_midpoint * point_payment
                     )
-                component_total = component_total + contribution
-                by_state = _add_leaf(by_state, state_index, contribution)
-                by_kind = _add_leaf(by_kind, _KIND_STATE_RATE, contribution)
+                component_total, by_state, by_kind = _add_cashflow_contribution(
+                    component_total,
+                    by_state,
+                    by_kind,
+                    state_index=state_index,
+                    kind=_KIND_STATE_RATE,
+                    contribution=contribution,
+                )
 
         elif kind == _KIND_TRANSITION_LUMP:
             for source_index, hazard_slot, payment_fn in component[1]:
@@ -438,9 +467,14 @@ def _compute_cashflow_step(
                         * hz.point_transfer_factor
                         * point_payment
                     )
-                component_total = component_total + contribution
-                by_state = _add_leaf(by_state, source_index, contribution)
-                by_kind = _add_leaf(by_kind, _KIND_TRANSITION_LUMP, contribution)
+                component_total, by_state, by_kind = _add_cashflow_contribution(
+                    component_total,
+                    by_state,
+                    by_kind,
+                    state_index=source_index,
+                    kind=_KIND_TRANSITION_LUMP,
+                    contribution=contribution,
+                )
 
         elif kind == _KIND_SCHEDULED_EVENT:
             event_time, event_index = scheduled_events[component_index]
@@ -472,9 +506,14 @@ def _compute_cashflow_step(
                     contribution = contribution + (
                         active * point_values[state_index] * point_payment
                     )
-                component_total = component_total + contribution
-                by_state = _add_leaf(by_state, state_index, contribution)
-                by_kind = _add_leaf(by_kind, _KIND_SCHEDULED_EVENT, contribution)
+                component_total, by_state, by_kind = _add_cashflow_contribution(
+                    component_total,
+                    by_state,
+                    by_kind,
+                    state_index=state_index,
+                    kind=_KIND_SCHEDULED_EVENT,
+                    contribution=contribution,
+                )
 
         by_component = _add_leaf(by_component, component_index, component_total)
 
@@ -484,7 +523,7 @@ def _compute_cashflow_step(
 def _compute_scheduled_events(
     cashflow_components: tuple[Any, ...],
     step_size: float,
-    intensity_kwargs: Dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, jnp.ndarray],
 ) -> tuple[Any, ...]:
     scheduled_events = []
     for component in cashflow_components:
@@ -508,24 +547,18 @@ def _source_value(
     if source_kind == _SOURCE_COMPONENT:
         return by_component[source[1]]
     if source_kind == _SOURCE_COMPONENT_SUM:
-        value = jnp.zeros_like(by_component[0])
-        for index in source[1]:
-            value = value + by_component[index]
-        return value
+        return _sum_leaves(tuple(by_component[index] for index in source[1]))
     if source_kind == _SOURCE_STATE:
         return by_state[source[1]]
     if source_kind == _SOURCE_KIND:
         return by_kind[source[1]]
-    value = jnp.zeros_like(by_component[0])
-    for component_value in by_component:
-        value = value + component_value
-    return value
+    return _sum_leaves(by_component)
 
 
 def _evaluate_weight(
     weight: Callable[..., jnp.ndarray] | Scalar | None,
     t: jnp.ndarray,
-    intensity_kwargs: Dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, jnp.ndarray],
     template: jnp.ndarray,
 ) -> jnp.ndarray:
     if weight is None:
@@ -543,7 +576,7 @@ def _compute_cashflow_views(
     by_kind: tuple[jnp.ndarray, ...],
     t: jnp.ndarray,
     step_size: float,
-    intensity_kwargs: Dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, jnp.ndarray],
     cashflow_views: tuple[Any, ...],
     template: jnp.ndarray,
 ) -> tuple[tuple[jnp.ndarray, ...], ...]:
@@ -625,7 +658,7 @@ def _midpoint_solver(
     duration_left: jnp.ndarray,
     step_size: float,
     solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
-    intensity_kwargs: Dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, jnp.ndarray],
     prob_callback: Callable[..., Any],
     record_every: int,
     cashflow_components: tuple[Any, ...] = (),
@@ -752,7 +785,7 @@ def _get_reference_function(solver_matrix):
     return None
 
 
-def _get_covariate_batch_size(kwargs: Dict[str, Any]) -> int | None:
+def _get_covariate_batch_size(kwargs: dict[str, Any]) -> int | None:
     batch_size = None
     for name, value in kwargs.items():
         shape = jnp.shape(value)
@@ -786,7 +819,7 @@ def _validate_positive_integer(name: str, value: Any) -> int:
 
 
 def _canonicalize_initial(
-    initial: Union[str, jnp.ndarray, InitialDistribution],
+    initial: str | jnp.ndarray | InitialDistribution,
     initial_duration: Any,
 ) -> InitialDistribution:
     if isinstance(initial, InitialDistribution):
@@ -963,11 +996,11 @@ def _cashflow_reference_function(
 
 def solve(
     model: Any,
-    initial: Union[str, jnp.ndarray, InitialDistribution],
+    initial: str | jnp.ndarray | InitialDistribution,
     horizon: int,
     steps_per_unit: int,
     initial_duration: Any = 0.0,
-    probability: Union[None, ProbabilityOutput, Callable] = StateProbability(),
+    probability: None | ProbabilityOutput | Callable = StateProbability(),
     cashflows: CashflowDeclaration | None = None,
     cashflow_views: Mapping[str, Raw | Group | Total | ByState | ByKind] | None = None,
     record_every: int = 1,
