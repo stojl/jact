@@ -71,6 +71,7 @@ class BenchmarkConfig:
     state_count: int
     intensity_profile: str
     cashflow_scenarios: str
+    devices: int | None
 
     @property
     def solver_steps(self) -> int:
@@ -167,6 +168,15 @@ def _parse_args() -> BenchmarkConfig:
         action="store_true",
         help="Allow CPU execution for smoke checks when no GPU is visible.",
     )
+    parser.add_argument(
+        "--devices",
+        type=int,
+        default=None,
+        help=(
+            "Number of local devices to use for batch-sharded solver execution. "
+            "Defaults to the single-device path."
+        ),
+    )
     args = parser.parse_args()
 
     if args.batch_size <= 0 or args.batch_size > MAX_BATCH_SIZE:
@@ -187,6 +197,8 @@ def _parse_args() -> BenchmarkConfig:
         raise SystemExit(
             "The involved intensity profile currently requires --state-count 3."
         )
+    if args.devices is not None and args.devices <= 0:
+        raise SystemExit("--devices must be positive when provided.")
 
     return BenchmarkConfig(
         batch_size=args.batch_size,
@@ -201,6 +213,7 @@ def _parse_args() -> BenchmarkConfig:
         state_count=args.state_count,
         intensity_profile=args.intensity_profile,
         cashflow_scenarios=args.cashflow_scenarios,
+        devices=args.devices,
     )
 
 
@@ -630,6 +643,7 @@ def _benchmark_header(config: BenchmarkConfig, scenarios: list[Scenario]) -> Non
     print(f"state_count: {config.state_count}")
     print(f"intensity_profile: {config.intensity_profile}")
     print(f"cashflow_scenarios: {config.cashflow_scenarios}")
+    print(f"devices: {config.devices}")
     print(f"warmup_runs: {config.warmup_runs}")
     print(f"timed_runs: {config.timed_runs}")
     print(f"scenarios: {', '.join(scenario.label for scenario in scenarios)}")
@@ -676,6 +690,7 @@ def _run_analytic_correctness_checks(
         horizon=horizon,
         steps_per_unit=steps_per_unit,
         probability=jact.probability.StateProbability(),
+        devices=config.devices,
         age=jnp.arange(batch_size, dtype=dtype),
     )
     _block_until_ready(result)
@@ -726,6 +741,7 @@ def _run_analytic_correctness_checks(
         steps_per_unit=duration_steps,
         probability=jact.probability.StateProbability(),
         record_every=2,
+        devices=config.devices,
         age=jnp.arange(batch_size, dtype=dtype),
     )
     _block_until_ready(result)
@@ -765,6 +781,7 @@ def _run_e2e_sanity_check(
         horizon=config.horizon,
         steps_per_unit=config.steps_per_unit,
         probability=jact.probability.StateProbability(),
+        devices=config.devices,
         age=ages,
     )
 
@@ -879,6 +896,7 @@ def _benchmark_e2e(
             horizon=config.horizon,
             steps_per_unit=config.steps_per_unit,
             probability=jact.probability.StateProbability(),
+            devices=config.devices,
             age=ages,
         )
 
@@ -888,6 +906,7 @@ def _benchmark_e2e(
             horizon=config.horizon,
             steps_per_unit=config.steps_per_unit,
             probability=None,
+            devices=config.devices,
             age=ages,
         )
 
@@ -942,6 +961,7 @@ def _benchmark_cashflows(
             cashflows=scenario.cashflows,
             cashflow_views=scenario.views,
             record_every=scenario.record_every,
+            devices=config.devices,
             age=ages,
             salary=salary,
             event_time=event_time,

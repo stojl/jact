@@ -20,7 +20,13 @@ from jact.probability import (
     StateProbability,
     _PointMass,
 )
-from jact.solver import _KIND_STATE_RATE, _SOURCE_COMPONENT, _midpoint_solver
+from jact.solver import (
+    _KIND_STATE_RATE,
+    _SOURCE_COMPONENT,
+    _midpoint_solver,
+    _shard_batch_tree,
+    _unshard_batch_tree,
+)
 
 # JAX's JitWrapped exposes .clear_cache()/._cache_size() at runtime but they
 # aren't in pyright's stubs — alias to Any for the cache-management tests.
@@ -1168,6 +1174,57 @@ class TestModelResultIsPyTree:
         assert isinstance(doubled, jact.ModelResult)
         assert doubled.states == out.states
         assert jnp.allclose(doubled.probability, out.probability * 2)
+
+
+class TestMultiDeviceSupport:
+    def test_devices_one_uses_public_solve_argument(self, illness_death_model):
+        kwargs = dict(
+            initial="healthy",
+            horizon=1,
+            steps_per_unit=8,
+            age=jnp.arange(3, dtype=jnp.float32),
+        )
+
+        baseline = illness_death_model.solve(**kwargs)
+        with_devices = illness_death_model.solve(devices=1, **kwargs)
+
+        assert with_devices.states == baseline.states
+        assert jnp.allclose(with_devices.probability, baseline.probability)
+
+    def test_shard_helpers_pad_input_batch_axis(self):
+        tree = {
+            "density": jnp.arange(15, dtype=jnp.float32).reshape(3, 5),
+            "cashflows": {
+                "pv": jnp.arange(3, dtype=jnp.float32),
+            },
+        }
+
+        sharded, original_size = _shard_batch_tree(tree, 2)
+        assert original_size == 3
+        assert sharded["density"].shape == (2, 2, 5)
+        assert sharded["cashflows"]["pv"].shape == (2, 2)
+
+    def test_unshard_helper_restores_solver_output_batch_axis(self):
+        sharded = {
+            "probability": jnp.arange(20, dtype=jnp.float32).reshape(2, 5, 2),
+            "cashflows": {
+                "pv": jnp.arange(4, dtype=jnp.float32).reshape(2, 2),
+            },
+        }
+
+        restored = _unshard_batch_tree(sharded, 3)
+        assert restored["probability"].shape == (5, 3)
+        assert restored["cashflows"]["pv"].shape == (3,)
+
+    def test_rejects_empty_device_selection(self, illness_death_model):
+        with pytest.raises(ValueError, match="devices"):
+            illness_death_model.solve(
+                initial="healthy",
+                horizon=1,
+                steps_per_unit=8,
+                devices=0,
+                age=jnp.arange(2, dtype=jnp.float32),
+            )
 
 
 def _constant_payment(amount: float):

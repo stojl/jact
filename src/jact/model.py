@@ -306,6 +306,7 @@ class Model:
         cashflows: Any = None,
         cashflow_views: Any = None,
         record_every: int = 1,
+        devices: int | Any = None,
         **kwargs,
     ) -> ModelResult:
         """Compute transition probabilities from a documented initial condition.
@@ -347,6 +348,10 @@ class Model:
             Record probability output every ``record_every``-th solver
             step. Must divide ``horizon * steps_per_unit``. Default is
             ``1``.
+        devices : int or sequence of jax.Device, optional
+            Select multiple local devices for batch-sharded execution.
+            ``None`` keeps the single-device JIT path. ``1`` explicitly
+            selects one device and also uses the single-device path.
         **kwargs
             Covariate arrays of shape ``(batch, ...)`` passed to
             intensity callables.
@@ -371,6 +376,7 @@ class Model:
             cashflows=cashflows,
             cashflow_views=cashflow_views,
             record_every=record_every,
+            devices=devices,
             **kwargs,
         )
 

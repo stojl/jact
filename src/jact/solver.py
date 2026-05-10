@@ -621,6 +621,72 @@ def _zero_view_values(
     )
 
 
+def _shard_batch_array(
+    value: jnp.ndarray,
+    device_count: int,
+) -> tuple[jnp.ndarray, int]:
+    batch_size = value.shape[0]
+    remainder = batch_size % device_count
+    padded_size = (
+        batch_size if remainder == 0 else batch_size + device_count - remainder
+    )
+    if padded_size != batch_size:
+        pad_width = [(0, 0)] * value.ndim
+        pad_width[0] = (0, padded_size - batch_size)
+        value = jnp.pad(value, tuple(pad_width))
+    per_device = padded_size // device_count
+    return value.reshape((device_count, per_device) + value.shape[1:]), batch_size
+
+
+def _shard_batch_tree(tree: Any, device_count: int) -> tuple[Any, int]:
+    """Pad and shard a batch-major PyTree over a leading device axis."""
+    batch_sizes: list[int] = []
+
+    def shard(value):
+        if value is None:
+            return None
+        arr = jnp.asarray(value)
+        if arr.ndim == 0:
+            raise ValueError("Cannot shard scalar values over devices.")
+        sharded, batch_size = _shard_batch_array(arr, device_count)
+        batch_sizes.append(batch_size)
+        return sharded
+
+    sharded = jax.tree_util.tree_map(shard, tree)
+    if not batch_sizes:
+        raise ValueError("Cannot shard an empty tree.")
+    batch_size = batch_sizes[0]
+    if any(size != batch_size for size in batch_sizes):
+        raise ValueError("All sharded leaves must have the same batch size.")
+    return sharded, batch_size
+
+
+def _unshard_batch_array(value: jnp.ndarray, original_batch_size: int) -> jnp.ndarray:
+    if value.ndim < 2:
+        return value
+    if value.ndim == 2:
+        merged = value.reshape((value.shape[0] * value.shape[1],) + value.shape[2:])
+        return merged[:original_batch_size]
+
+    time_major = jnp.moveaxis(value, 0, 1)
+    merged = time_major.reshape(
+        (time_major.shape[0], time_major.shape[1] * time_major.shape[2])
+        + time_major.shape[3:]
+    )
+    return merged[:, :original_batch_size, ...]
+
+
+def _unshard_batch_tree(tree: Any, original_batch_size: int) -> Any:
+    """Merge a pmapped solver output tree back onto the public batch axis."""
+
+    def unshard(value):
+        if value is None:
+            return None
+        return _unshard_batch_array(jnp.asarray(value), original_batch_size)
+
+    return jax.tree_util.tree_map(unshard, tree)
+
+
 def _add_selected_view_values(
     left: tuple[tuple[jnp.ndarray, ...], ...],
     right: tuple[tuple[jnp.ndarray, ...], ...],
@@ -638,6 +704,50 @@ def _add_selected_view_values(
             left_values,
             right_values,
         ) in zip(cashflow_views, left, right)
+    )
+
+
+_PMAP_IN_AXES = (0, None, None, None, None, 0, None, None, None, None)
+_PMAP_STATIC_ARGNUMS = (3, 4, 6, 7, 8, 9)
+
+
+@partial(
+    jax.pmap,
+    in_axes=_PMAP_IN_AXES,
+    static_broadcasted_argnums=_PMAP_STATIC_ARGNUMS,
+)
+def _midpoint_solver_pmapped_all_devices(
+    state_0: tuple[StateCarry, ...],
+    duration_mid: jnp.ndarray,
+    duration_left: jnp.ndarray,
+    step_size: float,
+    solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
+    intensity_kwargs: dict[str, jnp.ndarray],
+    prob_callback: Callable[..., Any],
+    record_every: int,
+    cashflow_components: tuple[Any, ...] = (),
+    cashflow_views: tuple[Any, ...] = (),
+):
+    return _midpoint_solver(
+        state_0,
+        duration_mid,
+        duration_left,
+        step_size,
+        solver_matrix,
+        intensity_kwargs,
+        prob_callback,
+        record_every,
+        cashflow_components,
+        cashflow_views,
+    )
+
+
+def _midpoint_solver_pmapped_on_devices(devices: tuple[jax.Device, ...]):
+    return jax.pmap(
+        _midpoint_solver,
+        in_axes=_PMAP_IN_AXES,
+        static_broadcasted_argnums=_PMAP_STATIC_ARGNUMS,
+        devices=devices,
     )
 
 
@@ -994,6 +1104,97 @@ def _cashflow_reference_function(
     return None
 
 
+def _resolve_devices(
+    devices: int | Sequence[jax.Device] | None,
+) -> tuple[jax.Device, ...]:
+    if devices is None:
+        return ()
+    if isinstance(devices, bool):
+        raise ValueError("devices must be an integer or a sequence of jax.Device.")
+    local_devices = tuple(jax.local_devices())
+    if isinstance(devices, int):
+        device_count = int(devices)
+        if device_count <= 0:
+            raise ValueError("devices must select at least one device.")
+        if device_count > len(local_devices):
+            raise ValueError(
+                f"devices={device_count} requested, but only "
+                f"{len(local_devices)} local devices are available."
+            )
+        return local_devices[:device_count]
+    selected = tuple(devices)
+    if not selected:
+        raise ValueError("devices must select at least one device.")
+    return selected
+
+
+def _run_midpoint_solver(
+    state_0: tuple[StateCarry, ...],
+    duration_mid: jnp.ndarray,
+    duration_left: jnp.ndarray,
+    step_size: float,
+    solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
+    intensity_kwargs: dict[str, jnp.ndarray],
+    prob_callback: Callable[..., Any],
+    record_every: int,
+    cashflow_components: tuple[Any, ...],
+    cashflow_views: tuple[Any, ...],
+    devices: tuple[jax.Device, ...],
+) -> dict[str, Any]:
+    if len(devices) <= 1:
+        return _midpoint_solver(
+            state_0,
+            duration_mid,
+            duration_left,
+            step_size,
+            solver_matrix,
+            intensity_kwargs,
+            prob_callback,
+            record_every,
+            cashflow_components,
+            cashflow_views,
+        )
+
+    sharded_state_0, batch_size = _shard_batch_tree(state_0, len(devices))
+    if jax.tree_util.tree_leaves(intensity_kwargs):
+        sharded_kwargs, kwargs_batch_size = _shard_batch_tree(
+            intensity_kwargs,
+            len(devices),
+        )
+        if kwargs_batch_size != batch_size:
+            raise ValueError("Covariate batch dimensions must match solver batch size.")
+    else:
+        sharded_kwargs = intensity_kwargs
+
+    if devices == tuple(jax.local_devices()):
+        sharded_result = _midpoint_solver_pmapped_all_devices(
+            sharded_state_0,
+            duration_mid,
+            duration_left,
+            step_size,
+            solver_matrix,
+            sharded_kwargs,
+            prob_callback,
+            record_every,
+            cashflow_components,
+            cashflow_views,
+        )
+    else:
+        sharded_result = _midpoint_solver_pmapped_on_devices(devices)(
+            sharded_state_0,
+            duration_mid,
+            duration_left,
+            step_size,
+            solver_matrix,
+            sharded_kwargs,
+            prob_callback,
+            record_every,
+            cashflow_components,
+            cashflow_views,
+        )
+    return _unshard_batch_tree(sharded_result, batch_size)
+
+
 def solve(
     model: Any,
     initial: str | jnp.ndarray | InitialDistribution,
@@ -1004,6 +1205,7 @@ def solve(
     cashflows: CashflowDeclaration | None = None,
     cashflow_views: Mapping[str, Raw | Group | Total | ByState | ByKind] | None = None,
     record_every: int = 1,
+    devices: int | Sequence[jax.Device] | None = None,
     **kwargs: Any,
 ) -> ModelResult:
     """Compute transition probabilities from a documented initial condition."""
@@ -1112,7 +1314,8 @@ def solve(
                 batch_size,
             )
         state_0.append(StateCarry(density=density, point_mass=point_mass))
-    result = _midpoint_solver(
+    selected_devices = _resolve_devices(devices)
+    result = _run_midpoint_solver(
         tuple(state_0),
         duration_mid,
         duration_left,
@@ -1123,6 +1326,7 @@ def solve(
         record_every,
         prepared_cashflow_components,
         prepared_cashflow_views,
+        selected_devices,
     )
     probability_out = None if probability_disabled else result["probability"]
     cashflows_out = None
