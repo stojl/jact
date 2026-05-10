@@ -18,8 +18,9 @@ The public API has four layers:
 
 Use `import jact` for the main surface. The top-level names are
 `jact.StateSpace`, `jact.Model`, `jact.InitialDistribution`,
-`jact.ModelResult`, and `jact.solve`. Domain-specific types live under two
-public submodules:
+`jact.ModelResult`, `jact.solve`, `jact.bind_intensity`,
+`jact.bind_grouped_intensity`, and `jact.bind_exit_intensity`.
+Domain-specific types live under two public submodules:
 
 - `jact.cashflows` — declarations (`StateRate`, `TransitionLump`,
   `ScheduledEvent`, `CashflowDeclaration`) and views (`Raw`, `Group`,
@@ -328,6 +329,89 @@ Return shapes:
 | `groups` | `(n_transitions, batch, D)` |
 
 All intensity callables must be pure and JIT-compatible.
+
+## Fitted-model wrappers
+
+The wrapper helpers adapt fitted model inference functions to the intensity
+protocol above. They are framework-agnostic closures; no `StateSpace` or
+solver changes are involved.
+
+### Single intensity
+
+```python
+jact.bind_intensity(
+    apply_fn,
+    params,
+    feature_fn,
+    *,
+    model_state=None,
+    apply_kwargs=None,
+)
+```
+
+The returned callable has the ordinary intensity signature:
+
+```python
+intensity(t, d, **kwargs) -> jnp.ndarray
+```
+
+Call flow:
+
+```python
+features = feature_fn(t, d, **kwargs)
+raw = apply_fn(params, features, **apply_kwargs)
+```
+
+If `model_state is not None`, the apply call receives a variable mapping:
+
+```python
+raw = apply_fn({"params": params, **model_state}, features, **apply_kwargs)
+```
+
+The raw output must have shape `(batch, D)`. Scalar, rank-1, rank-3, and
+wrong-width outputs are rejected. The returned hazard is
+`jnp.maximum(raw, 0.0)`.
+
+### Grouped and exit intensities
+
+```python
+jact.bind_grouped_intensity(
+    apply_fn,
+    params,
+    feature_fn,
+    *,
+    output_count,
+    output_axis=-1,
+    model_state=None,
+    apply_kwargs=None,
+)
+
+jact.bind_exit_intensity(
+    apply_fn,
+    params,
+    feature_fn,
+    *,
+    output_count,
+    output_axis=-1,
+    model_state=None,
+    apply_kwargs=None,
+)
+```
+
+`bind_exit_intensity()` is an alias-shaped helper for readability when the
+callable is passed through `exits={...}`. Both helpers accept a rank-3 raw
+output, move `output_axis` to the front, and require normalized shape
+`(output_count, batch, D)`. For example, model output `(batch, D, K)` uses
+`output_axis=-1`, while output `(K, batch, D)` uses `output_axis=0`.
+
+The returned grouped hazard is `jnp.maximum(normalized, 0.0)`.
+
+Construction validation:
+
+- `apply_fn` and `feature_fn` must be callable.
+- `apply_kwargs` must be a mapping or `None`.
+- `output_count` must be a positive integer.
+- `output_axis` must be an integer.
 
 ## Cashflows
 

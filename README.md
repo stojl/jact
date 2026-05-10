@@ -36,6 +36,35 @@ ages = jnp.linspace(30, 80, 1_000)
 result = model.solve(initial="healthy", horizon=30, steps_per_unit=12, age=ages)
 ```
 
+## Fitted-model intensity wrappers
+
+Use `bind_intensity()` when a fitted model has a separate feature builder and
+apply function:
+
+```python
+def features(t, d, *, age):
+    return jnp.stack(
+        [
+            jnp.broadcast_to(age[:, None] + t, (age.shape[0], d.shape[-1])),
+            jnp.broadcast_to(d, (age.shape[0], d.shape[-1])),
+        ],
+        axis=-1,
+    )
+
+
+def apply(params, x):
+    linear = params["intercept"] + jnp.sum(x * params["coef"], axis=-1)
+    return jnp.exp(linear)
+
+
+onset_fn = jact.bind_intensity(apply, fitted_params, features)
+```
+
+For fitted models that emit several hazards at once, use
+`bind_grouped_intensity(..., output_count=K)` or
+`bind_exit_intensity(..., output_count=K)`. The wrappers clamp outputs to
+non-negative hazards and normalize grouped outputs to `(K, batch, D)`.
+
 ## Cashflow example
 
 Using the same `state_space`, `model`, and `ages` as above:
@@ -110,7 +139,9 @@ For a fitting-to-solver workflow with neural-network intensities, see the
 
 The top-level `jact` namespace exposes the core types: `jact.StateSpace`,
 `jact.Model`, `jact.InitialDistribution`, `jact.ModelResult`, and
-`jact.solve`. Domain types live under two submodules:
+`jact.solve`. It also exposes fitted-model helpers:
+`jact.bind_intensity`, `jact.bind_grouped_intensity`, and
+`jact.bind_exit_intensity`. Domain types live under two submodules:
 
 - `jact.cashflows` for declarations and views (`StateRate`,
   `TransitionLump`, `ScheduledEvent`, `Raw`, `Group`, `Total`, `ByState`,
