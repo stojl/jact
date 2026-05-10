@@ -388,17 +388,28 @@ def _compute_cashflow_step(
     intensity_kwargs: dict[str, jnp.ndarray],
     cashflow_components: tuple[Any, ...],
     scheduled_events: tuple[Any, ...],
-) -> tuple[tuple[jnp.ndarray, ...], tuple[jnp.ndarray, ...], tuple[jnp.ndarray, ...]]:
+) -> tuple[
+    tuple[jnp.ndarray, ...],
+    tuple[jnp.ndarray, ...],
+    tuple[jnp.ndarray, ...],
+    tuple[jnp.ndarray, ...],
+    tuple[jnp.ndarray, ...],
+    tuple[jnp.ndarray, ...],
+]:
     template = densities[0, :, 0]
     by_component = _zero_leaves(len(cashflow_components), template)
     by_state = _zero_leaves(densities.shape[0], template)
     by_kind = _zero_leaves(3, template)
+    event_by_component = _zero_leaves(len(cashflow_components), template)
+    event_by_state = _zero_leaves(densities.shape[0], template)
+    event_by_kind = _zero_leaves(3, template)
     t_mid = t + 0.5 * step_size
     n_steps = duration_mid.shape[-1]
 
     for component_index, component in enumerate(cashflow_components):
         kind = component[0]
         component_total = jnp.zeros_like(template)
+        event_component_total = jnp.zeros_like(template)
 
         if kind == _KIND_STATE_RATE:
             for state_index, payment_fn in component[1]:
@@ -514,10 +525,34 @@ def _compute_cashflow_step(
                     kind=_KIND_SCHEDULED_EVENT,
                     contribution=contribution,
                 )
+                (
+                    event_component_total,
+                    event_by_state,
+                    event_by_kind,
+                ) = _add_cashflow_contribution(
+                    event_component_total,
+                    event_by_state,
+                    event_by_kind,
+                    state_index=state_index,
+                    kind=_KIND_SCHEDULED_EVENT,
+                    contribution=contribution,
+                )
 
         by_component = _add_leaf(by_component, component_index, component_total)
+        event_by_component = _add_leaf(
+            event_by_component,
+            component_index,
+            event_component_total,
+        )
 
-    return by_component, by_state, by_kind
+    return (
+        by_component,
+        by_state,
+        by_kind,
+        event_by_component,
+        event_by_state,
+        event_by_kind,
+    )
 
 
 def _compute_scheduled_events(
@@ -574,12 +609,24 @@ def _compute_cashflow_views(
     by_component: tuple[jnp.ndarray, ...],
     by_state: tuple[jnp.ndarray, ...],
     by_kind: tuple[jnp.ndarray, ...],
+    event_by_component: tuple[jnp.ndarray, ...],
+    event_by_state: tuple[jnp.ndarray, ...],
+    event_by_kind: tuple[jnp.ndarray, ...],
     t: jnp.ndarray,
     step_size: float,
     intensity_kwargs: dict[str, jnp.ndarray],
     cashflow_views: tuple[Any, ...],
     template: jnp.ndarray,
 ) -> tuple[tuple[jnp.ndarray, ...], ...]:
+    midpoint_by_component = tuple(
+        total - event for total, event in zip(by_component, event_by_component)
+    )
+    midpoint_by_state = tuple(
+        total - event for total, event in zip(by_state, event_by_state)
+    )
+    midpoint_by_kind = tuple(
+        total - event for total, event in zip(by_kind, event_by_kind)
+    )
     view_values = []
     for (
         _view_name,
@@ -595,9 +642,28 @@ def _compute_cashflow_views(
             intensity_kwargs,
             template,
         )
+        event_factor = _evaluate_weight(
+            weight,
+            t,
+            intensity_kwargs,
+            template,
+        )
         view_values.append(
             tuple(
-                _source_value(source, by_component, by_state, by_kind) * factor
+                _source_value(
+                    source,
+                    midpoint_by_component,
+                    midpoint_by_state,
+                    midpoint_by_kind,
+                )
+                * factor
+                + _source_value(
+                    source,
+                    event_by_component,
+                    event_by_state,
+                    event_by_kind,
+                )
+                * event_factor
                 for source in leaf_sources
             )
         )
@@ -803,7 +869,14 @@ def _midpoint_solver(
                 solver_matrix,
                 intensity_kwargs,
             )
-            raw_component, raw_state, raw_kind = _compute_cashflow_step(
+            (
+                raw_component,
+                raw_state,
+                raw_kind,
+                event_component,
+                event_state,
+                event_kind,
+            ) = _compute_cashflow_step(
                 *dynamics,
                 current_t,
                 duration_mid,
@@ -817,6 +890,9 @@ def _midpoint_solver(
                 raw_component,
                 raw_state,
                 raw_kind,
+                event_component,
+                event_state,
+                event_kind,
                 current_t,
                 step_size,
                 intensity_kwargs,

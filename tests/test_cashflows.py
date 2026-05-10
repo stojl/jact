@@ -660,6 +660,159 @@ def test_scheduled_event_snapping_individual_times_outside_horizon_and_pre_step(
     assert jnp.allclose(result["state"]["dead"], 0.0)
 
 
+def test_scheduled_event_matches_closed_form_survival_probability():
+    rate = 0.2
+    benefit = 10.0
+    event_time = 2.0
+    ss = jact.StateSpace(["alive", "dead"], [("alive", "dead")])
+    model = ss.build(transitions={("alive", "dead"): _constant_intensity(rate)})
+
+    def when(**kwargs):
+        return jnp.asarray(event_time)
+
+    cashflows = ss.cashflows({"bonus": jact.cashflows.ScheduledEvent(
+        when=when,
+        payments={"alive": _constant_payment(benefit)},
+    )})
+
+    result = model.solve(
+        initial="alive",
+        horizon=4,
+        steps_per_unit=4,
+        probability=None,
+        cashflows=cashflows,
+        cashflow_views={"bonus": jact.cashflows.Raw("bonus", terminal=True)},
+    )
+
+    expected = benefit * jnp.exp(-rate * event_time)
+    assert jnp.allclose(result.cashflows["bonus"], expected, atol=1e-6)
+
+
+def test_discounted_scheduled_event_matches_closed_form_present_value():
+    rate = 0.2
+    discount_rate = 0.03
+    benefit = 10.0
+    event_time = 2.0
+    ss = jact.StateSpace(["alive", "dead"], [("alive", "dead")])
+    model = ss.build(transitions={("alive", "dead"): _constant_intensity(rate)})
+
+    def when(**kwargs):
+        return jnp.asarray(event_time)
+
+    def discount_weight(t, **kwargs):
+        return jnp.exp(-discount_rate * t)
+
+    cashflows = ss.cashflows({"bonus": jact.cashflows.ScheduledEvent(
+        when=when,
+        payments={"alive": _constant_payment(benefit)},
+    )})
+
+    result = model.solve(
+        initial="alive",
+        horizon=4,
+        steps_per_unit=4,
+        probability=None,
+        cashflows=cashflows,
+        cashflow_views={
+            "pv": jact.cashflows.Total(weight=discount_weight, terminal=True),
+        },
+    )
+
+    expected = benefit * jnp.exp(-(rate + discount_rate) * event_time)
+    assert jnp.allclose(result.cashflows["pv"], expected, atol=1e-6)
+
+
+def test_duration_dependent_scheduled_event_payment_matches_closed_form():
+    rate = 0.2
+    event_time = 2.0
+    initial_duration = jnp.array([0.0, 0.75, 1.5], dtype=jnp.float32)
+    base = 5.0
+    duration_coef = 1.25
+    ss = jact.StateSpace(["alive", "dead"], [("alive", "dead")])
+    model = ss.build(transitions={("alive", "dead"): _constant_intensity(rate, 3)})
+
+    def when(**kwargs):
+        return jnp.asarray(event_time)
+
+    cashflows = ss.cashflows({"bonus": jact.cashflows.ScheduledEvent(
+        when=when,
+        payments={"alive": _duration_payment(base, duration_coef, 3)},
+    )})
+
+    result = model.solve(
+        initial="alive",
+        initial_duration=initial_duration,
+        horizon=4,
+        steps_per_unit=4,
+        probability=None,
+        cashflows=cashflows,
+        cashflow_views={"bonus": jact.cashflows.Raw("bonus", terminal=True)},
+        age=jnp.arange(3.0),
+    )
+
+    payment = base + duration_coef * (initial_duration + event_time)
+    expected = payment * jnp.exp(-rate * event_time)
+    assert jnp.allclose(result.cashflows["bonus"], expected, atol=1e-6)
+
+
+def test_scheduled_event_by_state_and_by_kind_match_closed_form_multi_state():
+    mu = 0.07
+    nu = 0.03
+    active_benefit = 8.0
+    disabled_benefit = 3.0
+    event_time = 2.0
+    total_rate = mu + nu
+    ss = jact.StateSpace(
+        ["active", "disabled", "dead"],
+        [("active", "disabled"), ("active", "dead")],
+    )
+    model = ss.build(
+        transitions={
+            ("active", "disabled"): _constant_intensity(mu),
+            ("active", "dead"): _constant_intensity(nu),
+        }
+    )
+
+    def when(**kwargs):
+        return jnp.asarray(event_time)
+
+    cashflows = ss.cashflows({"event": jact.cashflows.ScheduledEvent(
+        when=when,
+        payments={
+            "active": _constant_payment(active_benefit),
+            "disabled": _constant_payment(disabled_benefit),
+        },
+    )})
+
+    result = model.solve(
+        initial="active",
+        horizon=4,
+        steps_per_unit=4,
+        probability=None,
+        cashflows=cashflows,
+        cashflow_views={
+            "state": jact.cashflows.ByState(terminal=True),
+            "kind": jact.cashflows.ByKind(terminal=True),
+        },
+    ).cashflows
+
+    expected_active = active_benefit * jnp.exp(-total_rate * event_time)
+    expected_disabled = (
+        disabled_benefit
+        * mu
+        / total_rate
+        * (1.0 - jnp.exp(-total_rate * event_time))
+    )
+    assert jnp.allclose(result["state"]["active"], expected_active, atol=1e-6)
+    assert jnp.allclose(result["state"]["disabled"], expected_disabled, atol=1e-6)
+    assert jnp.allclose(result["state"]["dead"], 0.0, atol=1e-6)
+    assert jnp.allclose(
+        result["kind"]["scheduled_event"],
+        expected_active + expected_disabled,
+        atol=1e-6,
+    )
+
+
 def test_scheduled_event_snaps_near_grid_before_flooring():
     ss = jact.StateSpace(["active"], [])
     model = ss.build(transitions={})
