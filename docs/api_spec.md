@@ -311,6 +311,11 @@ Interpretation:
 
 - `t` is clock time,
 - `d` is duration in the current state,
+- `**kwargs` are solve-time covariates with axis 0 as the batch axis. A
+  rank-1 value such as `jnp.arange(batch_size)` is batched with one scalar per
+  individual; a value with shape `(batch_size, 1)` is also batched, with one
+  length-1 vector per individual. Scalars with shape `()` are not accepted as
+  covariates; close over constants in the callable instead.
 - attained-age or calendar-time effects are expressed through covariates such
   as `baseline_age + t`.
 
@@ -379,7 +384,8 @@ Payment callables for all component kinds share one interface:
 def payment(t, d, **kwargs) -> jnp.ndarray: ...
 ```
 
-The return shape is always `(batch, D)`.
+The `**kwargs` argument follows the same batch-axis rule as intensity
+callables. The return shape is always `(batch, D)`.
 
 Scheduled-event timing uses a separate rule:
 
@@ -387,7 +393,8 @@ Scheduled-event timing uses a separate rule:
 def when(**kwargs) -> jnp.ndarray: ...
 ```
 
-The return shape is `(batch,)`: one event time per individual.
+The `**kwargs` argument follows the same batch-axis rule as intensity
+callables. The return shape is `(batch,)`: one event time per individual.
 
 ### Scheduled-event policy
 
@@ -454,7 +461,8 @@ Shared view fields:
 - `weight`: `None`, a Python scalar, a rank-0 array, or a callable
   `(t, **kwargs) -> (batch,)` or broadcast-compatible array. It is evaluated
   once per inner solver step at that step's midpoint and multiplies the
-  contribution attributed to that step.
+  contribution attributed to that step. Callable weights receive the same
+  batch-major `**kwargs` as intensity and payment callables.
 - discounting is one example of user-supplied weighting logic, for example
   `weight=lambda t, **kwargs: jnp.exp(-0.03 * t)`.
 - more complex term-structure or valuation logic belongs in user code passed
@@ -522,6 +530,7 @@ Parameters:
 | `cashflows` | `CashflowDeclaration` or `None` | Cashflow components to evaluate |
 | `cashflow_views` | mapping or `None` | Solve-time views; requires `cashflows` |
 | `record_every` | positive int | Must divide `horizon * steps_per_unit` |
+| `devices` | int, sequence of `jax.Device`, or `None` | Optional local devices for batch-sharded execution |
 | `**kwargs` | arrays | Covariates with a shared leading batch dimension |
 
 Validation and defaults:
@@ -531,7 +540,65 @@ Validation and defaults:
 - legacy kwargs `callback` and `freeze_initial` are rejected,
 - `cashflows` must be declared from `model.state_space`,
 - covariate values must have shape `(batch, ...)`; scalars are rejected,
-- `record_every` must divide `horizon * steps_per_unit`.
+- `record_every` must divide `horizon * steps_per_unit`,
+- `devices=None` uses the single-device JIT path; `devices=1` also stays on
+  that path; selecting two or more local devices splits the batch axis across
+  devices and restores the documented output shapes.
+
+### Device sharding
+
+`devices` controls optional local multi-device execution. The public result
+shapes are unchanged for every setting:
+
+- `devices=None`: use the ordinary single-device `jax.jit` solver path,
+- `devices=1`: explicitly select one local device and still use the
+  single-device path,
+- `devices=N` with `N >= 2`: select the first `N` local devices and run the
+  solver with `jax.pmap`,
+- `devices=(device0, device1, ...)`: run on the supplied local device
+  sequence.
+
+Multi-device execution shards only the leading batch axis. Every solver
+covariate in `**kwargs`, every initial mass/duration array, and every solver
+carry leaf is padded if needed so the batch divides evenly by the selected
+device count, then reshaped from `(batch, ...)` to
+`(devices, per_device_batch, ...)`.
+
+Inside intensity, payment, scheduled-event, and callable weight functions on
+the multi-device path, each callable sees only its local shard:
+
+```python
+age = jnp.arange(5)          # public shape: (5,)
+x = jnp.ones((5, 4))         # public shape: (5, 4)
+
+result = model.solve(..., devices=2, age=age, x=x)
+```
+
+The batch is padded from 5 to 6, split across 2 devices, and each callable sees
+local arrays shaped like:
+
+```python
+kwargs["age"].shape == (3,)
+kwargs["x"].shape == (3, 4)
+```
+
+The padded rows are internal only. Solver outputs are merged back and sliced to
+the original public batch size, so probability leaves still use `(T, 5, ...)`,
+streamed cashflow leaves still use `(T_out, 5)`, and terminal cashflow leaves
+still use `(5,)`.
+
+Only axis 0 is treated as the batch axis. For example:
+
+| Public kwarg shape | Meaning |
+|---|---|
+| `(B,)` | one scalar per individual |
+| `(B, 1)` | one length-1 vector per individual |
+| `(B, K)` | one length-`K` vector per individual |
+| `(B, T, K)` | one `(T, K)` array per individual |
+
+All non-batch dimensions are preserved on each shard. Non-batched scalar
+covariates with shape `()` are rejected before device selection, including on
+the single-device path.
 
 Initial forms:
 

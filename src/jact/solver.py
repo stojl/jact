@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from numbers import Integral
-from typing import Any, Callable, Dict, Mapping, NamedTuple, Sequence, Union
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -112,7 +113,7 @@ def _evaluate_intensity_at_point(
     fn: Callable[..., jnp.ndarray],
     t: jnp.ndarray,
     d_per_individual: jnp.ndarray,
-    intensity_kwargs: Dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, jnp.ndarray],
 ) -> jnp.ndarray:
     """Evaluate a point intensity, preferring a batched call shape."""
     d_batched = d_per_individual[:, None]
@@ -146,7 +147,7 @@ def _integrated_density_hazard(
     t: jnp.ndarray,
     duration_mid: jnp.ndarray,
     step_size: float,
-    intensity_kwargs: Dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, jnp.ndarray],
 ) -> jnp.ndarray:
     midpoint = jnp.asarray(fn(t + 0.5 * step_size, duration_mid, **intensity_kwargs))
     return jnp.maximum(step_size * midpoint, 0.0)
@@ -157,7 +158,7 @@ def _integrated_point_hazard(
     t: jnp.ndarray,
     point_d_0: jnp.ndarray,
     step_size: float,
-    intensity_kwargs: Dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, jnp.ndarray],
 ) -> jnp.ndarray:
     midpoint = _evaluate_intensity_at_point(
         fn,
@@ -212,11 +213,34 @@ def _add_leaf(
     return tuple(leaf + value if i == index else leaf for i, leaf in enumerate(leaves))
 
 
+def _add_cashflow_contribution(
+    component_total: jnp.ndarray,
+    by_state: tuple[jnp.ndarray, ...],
+    by_kind: tuple[jnp.ndarray, ...],
+    *,
+    state_index: int,
+    kind: int,
+    contribution: jnp.ndarray,
+) -> tuple[jnp.ndarray, tuple[jnp.ndarray, ...], tuple[jnp.ndarray, ...]]:
+    return (
+        component_total + contribution,
+        _add_leaf(by_state, state_index, contribution),
+        _add_leaf(by_kind, kind, contribution),
+    )
+
+
+def _sum_leaves(values: tuple[jnp.ndarray, ...]) -> jnp.ndarray:
+    total = jnp.zeros_like(values[0])
+    for value in values:
+        total = total + value
+    return total
+
+
 def _call_payment(
     fn: Callable[..., jnp.ndarray],
     t: jnp.ndarray,
     d: jnp.ndarray,
-    intensity_kwargs: Dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, jnp.ndarray],
 ) -> jnp.ndarray:
     return jnp.asarray(fn(t, d, **intensity_kwargs))
 
@@ -239,7 +263,7 @@ def _solver_step_dynamics(
     duration_mid: jnp.ndarray,
     step_size: float,
     solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
-    intensity_kwargs: Dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, jnp.ndarray],
 ) -> tuple[
     jnp.ndarray,
     jnp.ndarray,
@@ -361,7 +385,7 @@ def _compute_cashflow_step(
     duration_mid: jnp.ndarray,
     duration_left: jnp.ndarray,
     step_size: float,
-    intensity_kwargs: Dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, jnp.ndarray],
     cashflow_components: tuple[Any, ...],
     scheduled_events: tuple[Any, ...],
 ) -> tuple[tuple[jnp.ndarray, ...], tuple[jnp.ndarray, ...], tuple[jnp.ndarray, ...]]:
@@ -403,9 +427,14 @@ def _compute_cashflow_step(
                     contribution = contribution + (
                         step_size * point_midpoint * point_payment
                     )
-                component_total = component_total + contribution
-                by_state = _add_leaf(by_state, state_index, contribution)
-                by_kind = _add_leaf(by_kind, _KIND_STATE_RATE, contribution)
+                component_total, by_state, by_kind = _add_cashflow_contribution(
+                    component_total,
+                    by_state,
+                    by_kind,
+                    state_index=state_index,
+                    kind=_KIND_STATE_RATE,
+                    contribution=contribution,
+                )
 
         elif kind == _KIND_TRANSITION_LUMP:
             for source_index, hazard_slot, payment_fn in component[1]:
@@ -438,9 +467,14 @@ def _compute_cashflow_step(
                         * hz.point_transfer_factor
                         * point_payment
                     )
-                component_total = component_total + contribution
-                by_state = _add_leaf(by_state, source_index, contribution)
-                by_kind = _add_leaf(by_kind, _KIND_TRANSITION_LUMP, contribution)
+                component_total, by_state, by_kind = _add_cashflow_contribution(
+                    component_total,
+                    by_state,
+                    by_kind,
+                    state_index=source_index,
+                    kind=_KIND_TRANSITION_LUMP,
+                    contribution=contribution,
+                )
 
         elif kind == _KIND_SCHEDULED_EVENT:
             event_time, event_index = scheduled_events[component_index]
@@ -472,9 +506,14 @@ def _compute_cashflow_step(
                     contribution = contribution + (
                         active * point_values[state_index] * point_payment
                     )
-                component_total = component_total + contribution
-                by_state = _add_leaf(by_state, state_index, contribution)
-                by_kind = _add_leaf(by_kind, _KIND_SCHEDULED_EVENT, contribution)
+                component_total, by_state, by_kind = _add_cashflow_contribution(
+                    component_total,
+                    by_state,
+                    by_kind,
+                    state_index=state_index,
+                    kind=_KIND_SCHEDULED_EVENT,
+                    contribution=contribution,
+                )
 
         by_component = _add_leaf(by_component, component_index, component_total)
 
@@ -484,7 +523,7 @@ def _compute_cashflow_step(
 def _compute_scheduled_events(
     cashflow_components: tuple[Any, ...],
     step_size: float,
-    intensity_kwargs: Dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, jnp.ndarray],
 ) -> tuple[Any, ...]:
     scheduled_events = []
     for component in cashflow_components:
@@ -508,24 +547,18 @@ def _source_value(
     if source_kind == _SOURCE_COMPONENT:
         return by_component[source[1]]
     if source_kind == _SOURCE_COMPONENT_SUM:
-        value = jnp.zeros_like(by_component[0])
-        for index in source[1]:
-            value = value + by_component[index]
-        return value
+        return _sum_leaves(tuple(by_component[index] for index in source[1]))
     if source_kind == _SOURCE_STATE:
         return by_state[source[1]]
     if source_kind == _SOURCE_KIND:
         return by_kind[source[1]]
-    value = jnp.zeros_like(by_component[0])
-    for component_value in by_component:
-        value = value + component_value
-    return value
+    return _sum_leaves(by_component)
 
 
 def _evaluate_weight(
     weight: Callable[..., jnp.ndarray] | Scalar | None,
     t: jnp.ndarray,
-    intensity_kwargs: Dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, jnp.ndarray],
     template: jnp.ndarray,
 ) -> jnp.ndarray:
     if weight is None:
@@ -543,7 +576,7 @@ def _compute_cashflow_views(
     by_kind: tuple[jnp.ndarray, ...],
     t: jnp.ndarray,
     step_size: float,
-    intensity_kwargs: Dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, jnp.ndarray],
     cashflow_views: tuple[Any, ...],
     template: jnp.ndarray,
 ) -> tuple[tuple[jnp.ndarray, ...], ...]:
@@ -588,6 +621,72 @@ def _zero_view_values(
     )
 
 
+def _shard_batch_array(
+    value: jnp.ndarray,
+    device_count: int,
+) -> tuple[jnp.ndarray, int]:
+    batch_size = value.shape[0]
+    remainder = batch_size % device_count
+    padded_size = (
+        batch_size if remainder == 0 else batch_size + device_count - remainder
+    )
+    if padded_size != batch_size:
+        pad_width = [(0, 0)] * value.ndim
+        pad_width[0] = (0, padded_size - batch_size)
+        value = jnp.pad(value, tuple(pad_width))
+    per_device = padded_size // device_count
+    return value.reshape((device_count, per_device) + value.shape[1:]), batch_size
+
+
+def _shard_batch_tree(tree: Any, device_count: int) -> tuple[Any, int]:
+    """Pad and shard a batch-major PyTree over a leading device axis."""
+    batch_sizes: list[int] = []
+
+    def shard(value):
+        if value is None:
+            return None
+        arr = jnp.asarray(value)
+        if arr.ndim == 0:
+            raise ValueError("Cannot shard scalar values over devices.")
+        sharded, batch_size = _shard_batch_array(arr, device_count)
+        batch_sizes.append(batch_size)
+        return sharded
+
+    sharded = jax.tree_util.tree_map(shard, tree)
+    if not batch_sizes:
+        raise ValueError("Cannot shard an empty tree.")
+    batch_size = batch_sizes[0]
+    if any(size != batch_size for size in batch_sizes):
+        raise ValueError("All sharded leaves must have the same batch size.")
+    return sharded, batch_size
+
+
+def _unshard_batch_array(value: jnp.ndarray, original_batch_size: int) -> jnp.ndarray:
+    if value.ndim < 2:
+        return value
+    if value.ndim == 2:
+        merged = value.reshape((value.shape[0] * value.shape[1],) + value.shape[2:])
+        return merged[:original_batch_size]
+
+    time_major = jnp.moveaxis(value, 0, 1)
+    merged = time_major.reshape(
+        (time_major.shape[0], time_major.shape[1] * time_major.shape[2])
+        + time_major.shape[3:]
+    )
+    return merged[:, :original_batch_size, ...]
+
+
+def _unshard_batch_tree(tree: Any, original_batch_size: int) -> Any:
+    """Merge a pmapped solver output tree back onto the public batch axis."""
+
+    def unshard(value):
+        if value is None:
+            return None
+        return _unshard_batch_array(jnp.asarray(value), original_batch_size)
+
+    return jax.tree_util.tree_map(unshard, tree)
+
+
 def _add_selected_view_values(
     left: tuple[tuple[jnp.ndarray, ...], ...],
     right: tuple[tuple[jnp.ndarray, ...], ...],
@@ -608,6 +707,50 @@ def _add_selected_view_values(
     )
 
 
+_PMAP_IN_AXES = (0, None, None, None, None, 0, None, None, None, None)
+_PMAP_STATIC_ARGNUMS = (3, 4, 6, 7, 8, 9)
+
+
+@partial(
+    jax.pmap,
+    in_axes=_PMAP_IN_AXES,
+    static_broadcasted_argnums=_PMAP_STATIC_ARGNUMS,
+)
+def _midpoint_solver_pmapped_all_devices(
+    state_0: tuple[StateCarry, ...],
+    duration_mid: jnp.ndarray,
+    duration_left: jnp.ndarray,
+    step_size: float,
+    solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
+    intensity_kwargs: dict[str, jnp.ndarray],
+    prob_callback: Callable[..., Any],
+    record_every: int,
+    cashflow_components: tuple[Any, ...] = (),
+    cashflow_views: tuple[Any, ...] = (),
+):
+    return _midpoint_solver(
+        state_0,
+        duration_mid,
+        duration_left,
+        step_size,
+        solver_matrix,
+        intensity_kwargs,
+        prob_callback,
+        record_every,
+        cashflow_components,
+        cashflow_views,
+    )
+
+
+def _midpoint_solver_pmapped_on_devices(devices: tuple[jax.Device, ...]):
+    return jax.pmap(
+        _midpoint_solver,
+        in_axes=_PMAP_IN_AXES,
+        static_broadcasted_argnums=_PMAP_STATIC_ARGNUMS,
+        devices=devices,
+    )
+
+
 @partial(
     jax.jit,
     static_argnames=[
@@ -625,7 +768,7 @@ def _midpoint_solver(
     duration_left: jnp.ndarray,
     step_size: float,
     solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
-    intensity_kwargs: Dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, jnp.ndarray],
     prob_callback: Callable[..., Any],
     record_every: int,
     cashflow_components: tuple[Any, ...] = (),
@@ -752,7 +895,7 @@ def _get_reference_function(solver_matrix):
     return None
 
 
-def _get_covariate_batch_size(kwargs: Dict[str, Any]) -> int | None:
+def _get_covariate_batch_size(kwargs: dict[str, Any]) -> int | None:
     batch_size = None
     for name, value in kwargs.items():
         shape = jnp.shape(value)
@@ -786,7 +929,7 @@ def _validate_positive_integer(name: str, value: Any) -> int:
 
 
 def _canonicalize_initial(
-    initial: Union[str, jnp.ndarray, InitialDistribution],
+    initial: str | jnp.ndarray | InitialDistribution,
     initial_duration: Any,
 ) -> InitialDistribution:
     if isinstance(initial, InitialDistribution):
@@ -961,16 +1104,108 @@ def _cashflow_reference_function(
     return None
 
 
+def _resolve_devices(
+    devices: int | Sequence[jax.Device] | None,
+) -> tuple[jax.Device, ...]:
+    if devices is None:
+        return ()
+    if isinstance(devices, bool):
+        raise ValueError("devices must be an integer or a sequence of jax.Device.")
+    local_devices = tuple(jax.local_devices())
+    if isinstance(devices, int):
+        device_count = int(devices)
+        if device_count <= 0:
+            raise ValueError("devices must select at least one device.")
+        if device_count > len(local_devices):
+            raise ValueError(
+                f"devices={device_count} requested, but only "
+                f"{len(local_devices)} local devices are available."
+            )
+        return local_devices[:device_count]
+    selected = tuple(devices)
+    if not selected:
+        raise ValueError("devices must select at least one device.")
+    return selected
+
+
+def _run_midpoint_solver(
+    state_0: tuple[StateCarry, ...],
+    duration_mid: jnp.ndarray,
+    duration_left: jnp.ndarray,
+    step_size: float,
+    solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
+    intensity_kwargs: dict[str, jnp.ndarray],
+    prob_callback: Callable[..., Any],
+    record_every: int,
+    cashflow_components: tuple[Any, ...],
+    cashflow_views: tuple[Any, ...],
+    devices: tuple[jax.Device, ...],
+) -> dict[str, Any]:
+    if len(devices) <= 1:
+        return _midpoint_solver(
+            state_0,
+            duration_mid,
+            duration_left,
+            step_size,
+            solver_matrix,
+            intensity_kwargs,
+            prob_callback,
+            record_every,
+            cashflow_components,
+            cashflow_views,
+        )
+
+    sharded_state_0, batch_size = _shard_batch_tree(state_0, len(devices))
+    if jax.tree_util.tree_leaves(intensity_kwargs):
+        sharded_kwargs, kwargs_batch_size = _shard_batch_tree(
+            intensity_kwargs,
+            len(devices),
+        )
+        if kwargs_batch_size != batch_size:
+            raise ValueError("Covariate batch dimensions must match solver batch size.")
+    else:
+        sharded_kwargs = intensity_kwargs
+
+    if devices == tuple(jax.local_devices()):
+        sharded_result = _midpoint_solver_pmapped_all_devices(
+            sharded_state_0,
+            duration_mid,
+            duration_left,
+            step_size,
+            solver_matrix,
+            sharded_kwargs,
+            prob_callback,
+            record_every,
+            cashflow_components,
+            cashflow_views,
+        )
+    else:
+        sharded_result = _midpoint_solver_pmapped_on_devices(devices)(
+            sharded_state_0,
+            duration_mid,
+            duration_left,
+            step_size,
+            solver_matrix,
+            sharded_kwargs,
+            prob_callback,
+            record_every,
+            cashflow_components,
+            cashflow_views,
+        )
+    return _unshard_batch_tree(sharded_result, batch_size)
+
+
 def solve(
     model: Any,
-    initial: Union[str, jnp.ndarray, InitialDistribution],
+    initial: str | jnp.ndarray | InitialDistribution,
     horizon: int,
     steps_per_unit: int,
     initial_duration: Any = 0.0,
-    probability: Union[None, ProbabilityOutput, Callable] = StateProbability(),
+    probability: None | ProbabilityOutput | Callable = StateProbability(),
     cashflows: CashflowDeclaration | None = None,
     cashflow_views: Mapping[str, Raw | Group | Total | ByState | ByKind] | None = None,
     record_every: int = 1,
+    devices: int | Sequence[jax.Device] | None = None,
     **kwargs: Any,
 ) -> ModelResult:
     """Compute transition probabilities from a documented initial condition."""
@@ -1079,7 +1314,8 @@ def solve(
                 batch_size,
             )
         state_0.append(StateCarry(density=density, point_mass=point_mass))
-    result = _midpoint_solver(
+    selected_devices = _resolve_devices(devices)
+    result = _run_midpoint_solver(
         tuple(state_0),
         duration_mid,
         duration_left,
@@ -1090,6 +1326,7 @@ def solve(
         record_every,
         prepared_cashflow_components,
         prepared_cashflow_views,
+        selected_devices,
     )
     probability_out = None if probability_disabled else result["probability"]
     cashflows_out = None

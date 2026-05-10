@@ -51,13 +51,8 @@ def _validate_non_negative_if_concrete(name: str, value: ArrayLike) -> None:
         if bool(jnp.any(arr < 0)):
             raise ValueError(f"{name} must be non-negative.")
     except Exception as exc:  # pragma: no cover - tracer path
-        if "tracer" not in type(exc).__name__.lower():
-            try:
-                message = str(exc).lower()
-            except Exception:  # pragma: no cover
-                message = ""
-            if "tracer" not in message and "concret" not in message:
-                raise
+        if not _is_tracer_or_concretization_error(exc):
+            raise
 
 
 def _component_payload(
@@ -79,10 +74,8 @@ def _validate_integer_indices_if_concrete(states: ArrayLike) -> None:
     try:
         dtype = jnp.asarray(states).dtype
     except Exception as exc:  # pragma: no cover - tracer path
-        if "tracer" not in type(exc).__name__.lower():
-            message = str(exc).lower()
-            if "tracer" not in message and "concret" not in message:
-                raise
+        if not _is_tracer_or_concretization_error(exc):
+            raise
         return
 
     if jnp.issubdtype(dtype, jnp.integer):
@@ -96,6 +89,17 @@ def _raise_invalid_per_individual_indices(is_valid: bool) -> None:
             "per_individual states must index into the declared "
             "initial-state set."
         )
+
+
+def _is_tracer_or_concretization_error(exc: Exception) -> bool:
+    exc_type = type(exc).__name__.lower()
+    if "tracer" in exc_type:
+        return True
+    try:
+        message = str(exc).lower()
+    except Exception:  # pragma: no cover
+        message = ""
+    return "tracer" in message or "concret" in message
 
 
 @dataclass(frozen=True)
@@ -382,10 +386,8 @@ class InitialDistribution:
             if not bool(is_valid):
                 _raise_invalid_per_individual_indices(False)
         except Exception as exc:  # pragma: no cover - tracer path
-            if "tracer" not in type(exc).__name__.lower():
-                message = str(exc).lower()
-                if "tracer" not in message and "concret" not in message:
-                    raise
+            if not _is_tracer_or_concretization_error(exc):
+                raise
             jax.debug.callback(
                 _raise_invalid_per_individual_indices,
                 is_valid,
