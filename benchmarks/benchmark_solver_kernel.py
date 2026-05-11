@@ -46,6 +46,9 @@ INTENSITY_PROFILE_CHOICES = ("simple", "involved")
 CASHFLOW_SCENARIO_CHOICES = (
     "none",
     "unit-state-terminal",
+    "unit-scheduled-terminal",
+    "unit-duration-terminal",
+    "component-comparison",
     "unit-state-terminal-with-probability",
     "unit-state-stream",
     "unit-state-stream-with-probability",
@@ -300,6 +303,14 @@ def _event_time(**kwargs: Any) -> jnp.ndarray:
     return kwargs["event_time"]
 
 
+def _event_grid_time(**kwargs: Any) -> jnp.ndarray:
+    return kwargs["event_grid_time"]
+
+
+def _event_grid_delay(**kwargs: Any) -> jnp.ndarray:
+    return kwargs["event_grid_delay"]
+
+
 def _illness_death_closed_form_from_healthy(
     times: jnp.ndarray,
     lambda_hd: float,
@@ -417,7 +428,17 @@ def _build_cashflow_scenarios(
     scenarios: list[CashflowScenario] = []
 
     def include(name: str) -> bool:
-        return config.cashflow_scenarios in ("all", name)
+        if config.cashflow_scenarios in ("all", name):
+            return True
+        return (
+            config.cashflow_scenarios == "component-comparison"
+            and name
+            in (
+                "unit-state-terminal",
+                "unit-scheduled-terminal",
+                "unit-duration-terminal",
+            )
+        )
 
     def unit_state_cashflows():
         return model.state_space.cashflows(
@@ -436,6 +457,51 @@ def _build_cashflow_scenarios(
             CashflowScenario(
                 name="unit-state-terminal",
                 cashflows=unit_state_cashflows(),
+                views={"pv": jact.cashflows.Total(terminal=True)},
+                record_every=step_count,
+            )
+        )
+
+    if include("unit-scheduled-terminal"):
+        cashflows = model.state_space.cashflows(
+            {
+                "scheduled": jact.cashflows.ScheduledEvent(
+                    when=_event_grid_time,
+                    payments={
+                        state: _constant_payment(1.0, dtype)
+                        for state in transient_states
+                    },
+                )
+            }
+        )
+        scenarios.append(
+            CashflowScenario(
+                name="unit-scheduled-terminal",
+                cashflows=cashflows,
+                views={"pv": jact.cashflows.Total(terminal=True)},
+                record_every=step_count,
+            )
+        )
+
+    if include("unit-duration-terminal"):
+        cashflows = model.state_space.cashflows(
+            {
+                "duration": jact.cashflows.DurationEvent(
+                    delays={
+                        state: _event_grid_delay
+                        for state in transient_states
+                    },
+                    payments={
+                        state: _constant_payment(1.0, dtype)
+                        for state in transient_states
+                    },
+                )
+            }
+        )
+        scenarios.append(
+            CashflowScenario(
+                name="unit-duration-terminal",
+                cashflows=cashflows,
                 views={"pv": jact.cashflows.Total(terminal=True)},
                 record_every=step_count,
             )
@@ -951,6 +1017,18 @@ def _benchmark_cashflows(
         config.batch_size,
         dtype=dtype,
     )
+    event_grid_span = max(config.solver_steps - 1, 1)
+    event_grid_index = jnp.mod(
+        jnp.arange(config.batch_size, dtype=jnp.int32),
+        event_grid_span,
+    )
+    if config.solver_steps > 1:
+        event_grid_index = event_grid_index + 1
+    event_grid_time = (
+        jnp.asarray(event_grid_index, dtype=dtype)
+        * jnp.asarray(config.step_size, dtype=dtype)
+    )
+    event_grid_delay = event_grid_time
 
     def run_current():
         return model.solve(
@@ -965,6 +1043,8 @@ def _benchmark_cashflows(
             age=ages,
             salary=salary,
             event_time=event_time,
+            event_grid_time=event_grid_time,
+            event_grid_delay=event_grid_delay,
         )
 
     _warmup(run_current, config.warmup_runs)
