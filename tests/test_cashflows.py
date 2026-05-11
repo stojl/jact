@@ -177,6 +177,42 @@ def test_cashflow_declaration_copies_payment_mappings():
     assert set(component.payments) == {"healthy"}
 
 
+def test_duration_event_declaration_validation_and_mapping_copies():
+    ss = jact.StateSpace(["healthy", "disabled"], [("healthy", "disabled")])
+
+    with pytest.raises(ValueError, match="not a declared state"):
+        ss.cashflows({"bad": jact.cashflows.DurationEvent(
+            delays={"missing": 0.25},
+            payments={"disabled": _constant_payment(1.0)},
+        )})
+
+    with pytest.raises(ValueError, match="not a declared state"):
+        ss.cashflows({"bad": jact.cashflows.DurationEvent(
+            delays={"disabled": 0.25},
+            payments={"missing": _constant_payment(1.0)},
+        )})
+
+    with pytest.raises(ValueError, match="same state keys"):
+        ss.cashflows({"bad": jact.cashflows.DurationEvent(
+            delays={"disabled": 0.25},
+            payments={"healthy": _constant_payment(1.0)},
+        )})
+
+    delays = {"disabled": 0.25}
+    payments = {"disabled": _constant_payment(1.0)}
+    declaration = ss.cashflows({"waiting": jact.cashflows.DurationEvent(
+        delays=delays,
+        payments=payments,
+    )})
+    delays["healthy"] = 0.5
+    payments["healthy"] = _constant_payment(2.0)
+
+    component = declaration.component("waiting")
+    assert isinstance(component, jact.cashflows.DurationEvent)
+    assert set(component.delays) == {"disabled"}
+    assert set(component.payments) == {"disabled"}
+
+
 def test_discount_factor_removed_from_public_api():
     with pytest.raises(ImportError):
         exec("from jact import discount_factor", {})
@@ -597,8 +633,10 @@ def test_mixed_views_by_state_by_kind_and_weighted_total():
         "state_rate",
         "transition_lump",
         "scheduled_event",
+        "duration_event",
     }
     assert jnp.allclose(result["kind"]["scheduled_event"], 0.0)
+    assert jnp.allclose(result["kind"]["duration_event"], 0.0)
 
 
 def test_state_rate_includes_initial_point_mass_duration():
@@ -847,6 +885,155 @@ def test_scheduled_event_snaps_near_grid_before_flooring():
         [0.0, 0.0, 0.0, 0.0, 0.0],
     ])
     assert jnp.allclose(result, expected)
+
+
+def test_duration_event_no_transition_point_mass_pays_once_at_delay():
+    ss = jact.StateSpace(["disabled"], [])
+    model = ss.build(transitions={})
+    cashflows = ss.cashflows({"waiting": jact.cashflows.DurationEvent(
+        delays={"disabled": 0.25},
+        payments={"disabled": _constant_payment(1000.0, 2)},
+    )})
+
+    result = model.solve(
+        initial="disabled",
+        initial_duration=jnp.array([0.0, 0.25]),
+        horizon=1,
+        steps_per_unit=4,
+        probability=None,
+        cashflows=cashflows,
+        cashflow_views={"waiting": jact.cashflows.Raw("waiting", terminal=True)},
+        age=jnp.arange(2.0),
+    )
+
+    assert jnp.allclose(result.cashflows["waiting"], jnp.array([1000.0, 1000.0]))
+
+
+def test_duration_event_constant_exit_matches_survival_to_delay():
+    mu = 0.2
+    benefit = 1000.0
+    delay = 0.5
+    initial_duration = jnp.array([0.0, 0.25, 0.5], dtype=jnp.float32)
+    ss = jact.StateSpace(["disabled", "recovered"], [("disabled", "recovered")])
+    model = ss.build(
+        transitions={("disabled", "recovered"): _constant_intensity(mu, 3)}
+    )
+    cashflows = ss.cashflows({"waiting": jact.cashflows.DurationEvent(
+        delays={"disabled": delay},
+        payments={"disabled": _constant_payment(benefit, 3)},
+    )})
+
+    result = model.solve(
+        initial="disabled",
+        initial_duration=initial_duration,
+        horizon=1,
+        steps_per_unit=4,
+        probability=None,
+        cashflows=cashflows,
+        cashflow_views={"waiting": jact.cashflows.Raw("waiting", terminal=True)},
+        age=jnp.arange(3.0),
+    )
+
+    expected = benefit * jnp.exp(-mu * jnp.maximum(delay - initial_duration, 0.0))
+    assert jnp.allclose(result.cashflows["waiting"], expected, atol=1e-5)
+
+
+def test_discounted_duration_event_matches_present_value():
+    mu = 0.2
+    discount_rate = 0.03
+    benefit = 1000.0
+    delay = 0.5
+    ss = jact.StateSpace(["disabled", "recovered"], [("disabled", "recovered")])
+    model = ss.build(transitions={("disabled", "recovered"): _constant_intensity(mu)})
+
+    def discount_weight(t, **kwargs):
+        return jnp.exp(-discount_rate * t)
+
+    cashflows = ss.cashflows({"waiting": jact.cashflows.DurationEvent(
+        delays={"disabled": delay},
+        payments={"disabled": _constant_payment(benefit)},
+    )})
+
+    result = model.solve(
+        initial="disabled",
+        horizon=1,
+        steps_per_unit=4,
+        probability=None,
+        cashflows=cashflows,
+        cashflow_views={
+            "pv": jact.cashflows.Total(weight=discount_weight, terminal=True),
+        },
+    )
+
+    expected = benefit * jnp.exp(-mu * delay) * jnp.exp(-discount_rate * delay)
+    assert jnp.allclose(result.cashflows["pv"], expected, atol=1e-5)
+
+
+def test_duration_event_stochastic_inflow_matches_closed_form():
+    onset = 0.15
+    mu = 0.2
+    benefit = 1000.0
+    delay = 0.5
+    horizon = 2
+    ss = jact.StateSpace(
+        ["healthy", "disabled", "dead"],
+        [("healthy", "disabled"), ("disabled", "dead")],
+    )
+    model = ss.build(transitions={
+        ("healthy", "disabled"): _constant_intensity(onset),
+        ("disabled", "dead"): _constant_intensity(mu),
+    })
+    cashflows = ss.cashflows({"waiting": jact.cashflows.DurationEvent(
+        delays={"disabled": delay},
+        payments={"disabled": _constant_payment(benefit)},
+    )})
+
+    result = model.solve(
+        initial="healthy",
+        horizon=horizon,
+        steps_per_unit=256,
+        probability=None,
+        cashflows=cashflows,
+        cashflow_views={"waiting": jact.cashflows.Raw("waiting", terminal=True)},
+    )
+
+    expected = (
+        benefit
+        * jnp.exp(-mu * delay)
+        * (1.0 - jnp.exp(-onset * (horizon - delay)))
+    )
+    assert jnp.allclose(result.cashflows["waiting"], expected, atol=5e-1)
+
+
+def test_duration_event_views_by_state_by_kind_and_total_agree():
+    ss = jact.StateSpace(["disabled"], [])
+    model = ss.build(transitions={})
+    cashflows = ss.cashflows({"waiting": jact.cashflows.DurationEvent(
+        delays={"disabled": 0.25},
+        payments={"disabled": _constant_payment(1000.0)},
+    )})
+
+    result = model.solve(
+        initial="disabled",
+        horizon=1,
+        steps_per_unit=4,
+        probability=None,
+        cashflows=cashflows,
+        cashflow_views={
+            "raw": jact.cashflows.Raw("waiting", terminal=True),
+            "state": jact.cashflows.ByState(terminal=True),
+            "kind": jact.cashflows.ByKind(terminal=True),
+            "total": jact.cashflows.Total(terminal=True),
+        },
+    ).cashflows
+
+    assert jnp.allclose(result["raw"], 1000.0)
+    assert jnp.allclose(result["state"]["disabled"], result["raw"])
+    assert jnp.allclose(result["kind"]["duration_event"], result["raw"])
+    assert jnp.allclose(result["kind"]["state_rate"], 0.0)
+    assert jnp.allclose(result["kind"]["transition_lump"], 0.0)
+    assert jnp.allclose(result["kind"]["scheduled_event"], 0.0)
+    assert jnp.allclose(result["total"], result["raw"])
 
 
 def test_probability_none_omits_probability_and_callback_is_rejected():

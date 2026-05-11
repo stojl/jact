@@ -144,8 +144,8 @@ The top-level `jact` namespace exposes the core types: `jact.StateSpace`,
 `jact.bind_exit_intensity`. Domain types live under two submodules:
 
 - `jact.cashflows` for declarations and views (`StateRate`,
-  `TransitionLump`, `ScheduledEvent`, `Raw`, `Group`, `Total`, `ByState`,
-  `ByKind`).
+  `TransitionLump`, `ScheduledEvent`, `DurationEvent`, `Raw`, `Group`,
+  `Total`, `ByState`, `ByKind`).
 - `jact.probability` for output reducers (`StateProbability`,
   `DensityProbability`, `Density`, `PointMass`, `MarginalComponents`,
   `Full`).

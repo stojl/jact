@@ -23,8 +23,8 @@ Use `import jact` for the main surface. The top-level names are
 Domain-specific types live under two public submodules:
 
 - `jact.cashflows` — declarations (`StateRate`, `TransitionLump`,
-  `ScheduledEvent`, `CashflowDeclaration`) and views (`Raw`, `Group`,
-  `Total`, `ByState`, `ByKind`).
+  `ScheduledEvent`, `DurationEvent`, `CashflowDeclaration`) and views (`Raw`,
+  `Group`, `Total`, `ByState`, `ByKind`).
 - `jact.probability` — output reducers (`StateProbability`,
   `DensityProbability`, `Density`, `PointMass`, `MarginalComponents`,
   `Full`) and the `ProbabilityOutput` union.
@@ -427,6 +427,10 @@ cashflows = state_space.cashflows({
         when=event_time_fn,
         payments={"healthy": bonus_fn},
     ),
+    "waiting_period": jact.cashflows.DurationEvent(
+        delays={"disabled": 0.25},
+        payments={"disabled": disability_bonus_fn},
+    ),
 })
 ```
 
@@ -445,8 +449,11 @@ Validation is structural:
 - `StateRate` keys must be declared states,
 - `TransitionLump` keys must be declared transitions,
 - `ScheduledEvent.payments` keys must be declared states,
+- `DurationEvent.delays` and `DurationEvent.payments` keys must be the same
+  declared states,
 - every payment callable and every `ScheduledEvent.when` callable must be
-  callable.
+  callable,
+- every `DurationEvent.delays` value must be a scalar or callable.
 
 ### Component kinds
 
@@ -457,6 +464,9 @@ Validation is structural:
 - `ScheduledEvent(when=..., payments=...)` records expected payment at one
   deterministic event time per individual, conditional on the occupied state at
   that time.
+- `DurationEvent(delays=..., payments=...)` records a one-time expected
+  payment when duration in an attached occupied state reaches that state's
+  delay.
 
 `StateRate` and `TransitionLump` take their `payments` mapping positionally.
 
@@ -480,6 +490,15 @@ def when(**kwargs) -> jnp.ndarray: ...
 The `**kwargs` argument follows the same batch-axis rule as intensity
 callables. The return shape is `(batch,)`: one event time per individual.
 
+Duration-event delays use:
+
+```python
+def delay(**kwargs) -> jnp.ndarray: ...
+```
+
+Delay values may be Python scalars, rank-0 arrays, or callables returning a
+scalar or `(batch,)` array.
+
 ### Scheduled-event policy
 
 Scheduled events are intentionally narrow:
@@ -499,6 +518,34 @@ Scheduled events are intentionally narrow:
   transitions for that step are applied.
 
 Multiple event times per component are out of scope.
+
+### Duration-event policy
+
+Duration events are keyed by time already spent in the occupied state, not by
+calendar time:
+
+- each attached state has one delay per individual,
+- a state receives a duration-event payment only when it has both a delay and a
+  payment callable in the component declaration,
+- delays may depend on solve-time covariates,
+- this first implementation is grid-aligned: a delay pays only when it is on a
+  solver duration-grid point, using the same near-grid floating-point tolerance
+  as scheduled-event snapping,
+- off-grid delays produce no payment,
+- `delay < 0` or an effective duration cell outside the solver grid produces no
+  payment,
+- an event at duration `horizon` produces no payment because no solver step
+  starts at the right boundary,
+- payment evaluation uses the step left endpoint `t_n` and the event duration,
+  not the midpoint sample,
+- state occupancy uses the pre-step convention: the event sees mass occupying
+  the state before transitions for that step are applied,
+- point masses pay when their exact current duration reaches the delay grid
+  point,
+- density mass pays from the matching duration-grid cell.
+
+Duration events are one-time boundary events. They are not recurring rates for
+all durations greater than or equal to the delay.
 
 ### Recording semantics
 
@@ -577,9 +624,11 @@ Semantics:
 - `ByState()` returns one key per reachable state in reduced order, including
   zero-valued leaves for reachable states with no contributions. `StateRate`
   contributes to the occupied state, `TransitionLump` contributes to the source
-  state, and `ScheduledEvent` contributes to the pre-step occupied state.
-- `ByKind()` returns keys `"state_rate"`, `"transition_lump"`, and
-  `"scheduled_event"`, including zero-valued leaves when a kind is absent.
+  state, and `ScheduledEvent` and `DurationEvent` contribute to the pre-step
+  occupied state.
+- `ByKind()` returns keys `"state_rate"`, `"transition_lump"`,
+  `"scheduled_event"`, and `"duration_event"`, including zero-valued leaves
+  when a kind is absent.
 
 ## Solver
 
