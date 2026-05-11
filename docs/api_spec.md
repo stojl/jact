@@ -29,8 +29,9 @@ Domain-specific types live under two public submodules:
   `DensityProbability`, `Density`, `PointMass`, `MarginalComponents`,
   `Full`) and the `ProbabilityOutput` union.
 
-Advanced inspection types stay in private modules: `StateCarry` is
-available as `jact.probability.StateCarry`; `ReducedModel` and
+Advanced/internal inspection symbols are importable for users who need deeper
+debugging hooks, but they are not part of the main top-level `jact` surface:
+`StateCarry` is available as `jact.probability.StateCarry`; `ReducedModel` and
 `TransitionInfo` live under `jact.model`.
 
 Files under `archive/original_prototype/` and `notes/` are background material
@@ -242,8 +243,14 @@ model's full state list, so no reduction is performed.
 
 Core rules:
 
+- `components` must be a non-empty mapping.
+- each component payload must contain both `mass` and `duration`.
 - `mass` and `duration` values may be scalars or `(batch,)` arrays.
+- concrete `mass` and `duration` values must be non-negative.
+- scalar and `(batch,)` component shapes must have compatible batch dimensions.
 - masses are normalised per individual by default.
+- `declared_initial_states` returns the structural initial-state tuple, or
+  `None` for `per_individual(initial_states=None)`.
 - `per_individual.states` is a traced `(batch,)` integer array.
 - `per_individual.initial_states=<tuple>` means the indices are into that tuple
   and the solver reduces to the union of states reachable from it.
@@ -409,6 +416,7 @@ The returned grouped hazard is `jnp.maximum(normalized, 0.0)`.
 Construction validation:
 
 - `apply_fn` and `feature_fn` must be callable.
+- `model_state` must be a mapping or `None`.
 - `apply_kwargs` must be a mapping or `None`.
 - `output_count` must be a positive integer.
 - `output_axis` must be an integer.
@@ -445,7 +453,7 @@ cashflows.component("premium")
 Validation is structural:
 
 - `cashflows()` requires a non-empty component mapping,
-- component names must be unique non-empty strings,
+- component names must be non-empty strings,
 - `StateRate` keys must be declared states,
 - `TransitionLump` keys must be declared transitions,
 - `ScheduledEvent.payments` keys must be declared states,
@@ -609,7 +617,7 @@ Default and validation rules:
 - if `cashflows is None`, any non-`None` `cashflow_views` is rejected,
 - `cashflow_views={}` is allowed and returns an empty `result.cashflows`
   mapping,
-- view names must be unique non-empty strings,
+- view names must be non-empty strings,
 - `Raw(name=...)` and `Group(members)` must reference declared component names,
 - `Group.members` is frozen during validation,
 - `terminal` must be `bool`,
@@ -674,6 +682,10 @@ Validation and defaults:
 - `cashflows` must be declared from `model.state_space`,
 - covariate values must have shape `(batch, ...)`; scalars are rejected,
 - `record_every` must divide `horizon * steps_per_unit`,
+- `devices` must not be `bool`,
+- integer `devices` counts must be positive,
+- requested integer `devices` counts cannot exceed the number of available
+  local devices,
 - `devices=None` uses the single-device JIT path; `devices=1` also stays on
   that path; selecting two or more local devices splits the batch axis across
   devices and restores the documented output shapes.
@@ -802,6 +814,8 @@ Each solver step:
 5. evolves point masses along `(t, d_0 + t)` with the same competing-risks
    logic and routes their outgoing mass into duration-zero density.
 
+### Probability outputs
+
 Built-in probability output reducers. Output shapes use `T` for the
 recorded time axis (length `horizon * steps_per_unit / record_every + 1`),
 `B` for batch, `S` for the number of reachable states (in `result.states`
@@ -821,15 +835,16 @@ These types live under `jact.probability` and form the
 duration. If a downstream consumer needs `_PointMass.d_0`, supply a custom
 probability callable and read it directly from the internal `StateCarry`
 objects.
+
 After marginalizing over duration, `StateProbability` combines continuous
 and point-mass probability into total state occupancy.
 
 Custom probability callables have signature
 `(state: tuple[StateCarry, ...]) -> PyTree`. Their returned PyTree is
 stacked by `jax.lax.scan` along a new leading time axis. `StateCarry` and
-`_PointMass` are internal solver types and live under `jact.probability`;
-they are not part of the documented public API surface but remain
-importable for advanced use.
+`_PointMass` are advanced/internal solver inspection symbols and live under
+`jact.probability`; they are not part of the main top-level `jact` surface but
+remain importable for advanced use.
 
 ## Numerical and JIT contract
 
