@@ -52,7 +52,7 @@ class ScheduledEvent:
 class DurationEvent:
     """State-duration conditioned one-time payments."""
 
-    delays: Mapping[str, float | Callable[..., jnp.ndarray]]
+    at_durations: Mapping[str, float | Callable[..., jnp.ndarray]]
     payments: Mapping[str, Callable[..., jnp.ndarray]]
 
 
@@ -140,13 +140,16 @@ def _validate_payment_mapping(payments: Any, field: str) -> Mapping[Any, Any]:
     return dict(payments)
 
 
-def _validate_delay_mapping(delays: Any, field: str) -> Mapping[Any, Any]:
-    if not isinstance(delays, Mapping) or not delays:
+def _validate_at_duration_mapping(
+    at_durations: Any,
+    field: str,
+) -> Mapping[Any, Any]:
+    if not isinstance(at_durations, Mapping) or not at_durations:
         raise ValueError(f"{field} must be a non-empty mapping.")
-    for delay in delays.values():
-        if not (callable(delay) or _is_scalar_array_like(delay)):
+    for at_duration in at_durations.values():
+        if not (callable(at_duration) or _is_scalar_array_like(at_duration)):
             raise TypeError(f"{field} values must be scalar or callable.")
-    return dict(delays)
+    return dict(at_durations)
 
 
 def _validate_state_payments(state_space: Any, payments: Mapping[Any, Any]) -> None:
@@ -227,24 +230,24 @@ def validate_cashflow_components(
                 payments=payments,
             )
         elif isinstance(component, DurationEvent):
-            delays = _validate_delay_mapping(
-                component.delays,
-                f"DurationEvent('{name}').delays",
+            at_durations = _validate_at_duration_mapping(
+                component.at_durations,
+                f"DurationEvent('{name}').at_durations",
             )
             payments = _validate_payment_mapping(
                 component.payments,
                 f"DurationEvent('{name}').payments",
             )
-            for state in delays:
+            for state in at_durations:
                 state_space._check_state(state)
             _validate_state_payments(state_space, payments)
-            if set(delays) != set(payments):
+            if set(at_durations) != set(payments):
                 raise ValueError(
-                    f"DurationEvent('{name}').delays and payments must use "
-                    "the same state keys."
+                    f"DurationEvent('{name}').at_durations and payments "
+                    "must use the same state keys."
                 )
             frozen_component = DurationEvent(
-                delays=delays,
+                at_durations=at_durations,
                 payments=payments,
             )
         else:

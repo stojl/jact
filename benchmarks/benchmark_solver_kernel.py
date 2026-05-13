@@ -307,8 +307,8 @@ def _event_grid_time(**kwargs: Any) -> jnp.ndarray:
     return kwargs["event_grid_time"]
 
 
-def _event_grid_delay(**kwargs: Any) -> jnp.ndarray:
-    return kwargs["event_grid_delay"]
+def _event_grid_at_duration(**kwargs: Any) -> jnp.ndarray:
+    return kwargs["event_grid_at_duration"]
 
 
 def _illness_death_closed_form_from_healthy(
@@ -487,8 +487,8 @@ def _build_cashflow_scenarios(
         cashflows = model.state_space.cashflows(
             {
                 "duration": jact.cashflows.DurationEvent(
-                    delays={
-                        state: _event_grid_delay
+                    at_durations={
+                        state: _event_grid_at_duration
                         for state in transient_states
                     },
                     payments={
@@ -1028,7 +1028,7 @@ def _benchmark_cashflows(
         jnp.asarray(event_grid_index, dtype=dtype)
         * jnp.asarray(config.step_size, dtype=dtype)
     )
-    event_grid_delay = event_grid_time
+    event_grid_at_duration = event_grid_time
 
     def run_current():
         return model.solve(
@@ -1044,7 +1044,7 @@ def _benchmark_cashflows(
             salary=salary,
             event_time=event_time,
             event_grid_time=event_grid_time,
-            event_grid_delay=event_grid_delay,
+            event_grid_at_duration=event_grid_at_duration,
         )
 
     _warmup(run_current, config.warmup_runs)

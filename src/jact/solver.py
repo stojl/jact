@@ -260,14 +260,14 @@ def _scheduled_event_index(
 
 
 def _duration_event_index(
-    delay: jnp.ndarray,
+    at_duration: jnp.ndarray,
     step_size: float,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    dtype = jnp.result_type(delay, 1.0)
+    dtype = jnp.result_type(at_duration, 1.0)
     step = jnp.asarray(step_size, dtype=dtype)
-    delay_index = _scheduled_event_index(delay, step_size)
-    effective_delay = delay_index.astype(dtype) * step
-    return delay_index, effective_delay
+    at_duration_index = _scheduled_event_index(at_duration, step_size)
+    effective_at_duration = at_duration_index.astype(dtype) * step
+    return at_duration_index, effective_at_duration
 
 
 def _is_near_grid_zero(
@@ -564,20 +564,23 @@ def _compute_cashflow_step(
         elif kind == _KIND_DURATION_EVENT:
             for (
                 state_index,
-                delay,
-                delay_index,
-                effective_delay,
+                at_duration,
+                at_duration_index,
+                effective_at_duration,
                 payment_fn,
             ) in component[1]:
-                delay = _broadcast_batch(delay, template.shape[0])
-                delay_index = _broadcast_batch(delay_index, template.shape[0])
-                effective_delay = _broadcast_batch(
-                    effective_delay,
+                at_duration = _broadcast_batch(at_duration, template.shape[0])
+                at_duration_index = _broadcast_batch(
+                    at_duration_index,
                     template.shape[0],
                 )
-                in_horizon = (delay >= 0) & (delay_index < n_steps)
-                safe_index = jnp.clip(delay_index, 0, n_steps - 1)
-                density_at_delay = jnp.take_along_axis(
+                effective_at_duration = _broadcast_batch(
+                    effective_at_duration,
+                    template.shape[0],
+                )
+                in_horizon = (at_duration >= 0) & (at_duration_index < n_steps)
+                safe_index = jnp.clip(at_duration_index, 0, n_steps - 1)
+                density_at_duration = jnp.take_along_axis(
                     densities[state_index],
                     safe_index[:, None],
                     axis=-1,
@@ -585,15 +588,15 @@ def _compute_cashflow_step(
                 payment = _evaluate_intensity_at_point(
                     payment_fn,
                     t,
-                    effective_delay,
+                    effective_at_duration,
                     intensity_kwargs,
                 )
                 contribution = in_horizon.astype(template.dtype) * (
-                    density_at_delay * payment
+                    density_at_duration * payment
                 )
 
                 if point_mask[state_index]:
-                    remaining = effective_delay - point_d_0[state_index]
+                    remaining = effective_at_duration - point_d_0[state_index]
                     trigger_index = _scheduled_event_index(remaining, step_size)
                     current_index = jnp.round(t / step_size).astype(jnp.int32)
                     not_past_target = (remaining >= 0) | _is_near_grid_zero(
@@ -609,7 +612,7 @@ def _compute_cashflow_step(
                     point_payment = _evaluate_intensity_at_point(
                         payment_fn,
                         t,
-                        effective_delay,
+                        effective_at_duration,
                         intensity_kwargs,
                     )
                     contribution = contribution + (
@@ -681,18 +684,24 @@ def _compute_duration_events(
     for component in cashflow_components:
         if component[0] == _KIND_DURATION_EVENT:
             attachments = []
-            for state_index, delay_source, payment_fn in component[1]:
-                delay = (
-                    jnp.asarray(delay_source(**intensity_kwargs))
-                    if callable(delay_source)
-                    else jnp.asarray(delay_source)
+            for state_index, at_duration_source, payment_fn in component[1]:
+                at_duration = (
+                    jnp.asarray(at_duration_source(**intensity_kwargs))
+                    if callable(at_duration_source)
+                    else jnp.asarray(at_duration_source)
                 )
-                delay_index, effective_delay = _duration_event_index(
-                    delay,
+                at_duration_index, effective_at_duration = _duration_event_index(
+                    at_duration,
                     step_size,
                 )
                 attachments.append(
-                    (state_index, delay, delay_index, effective_delay, payment_fn)
+                    (
+                        state_index,
+                        at_duration,
+                        at_duration_index,
+                        effective_at_duration,
+                        payment_fn,
+                    )
                 )
             duration_events.append((_KIND_DURATION_EVENT, tuple(attachments)))
         else:
@@ -1218,7 +1227,7 @@ def _prepare_cashflow_components(
             prepared.append((_KIND_SCHEDULED_EVENT, component.when, attachments))
         elif isinstance(component, DurationEvent):
             attachments = tuple(
-                (state_index[state], component.delays[state], fn)
+                (state_index[state], component.at_durations[state], fn)
                 for state, fn in component.payments.items()
                 if state in state_index
             )

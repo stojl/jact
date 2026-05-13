@@ -437,7 +437,7 @@ cashflows = state_space.cashflows({
         payments={"healthy": bonus_fn},
     ),
     "waiting_period": jact.cashflows.DurationEvent(
-        delays={"disabled": 0.25},
+        at_durations={"disabled": 0.25},
         payments={"disabled": disability_bonus_fn},
     ),
 })
@@ -458,11 +458,11 @@ Validation is structural:
 - `StateRate` keys must be declared states,
 - `TransitionLump` keys must be declared transitions,
 - `ScheduledEvent.payments` keys must be declared states,
-- `DurationEvent.delays` and `DurationEvent.payments` keys must be the same
-  declared states,
+- `DurationEvent.at_durations` and `DurationEvent.payments` keys must be the
+  same declared states,
 - every payment callable and every `ScheduledEvent.when` callable must be
   callable,
-- every `DurationEvent.delays` value must be a scalar or callable.
+- every `DurationEvent.at_durations` value must be a scalar or callable.
 
 ### Component kinds
 
@@ -473,9 +473,9 @@ Validation is structural:
 - `ScheduledEvent(when=..., payments=...)` records expected payment at one
   deterministic event time per individual, conditional on the occupied state at
   that time.
-- `DurationEvent(delays=..., payments=...)` records a one-time expected
+- `DurationEvent(at_durations=..., payments=...)` records a one-time expected
   payment when duration in an attached occupied state reaches that state's
-  delay.
+  target duration.
 
 `StateRate` and `TransitionLump` take their `payments` mapping positionally.
 
@@ -502,12 +502,11 @@ callables. The return shape is `(batch,)`: one event time per individual.
 Duration-event target durations use:
 
 ```python
-def delay(**kwargs) -> jnp.ndarray: ...
+def at_duration(**kwargs) -> jnp.ndarray: ...
 ```
 
-The public field is named `delays` for compatibility, but these values are
-target state durations. They may be Python scalars, rank-0 arrays, or callables
-returning a scalar or `(batch,)` array.
+`at_durations` values are target state durations. They may be Python scalars,
+rank-0 arrays, or callables returning a scalar or `(batch,)` array.
 
 ### Scheduled-event policy
 
@@ -535,8 +534,8 @@ Duration events are keyed by target duration already spent in the occupied
 state, not by calendar time or elapsed time since the solve started:
 
 - each attached state has one target duration per individual,
-- a state receives a duration-event payment only when it has both a delay and a
-  payment callable in the component declaration,
+- a state receives a duration-event payment only when it has both an
+  `at_durations` target and a payment callable in the component declaration,
 - target durations may depend on solve-time covariates,
 - effective target durations lie on the solver duration grid,
 - target durations near a solver grid point are snapped to that grid point to
@@ -560,7 +559,7 @@ state, not by calendar time or elapsed time since the solve started:
 - density mass pays from the matching effective duration-grid cell.
 
 Duration events are one-time boundary events. They are not recurring rates for
-all durations greater than or equal to the delay.
+all durations greater than or equal to the target duration.
 
 ### Recording semantics
 
