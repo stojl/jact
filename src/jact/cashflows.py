@@ -16,6 +16,7 @@ __all__ = [
     "ByKind",
     "ByState",
     "CashflowDeclaration",
+    "DurationEvent",
     "Group",
     "Raw",
     "ScheduledEvent",
@@ -44,6 +45,14 @@ class ScheduledEvent:
     """State-conditioned payments at deterministic event times."""
 
     when: Callable[..., jnp.ndarray]
+    payments: Mapping[str, Callable[..., jnp.ndarray]]
+
+
+@dataclass(frozen=True)
+class DurationEvent:
+    """State-duration conditioned one-time payments."""
+
+    at_durations: Mapping[str, float | Callable[..., jnp.ndarray]]
     payments: Mapping[str, Callable[..., jnp.ndarray]]
 
 
@@ -94,13 +103,19 @@ class CashflowDeclaration:
     """Validated cashflow components bound to a state-space topology."""
 
     state_space: Any
-    components: tuple[tuple[str, StateRate | TransitionLump | ScheduledEvent], ...]
+    components: tuple[
+        tuple[str, StateRate | TransitionLump | ScheduledEvent | DurationEvent],
+        ...,
+    ]
 
     @property
     def names(self) -> tuple[str, ...]:
         return tuple(name for name, _ in self.components)
 
-    def component(self, name: str) -> StateRate | TransitionLump | ScheduledEvent:
+    def component(
+        self,
+        name: str,
+    ) -> StateRate | TransitionLump | ScheduledEvent | DurationEvent:
         for component_name, component in self.components:
             if component_name == name:
                 return component
@@ -123,6 +138,18 @@ def _validate_payment_mapping(payments: Any, field: str) -> Mapping[Any, Any]:
     for fn in payments.values():
         _check_callable(fn, f"{field} values")
     return dict(payments)
+
+
+def _validate_at_duration_mapping(
+    at_durations: Any,
+    field: str,
+) -> Mapping[Any, Any]:
+    if not isinstance(at_durations, Mapping) or not at_durations:
+        raise ValueError(f"{field} must be a non-empty mapping.")
+    for at_duration in at_durations.values():
+        if not (callable(at_duration) or _is_scalar_array_like(at_duration)):
+            raise TypeError(f"{field} values must be scalar or callable.")
+    return dict(at_durations)
 
 
 def _validate_state_payments(state_space: Any, payments: Mapping[Any, Any]) -> None:
@@ -149,13 +176,18 @@ def _normalise_weight(weight: Any) -> Any:
 
 def validate_cashflow_components(
     state_space: Any,
-    components: Mapping[str, StateRate | TransitionLump | ScheduledEvent],
+    components: Mapping[
+        str,
+        StateRate | TransitionLump | ScheduledEvent | DurationEvent,
+    ],
 ) -> CashflowDeclaration:
     """Validate and freeze a component mapping for a state space."""
     if not isinstance(components, Mapping) or not components:
         raise ValueError("cashflows() requires a non-empty component mapping.")
 
-    frozen: list[tuple[str, StateRate | TransitionLump | ScheduledEvent]] = []
+    frozen: list[
+        tuple[str, StateRate | TransitionLump | ScheduledEvent | DurationEvent]
+    ] = []
     seen: set[str] = set()
     for name, component in components.items():
         _check_component_name(name)
@@ -197,10 +229,31 @@ def validate_cashflow_components(
                 when=component.when,
                 payments=payments,
             )
+        elif isinstance(component, DurationEvent):
+            at_durations = _validate_at_duration_mapping(
+                component.at_durations,
+                f"DurationEvent('{name}').at_durations",
+            )
+            payments = _validate_payment_mapping(
+                component.payments,
+                f"DurationEvent('{name}').payments",
+            )
+            for state in at_durations:
+                state_space._check_state(state)
+            _validate_state_payments(state_space, payments)
+            if set(at_durations) != set(payments):
+                raise ValueError(
+                    f"DurationEvent('{name}').at_durations and payments "
+                    "must use the same state keys."
+                )
+            frozen_component = DurationEvent(
+                at_durations=at_durations,
+                payments=payments,
+            )
         else:
             raise TypeError(
                 "cashflow components must be StateRate, TransitionLump, "
-                f"or ScheduledEvent; got {type(component)}."
+                f"ScheduledEvent, or DurationEvent; got {type(component)}."
             )
         frozen.append((name, frozen_component))
 

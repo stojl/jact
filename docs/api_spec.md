@@ -18,18 +18,21 @@ The public API has four layers:
 
 Use `import jact` for the main surface. The top-level names are
 `jact.StateSpace`, `jact.Model`, `jact.InitialDistribution`,
-`jact.ModelResult`, and `jact.solve`. Domain-specific types live under two
-public submodules:
+`jact.ModelResult`, and `jact.solve`. Domain-specific types and fitted-model
+helpers live under public submodules:
 
 - `jact.cashflows` — declarations (`StateRate`, `TransitionLump`,
-  `ScheduledEvent`, `CashflowDeclaration`) and views (`Raw`, `Group`,
-  `Total`, `ByState`, `ByKind`).
+  `ScheduledEvent`, `DurationEvent`, `CashflowDeclaration`) and views (`Raw`,
+  `Group`, `Total`, `ByState`, `ByKind`).
 - `jact.probability` — output reducers (`StateProbability`,
   `DensityProbability`, `Density`, `PointMass`, `MarginalComponents`,
   `Full`) and the `ProbabilityOutput` union.
+- `jact.wrappers` — fitted-model intensity helpers (`bind_intensity`,
+  `bind_grouped_intensity`, `bind_exit_intensity`).
 
-Advanced inspection types stay in private modules: `StateCarry` is
-available as `jact.probability.StateCarry`; `ReducedModel` and
+Advanced/internal inspection symbols are importable for users who need deeper
+debugging hooks, but they are not part of the main top-level `jact` surface:
+`StateCarry` is available as `jact.probability.StateCarry`; `ReducedModel` and
 `TransitionInfo` live under `jact.model`.
 
 Files under `archive/original_prototype/` and `notes/` are background material
@@ -241,8 +244,14 @@ model's full state list, so no reduction is performed.
 
 Core rules:
 
+- `components` must be a non-empty mapping.
+- each component payload must contain both `mass` and `duration`.
 - `mass` and `duration` values may be scalars or `(batch,)` arrays.
+- concrete `mass` and `duration` values must be non-negative.
+- scalar and `(batch,)` component shapes must have compatible batch dimensions.
 - masses are normalised per individual by default.
+- `declared_initial_states` returns the structural initial-state tuple, or
+  `None` for `per_individual(initial_states=None)`.
 - `per_individual.states` is a traced `(batch,)` integer array.
 - `per_individual.initial_states=<tuple>` means the indices are into that tuple
   and the solver reduces to the union of states reachable from it.
@@ -329,6 +338,90 @@ Return shapes:
 
 All intensity callables must be pure and JIT-compatible.
 
+## Fitted-model wrappers
+
+The wrapper helpers adapt fitted model inference functions to the intensity
+protocol above. They are framework-agnostic closures; no `StateSpace` or
+solver changes are involved.
+
+### Single intensity
+
+```python
+jact.wrappers.bind_intensity(
+    apply_fn,
+    params,
+    feature_fn,
+    *,
+    model_state=None,
+    apply_kwargs=None,
+)
+```
+
+The returned callable has the ordinary intensity signature:
+
+```python
+intensity(t, d, **kwargs) -> jnp.ndarray
+```
+
+Call flow:
+
+```python
+features = feature_fn(t, d, **kwargs)
+raw = apply_fn(params, features, **apply_kwargs)
+```
+
+If `model_state is not None`, the apply call receives a variable mapping:
+
+```python
+raw = apply_fn({"params": params, **model_state}, features, **apply_kwargs)
+```
+
+The raw output must have shape `(batch, D)`. Scalar, rank-1, rank-3, and
+wrong-width outputs are rejected. The returned hazard is
+`jnp.maximum(raw, 0.0)`.
+
+### Grouped and exit intensities
+
+```python
+jact.wrappers.bind_grouped_intensity(
+    apply_fn,
+    params,
+    feature_fn,
+    *,
+    output_count,
+    output_axis=-1,
+    model_state=None,
+    apply_kwargs=None,
+)
+
+jact.wrappers.bind_exit_intensity(
+    apply_fn,
+    params,
+    feature_fn,
+    *,
+    output_count,
+    output_axis=-1,
+    model_state=None,
+    apply_kwargs=None,
+)
+```
+
+`bind_exit_intensity()` is an alias-shaped helper for readability when the
+callable is passed through `exits={...}`. Both helpers accept a rank-3 raw
+output, move `output_axis` to the front, and require normalized shape
+`(output_count, batch, D)`. For example, model output `(batch, D, K)` uses
+`output_axis=-1`, while output `(K, batch, D)` uses `output_axis=0`.
+
+The returned grouped hazard is `jnp.maximum(normalized, 0.0)`.
+
+Construction validation:
+
+- `apply_fn` and `feature_fn` must be callable.
+- `model_state` must be a mapping or `None`.
+- `apply_kwargs` must be a mapping or `None`.
+- `output_count` must be a positive integer.
+- `output_axis` must be an integer.
+
 ## Cashflows
 
 ### Declaration
@@ -342,6 +435,10 @@ cashflows = state_space.cashflows({
     "bonus": jact.cashflows.ScheduledEvent(
         when=event_time_fn,
         payments={"healthy": bonus_fn},
+    ),
+    "waiting_period": jact.cashflows.DurationEvent(
+        at_durations={"disabled": 0.25},
+        payments={"disabled": disability_bonus_fn},
     ),
 })
 ```
@@ -357,12 +454,15 @@ cashflows.component("premium")
 Validation is structural:
 
 - `cashflows()` requires a non-empty component mapping,
-- component names must be unique non-empty strings,
+- component names must be non-empty strings,
 - `StateRate` keys must be declared states,
 - `TransitionLump` keys must be declared transitions,
 - `ScheduledEvent.payments` keys must be declared states,
+- `DurationEvent.at_durations` and `DurationEvent.payments` keys must be the
+  same declared states,
 - every payment callable and every `ScheduledEvent.when` callable must be
-  callable.
+  callable,
+- every `DurationEvent.at_durations` value must be a scalar or callable.
 
 ### Component kinds
 
@@ -373,6 +473,9 @@ Validation is structural:
 - `ScheduledEvent(when=..., payments=...)` records expected payment at one
   deterministic event time per individual, conditional on the occupied state at
   that time.
+- `DurationEvent(at_durations=..., payments=...)` records a one-time expected
+  payment when duration in an attached occupied state reaches that state's
+  target duration.
 
 `StateRate` and `TransitionLump` take their `payments` mapping positionally.
 
@@ -396,6 +499,15 @@ def when(**kwargs) -> jnp.ndarray: ...
 The `**kwargs` argument follows the same batch-axis rule as intensity
 callables. The return shape is `(batch,)`: one event time per individual.
 
+Duration-event target durations use:
+
+```python
+def at_duration(**kwargs) -> jnp.ndarray: ...
+```
+
+`at_durations` values are target state durations. They may be Python scalars,
+rank-0 arrays, or callables returning a scalar or `(batch,)` array.
+
 ### Scheduled-event policy
 
 Scheduled events are intentionally narrow:
@@ -415,6 +527,39 @@ Scheduled events are intentionally narrow:
   transitions for that step are applied.
 
 Multiple event times per component are out of scope.
+
+### Duration-event policy
+
+Duration events are keyed by target duration already spent in the occupied
+state, not by calendar time or elapsed time since the solve started:
+
+- each attached state has one target duration per individual,
+- a state receives a duration-event payment only when it has both an
+  `at_durations` target and a payment callable in the component declaration,
+- target durations may depend on solve-time covariates,
+- effective target durations lie on the solver duration grid,
+- target durations near a solver grid point are snapped to that grid point to
+  absorb floating-point noise,
+- other off-grid target durations are floored to the duration-grid cell that
+  starts before the supplied target, matching scheduled-event indexing,
+- a negative target duration or an effective target duration outside the solver
+  grid produces no payment,
+- an event at duration `horizon` produces no payment because no solver step
+  starts at the right boundary,
+- payment evaluation uses the step left endpoint `t_n` and the effective target
+  duration, not the midpoint sample,
+- state occupancy uses the pre-step convention: the event sees mass occupying
+  the state before transitions for that step are applied,
+- point masses keep their exact starting duration, which need not lie on the
+  solver grid,
+- a point mass pays when its exact current duration reaches the effective target
+  duration during the solve; starts already past the effective target do not
+  pay, while starts exactly at the effective target pay at the first solver
+  step,
+- density mass pays from the matching effective duration-grid cell.
+
+Duration events are one-time boundary events. They are not recurring rates for
+all durations greater than or equal to the target duration.
 
 ### Recording semantics
 
@@ -478,7 +623,7 @@ Default and validation rules:
 - if `cashflows is None`, any non-`None` `cashflow_views` is rejected,
 - `cashflow_views={}` is allowed and returns an empty `result.cashflows`
   mapping,
-- view names must be unique non-empty strings,
+- view names must be non-empty strings,
 - `Raw(name=...)` and `Group(members)` must reference declared component names,
 - `Group.members` is frozen during validation,
 - `terminal` must be `bool`,
@@ -493,9 +638,11 @@ Semantics:
 - `ByState()` returns one key per reachable state in reduced order, including
   zero-valued leaves for reachable states with no contributions. `StateRate`
   contributes to the occupied state, `TransitionLump` contributes to the source
-  state, and `ScheduledEvent` contributes to the pre-step occupied state.
-- `ByKind()` returns keys `"state_rate"`, `"transition_lump"`, and
-  `"scheduled_event"`, including zero-valued leaves when a kind is absent.
+  state, and `ScheduledEvent` and `DurationEvent` contribute to the pre-step
+  occupied state.
+- `ByKind()` returns keys `"state_rate"`, `"transition_lump"`,
+  `"scheduled_event"`, and `"duration_event"`, including zero-valued leaves
+  when a kind is absent.
 
 ## Solver
 
@@ -541,6 +688,10 @@ Validation and defaults:
 - `cashflows` must be declared from `model.state_space`,
 - covariate values must have shape `(batch, ...)`; scalars are rejected,
 - `record_every` must divide `horizon * steps_per_unit`,
+- `devices` must not be `bool`,
+- integer `devices` counts must be positive,
+- requested integer `devices` counts cannot exceed the number of available
+  local devices,
 - `devices=None` uses the single-device JIT path; `devices=1` also stays on
   that path; selecting two or more local devices splits the batch axis across
   devices and restores the documented output shapes.
@@ -669,6 +820,8 @@ Each solver step:
 5. evolves point masses along `(t, d_0 + t)` with the same competing-risks
    logic and routes their outgoing mass into duration-zero density.
 
+### Probability outputs
+
 Built-in probability output reducers. Output shapes use `T` for the
 recorded time axis (length `horizon * steps_per_unit / record_every + 1`),
 `B` for batch, `S` for the number of reachable states (in `result.states`
@@ -688,15 +841,16 @@ These types live under `jact.probability` and form the
 duration. If a downstream consumer needs `_PointMass.d_0`, supply a custom
 probability callable and read it directly from the internal `StateCarry`
 objects.
+
 After marginalizing over duration, `StateProbability` combines continuous
 and point-mass probability into total state occupancy.
 
 Custom probability callables have signature
 `(state: tuple[StateCarry, ...]) -> PyTree`. Their returned PyTree is
 stacked by `jax.lax.scan` along a new leading time axis. `StateCarry` and
-`_PointMass` are internal solver types and live under `jact.probability`;
-they are not part of the documented public API surface but remain
-importable for advanced use.
+`_PointMass` are advanced/internal solver inspection symbols and live under
+`jact.probability`; they are not part of the main top-level `jact` surface but
+remain importable for advanced use.
 
 ## Numerical and JIT contract
 

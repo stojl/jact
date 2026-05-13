@@ -14,6 +14,7 @@ from .cashflows import (
     ByKind,
     ByState,
     CashflowDeclaration,
+    DurationEvent,
     Group,
     Raw,
     Scalar,
@@ -38,6 +39,7 @@ __all__ = ["solve"]
 _KIND_STATE_RATE = 0
 _KIND_TRANSITION_LUMP = 1
 _KIND_SCHEDULED_EVENT = 2
+_KIND_DURATION_EVENT = 3
 
 _SOURCE_COMPONENT = 0
 _SOURCE_COMPONENT_SUM = 1
@@ -257,6 +259,27 @@ def _scheduled_event_index(
     return snapped.astype(jnp.int32)
 
 
+def _duration_event_index(
+    at_duration: jnp.ndarray,
+    step_size: float,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    dtype = jnp.result_type(at_duration, 1.0)
+    step = jnp.asarray(step_size, dtype=dtype)
+    at_duration_index = _scheduled_event_index(at_duration, step_size)
+    effective_at_duration = at_duration_index.astype(dtype) * step
+    return at_duration_index, effective_at_duration
+
+
+def _is_near_grid_zero(
+    value: jnp.ndarray,
+    step_size: float,
+) -> jnp.ndarray:
+    dtype = jnp.result_type(value, 1.0)
+    x = jnp.asarray(value, dtype=dtype) / jnp.asarray(step_size, dtype=dtype)
+    tol = jnp.sqrt(jnp.asarray(jnp.finfo(x.dtype).eps, dtype=x.dtype))
+    return jnp.abs(x) <= tol
+
+
 def _solver_step_dynamics(
     state: tuple[StateCarry, ...],
     t: jnp.ndarray,
@@ -388,17 +411,28 @@ def _compute_cashflow_step(
     intensity_kwargs: dict[str, jnp.ndarray],
     cashflow_components: tuple[Any, ...],
     scheduled_events: tuple[Any, ...],
-) -> tuple[tuple[jnp.ndarray, ...], tuple[jnp.ndarray, ...], tuple[jnp.ndarray, ...]]:
+) -> tuple[
+    tuple[jnp.ndarray, ...],
+    tuple[jnp.ndarray, ...],
+    tuple[jnp.ndarray, ...],
+    tuple[jnp.ndarray, ...],
+    tuple[jnp.ndarray, ...],
+    tuple[jnp.ndarray, ...],
+]:
     template = densities[0, :, 0]
     by_component = _zero_leaves(len(cashflow_components), template)
     by_state = _zero_leaves(densities.shape[0], template)
-    by_kind = _zero_leaves(3, template)
+    by_kind = _zero_leaves(4, template)
+    event_by_component = _zero_leaves(len(cashflow_components), template)
+    event_by_state = _zero_leaves(densities.shape[0], template)
+    event_by_kind = _zero_leaves(4, template)
     t_mid = t + 0.5 * step_size
     n_steps = duration_mid.shape[-1]
 
     for component_index, component in enumerate(cashflow_components):
         kind = component[0]
         component_total = jnp.zeros_like(template)
+        event_component_total = jnp.zeros_like(template)
 
         if kind == _KIND_STATE_RATE:
             for state_index, payment_fn in component[1]:
@@ -514,10 +548,114 @@ def _compute_cashflow_step(
                     kind=_KIND_SCHEDULED_EVENT,
                     contribution=contribution,
                 )
+                (
+                    event_component_total,
+                    event_by_state,
+                    event_by_kind,
+                ) = _add_cashflow_contribution(
+                    event_component_total,
+                    event_by_state,
+                    event_by_kind,
+                    state_index=state_index,
+                    kind=_KIND_SCHEDULED_EVENT,
+                    contribution=contribution,
+                )
+
+        elif kind == _KIND_DURATION_EVENT:
+            for (
+                state_index,
+                at_duration,
+                at_duration_index,
+                effective_at_duration,
+                payment_fn,
+            ) in component[1]:
+                at_duration = _broadcast_batch(at_duration, template.shape[0])
+                at_duration_index = _broadcast_batch(
+                    at_duration_index,
+                    template.shape[0],
+                )
+                effective_at_duration = _broadcast_batch(
+                    effective_at_duration,
+                    template.shape[0],
+                )
+                in_horizon = (at_duration >= 0) & (at_duration_index < n_steps)
+                safe_index = jnp.clip(at_duration_index, 0, n_steps - 1)
+                density_at_duration = jnp.take_along_axis(
+                    densities[state_index],
+                    safe_index[:, None],
+                    axis=-1,
+                )[:, 0]
+                payment = _evaluate_intensity_at_point(
+                    payment_fn,
+                    t,
+                    effective_at_duration,
+                    intensity_kwargs,
+                )
+                contribution = in_horizon.astype(template.dtype) * (
+                    density_at_duration * payment
+                )
+
+                if point_mask[state_index]:
+                    remaining = effective_at_duration - point_d_0[state_index]
+                    trigger_index = _scheduled_event_index(remaining, step_size)
+                    current_index = jnp.round(t / step_size).astype(jnp.int32)
+                    not_past_target = (remaining >= 0) | _is_near_grid_zero(
+                        remaining,
+                        step_size,
+                    )
+                    active_point = (
+                        in_horizon
+                        & not_past_target
+                        & (trigger_index == current_index)
+                        & (trigger_index < n_steps)
+                    )
+                    point_payment = _evaluate_intensity_at_point(
+                        payment_fn,
+                        t,
+                        effective_at_duration,
+                        intensity_kwargs,
+                    )
+                    contribution = contribution + (
+                        active_point.astype(template.dtype)
+                        * point_values[state_index]
+                        * point_payment
+                    )
+                component_total, by_state, by_kind = _add_cashflow_contribution(
+                    component_total,
+                    by_state,
+                    by_kind,
+                    state_index=state_index,
+                    kind=_KIND_DURATION_EVENT,
+                    contribution=contribution,
+                )
+                (
+                    event_component_total,
+                    event_by_state,
+                    event_by_kind,
+                ) = _add_cashflow_contribution(
+                    event_component_total,
+                    event_by_state,
+                    event_by_kind,
+                    state_index=state_index,
+                    kind=_KIND_DURATION_EVENT,
+                    contribution=contribution,
+                )
 
         by_component = _add_leaf(by_component, component_index, component_total)
+        event_by_component = _add_leaf(
+            event_by_component,
+            component_index,
+            event_component_total,
+        )
 
-    return by_component, by_state, by_kind
+    return (
+        by_component,
+        by_state,
+        by_kind,
+        event_by_component,
+        event_by_state,
+        event_by_kind,
+    )
 
 
 def _compute_scheduled_events(
@@ -535,6 +673,40 @@ def _compute_scheduled_events(
         else:
             scheduled_events.append(None)
     return tuple(scheduled_events)
+
+
+def _compute_duration_events(
+    cashflow_components: tuple[Any, ...],
+    step_size: float,
+    intensity_kwargs: dict[str, jnp.ndarray],
+) -> tuple[Any, ...]:
+    duration_events = []
+    for component in cashflow_components:
+        if component[0] == _KIND_DURATION_EVENT:
+            attachments = []
+            for state_index, at_duration_source, payment_fn in component[1]:
+                at_duration = (
+                    jnp.asarray(at_duration_source(**intensity_kwargs))
+                    if callable(at_duration_source)
+                    else jnp.asarray(at_duration_source)
+                )
+                at_duration_index, effective_at_duration = _duration_event_index(
+                    at_duration,
+                    step_size,
+                )
+                attachments.append(
+                    (
+                        state_index,
+                        at_duration,
+                        at_duration_index,
+                        effective_at_duration,
+                        payment_fn,
+                    )
+                )
+            duration_events.append((_KIND_DURATION_EVENT, tuple(attachments)))
+        else:
+            duration_events.append(component)
+    return tuple(duration_events)
 
 
 def _source_value(
@@ -574,12 +746,24 @@ def _compute_cashflow_views(
     by_component: tuple[jnp.ndarray, ...],
     by_state: tuple[jnp.ndarray, ...],
     by_kind: tuple[jnp.ndarray, ...],
+    event_by_component: tuple[jnp.ndarray, ...],
+    event_by_state: tuple[jnp.ndarray, ...],
+    event_by_kind: tuple[jnp.ndarray, ...],
     t: jnp.ndarray,
     step_size: float,
     intensity_kwargs: dict[str, jnp.ndarray],
     cashflow_views: tuple[Any, ...],
     template: jnp.ndarray,
 ) -> tuple[tuple[jnp.ndarray, ...], ...]:
+    midpoint_by_component = tuple(
+        total - event for total, event in zip(by_component, event_by_component)
+    )
+    midpoint_by_state = tuple(
+        total - event for total, event in zip(by_state, event_by_state)
+    )
+    midpoint_by_kind = tuple(
+        total - event for total, event in zip(by_kind, event_by_kind)
+    )
     view_values = []
     for (
         _view_name,
@@ -595,9 +779,28 @@ def _compute_cashflow_views(
             intensity_kwargs,
             template,
         )
+        event_factor = _evaluate_weight(
+            weight,
+            t,
+            intensity_kwargs,
+            template,
+        )
         view_values.append(
             tuple(
-                _source_value(source, by_component, by_state, by_kind) * factor
+                _source_value(
+                    source,
+                    midpoint_by_component,
+                    midpoint_by_state,
+                    midpoint_by_kind,
+                )
+                * factor
+                + _source_value(
+                    source,
+                    event_by_component,
+                    event_by_state,
+                    event_by_kind,
+                )
+                * event_factor
                 for source in leaf_sources
             )
         )
@@ -786,6 +989,11 @@ def _midpoint_solver(
         step_size,
         intensity_kwargs,
     )
+    duration_components = _compute_duration_events(
+        cashflow_components,
+        step_size,
+        intensity_kwargs,
+    )
 
     def block_scan(carry, block_start):
         state_carry, terminal_carry = carry
@@ -803,20 +1011,30 @@ def _midpoint_solver(
                 solver_matrix,
                 intensity_kwargs,
             )
-            raw_component, raw_state, raw_kind = _compute_cashflow_step(
+            (
+                raw_component,
+                raw_state,
+                raw_kind,
+                event_component,
+                event_state,
+                event_kind,
+            ) = _compute_cashflow_step(
                 *dynamics,
                 current_t,
                 duration_mid,
                 duration_left,
                 step_size,
                 intensity_kwargs,
-                cashflow_components,
+                duration_components,
                 scheduled_events,
             )
             step_cashflows = _compute_cashflow_views(
                 raw_component,
                 raw_state,
                 raw_kind,
+                event_component,
+                event_state,
+                event_kind,
                 current_t,
                 step_size,
                 intensity_kwargs,
@@ -1007,6 +1225,13 @@ def _prepare_cashflow_components(
                 if state in state_index
             )
             prepared.append((_KIND_SCHEDULED_EVENT, component.when, attachments))
+        elif isinstance(component, DurationEvent):
+            attachments = tuple(
+                (state_index[state], component.at_durations[state], fn)
+                for state, fn in component.payments.items()
+                if state in state_index
+            )
+            prepared.append((_KIND_DURATION_EVENT, attachments))
     return tuple(prepared)
 
 
@@ -1052,8 +1277,13 @@ def _prepare_cashflow_views(
             )
             view_kind = "mapping"
         elif isinstance(view, ByKind):
-            leaf_names = ("state_rate", "transition_lump", "scheduled_event")
-            sources = tuple((_SOURCE_KIND, index) for index in range(3))
+            leaf_names = (
+                "state_rate",
+                "transition_lump",
+                "scheduled_event",
+                "duration_event",
+            )
+            sources = tuple((_SOURCE_KIND, index) for index in range(4))
             view_kind = "mapping"
         prepared.append(
             (
