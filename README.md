@@ -38,8 +38,8 @@ result = model.solve(initial="healthy", horizon=30, steps_per_unit=12, age=ages)
 
 ## Fitted-model intensity wrappers
 
-Use `bind_intensity()` when a fitted model has a separate feature builder and
-apply function:
+Use `jact.wrappers.bind_intensity()` when a fitted model has a separate feature
+builder and apply function:
 
 ```python
 def features(t, d, *, age):
@@ -57,13 +57,13 @@ def apply(params, x):
     return jnp.exp(linear)
 
 
-onset_fn = jact.bind_intensity(apply, fitted_params, features)
+onset_fn = jact.wrappers.bind_intensity(apply, fitted_params, features)
 ```
 
 For fitted models that emit several hazards at once, use
-`bind_grouped_intensity(..., output_count=K)` or
-`bind_exit_intensity(..., output_count=K)`. The wrappers clamp outputs to
-non-negative hazards and normalize grouped outputs to `(K, batch, D)`.
+`jact.wrappers.bind_grouped_intensity(..., output_count=K)` or
+`jact.wrappers.bind_exit_intensity(..., output_count=K)`. The wrappers clamp
+outputs to non-negative hazards and normalize grouped outputs to `(K, batch, D)`.
 
 ## Cashflow example
 
@@ -139,9 +139,7 @@ For a fitting-to-solver workflow with neural-network intensities, see the
 
 The top-level `jact` namespace exposes the core types: `jact.StateSpace`,
 `jact.Model`, `jact.InitialDistribution`, `jact.ModelResult`, and
-`jact.solve`. It also exposes fitted-model helpers:
-`jact.bind_intensity`, `jact.bind_grouped_intensity`, and
-`jact.bind_exit_intensity`. Domain types live under two submodules:
+`jact.solve`. Domain types and fitted-model helpers live under submodules:
 
 - `jact.cashflows` for declarations and views (`StateRate`,
   `TransitionLump`, `ScheduledEvent`, `DurationEvent`, `Raw`, `Group`,
@@ -149,6 +147,8 @@ The top-level `jact` namespace exposes the core types: `jact.StateSpace`,
 - `jact.probability` for output reducers (`StateProbability`,
   `DensityProbability`, `Density`, `PointMass`, `MarginalComponents`,
   `Full`).
+- `jact.wrappers` for fitted-model intensity helpers (`bind_intensity`,
+  `bind_grouped_intensity`, `bind_exit_intensity`).
 
 Advanced inspection types stay in private modules — for example
 `jact.probability.StateCarry` and `jact.model.ReducedModel`.

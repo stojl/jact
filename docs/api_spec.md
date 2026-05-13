@@ -18,9 +18,8 @@ The public API has four layers:
 
 Use `import jact` for the main surface. The top-level names are
 `jact.StateSpace`, `jact.Model`, `jact.InitialDistribution`,
-`jact.ModelResult`, `jact.solve`, `jact.bind_intensity`,
-`jact.bind_grouped_intensity`, and `jact.bind_exit_intensity`.
-Domain-specific types live under two public submodules:
+`jact.ModelResult`, and `jact.solve`. Domain-specific types and fitted-model
+helpers live under public submodules:
 
 - `jact.cashflows` — declarations (`StateRate`, `TransitionLump`,
   `ScheduledEvent`, `DurationEvent`, `CashflowDeclaration`) and views (`Raw`,
@@ -28,6 +27,8 @@ Domain-specific types live under two public submodules:
 - `jact.probability` — output reducers (`StateProbability`,
   `DensityProbability`, `Density`, `PointMass`, `MarginalComponents`,
   `Full`) and the `ProbabilityOutput` union.
+- `jact.wrappers` — fitted-model intensity helpers (`bind_intensity`,
+  `bind_grouped_intensity`, `bind_exit_intensity`).
 
 Advanced/internal inspection symbols are importable for users who need deeper
 debugging hooks, but they are not part of the main top-level `jact` surface:
@@ -346,7 +347,7 @@ solver changes are involved.
 ### Single intensity
 
 ```python
-jact.bind_intensity(
+jact.wrappers.bind_intensity(
     apply_fn,
     params,
     feature_fn,
@@ -382,7 +383,7 @@ wrong-width outputs are rejected. The returned hazard is
 ### Grouped and exit intensities
 
 ```python
-jact.bind_grouped_intensity(
+jact.wrappers.bind_grouped_intensity(
     apply_fn,
     params,
     feature_fn,
@@ -393,7 +394,7 @@ jact.bind_grouped_intensity(
     apply_kwargs=None,
 )
 
-jact.bind_exit_intensity(
+jact.wrappers.bind_exit_intensity(
     apply_fn,
     params,
     feature_fn,

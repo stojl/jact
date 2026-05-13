@@ -36,13 +36,12 @@ Example
 
 from importlib.metadata import PackageNotFoundError, version
 
-from . import cashflows, probability
+from . import cashflows, probability, wrappers
 from .initial_distribution import InitialDistribution
 from .model import Model
 from .result import ModelResult
 from .solver import solve
 from .state_space import StateSpace
-from .wrappers import bind_exit_intensity, bind_grouped_intensity, bind_intensity
 
 try:
     __version__ = version("jact")
@@ -56,9 +55,7 @@ __all__ = [
     "InitialDistribution",
     "ModelResult",
     "solve",
-    "bind_intensity",
-    "bind_grouped_intensity",
-    "bind_exit_intensity",
     "cashflows",
     "probability",
+    "wrappers",
 ]

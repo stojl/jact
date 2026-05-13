@@ -58,10 +58,11 @@ specification in the repo.
   (`StateProbability`, `DensityProbability`, `Density`, `PointMass`,
   `MarginalComponents`, `Full`), a custom callable
   `(state) -> PyTree`, or `None`. Strings are rejected.
-- Public types live under two submodules: `jact.cashflows` (declarations
-  and views) and `jact.probability` (output reducers). The top level only
+- Public types live under three submodules: `jact.cashflows` (declarations
+  and views), `jact.probability` (output reducers), and `jact.wrappers`
+  (fitted-model intensity helpers). The top level only
   exposes `StateSpace`, `Model`, `InitialDistribution`, `ModelResult`,
-  `solve`, and the two submodules. There are no flat aliases.
+  `solve`, and the submodules. There are no flat aliases.
 - If `cashflows` is supplied and `cashflow_views` is omitted or `None`, the
   solver defaults to `{"raw": jact.cashflows.Raw()}`. `cashflow_views={}`
   is allowed and returns an empty mapping.

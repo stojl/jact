@@ -31,7 +31,7 @@ def _apply_grouped_first(params, features):
 
 
 def test_bind_intensity_returns_batch_by_duration_output():
-    intensity = jact.bind_intensity(
+    intensity = jact.wrappers.bind_intensity(
         _apply_single,
         {"scale": 2.0},
         _feature_fn,
@@ -50,7 +50,7 @@ def test_bind_intensity_returns_batch_by_duration_output():
 
 
 def test_bind_grouped_intensity_normalizes_batch_duration_output_axis_last():
-    intensity = jact.bind_grouped_intensity(
+    intensity = jact.wrappers.bind_grouped_intensity(
         _apply_grouped_last,
         {"base": -1.0},
         _feature_fn,
@@ -67,7 +67,7 @@ def test_bind_grouped_intensity_normalizes_batch_duration_output_axis_last():
 
 
 def test_bind_grouped_intensity_keeps_output_axis_zero():
-    intensity = jact.bind_grouped_intensity(
+    intensity = jact.wrappers.bind_grouped_intensity(
         _apply_grouped_first,
         {"base": 0.5},
         _feature_fn,
@@ -82,7 +82,7 @@ def test_bind_grouped_intensity_keeps_output_axis_zero():
 
 
 def test_bind_exit_intensity_rejects_mismatched_output_count():
-    intensity = jact.bind_exit_intensity(
+    intensity = jact.wrappers.bind_exit_intensity(
         _apply_grouped_last,
         {"base": 0.0},
         _feature_fn,
@@ -102,7 +102,7 @@ def test_bind_exit_intensity_rejects_mismatched_output_count():
 )
 def test_wrappers_reject_non_callable_functions(apply_fn, feature_fn, match):
     with pytest.raises(TypeError, match=match):
-        jact.bind_intensity(apply_fn, {"scale": 1.0}, feature_fn)
+        jact.wrappers.bind_intensity(apply_fn, {"scale": 1.0}, feature_fn)
 
 
 def test_bind_intensity_rejects_invalid_output_rank():
@@ -110,7 +110,7 @@ def test_bind_intensity_rejects_invalid_output_rank():
         del params
         return features[:, 0]
 
-    intensity = jact.bind_intensity(apply_rank_one, {}, _feature_fn)
+    intensity = jact.wrappers.bind_intensity(apply_rank_one, {}, _feature_fn)
 
     with pytest.raises(ValueError, match=r"\(batch, D\)"):
         intensity(0.0, jnp.array([[1.0, 2.0]]), age=jnp.array([10.0]))
@@ -121,7 +121,7 @@ def test_wrapped_transition_intensity_solves_through_state_space_build():
         states=["alive", "dead"],
         transitions=[("alive", "dead")],
     )
-    intensity = jact.bind_intensity(
+    intensity = jact.wrappers.bind_intensity(
         _apply_single,
         {"scale": 0.0},
         _feature_fn,
@@ -142,13 +142,21 @@ def test_wrapped_transition_intensity_solves_through_state_space_build():
 
 
 def test_gradients_flow_through_params():
-    intensity = jact.bind_intensity(_apply_single, {"scale": 0.1}, _feature_fn)
+    intensity = jact.wrappers.bind_intensity(_apply_single, {"scale": 0.1}, _feature_fn)
 
     def loss(scale):
         params: Mapping[str, Any] = {"scale": scale}
-        bound = jact.bind_intensity(_apply_single, params, _feature_fn)
+        bound = jact.wrappers.bind_intensity(_apply_single, params, _feature_fn)
         out = bound(0.0, jnp.array([[1.0, 2.0]]), age=jnp.array([10.0, 20.0]))
         return jnp.sum(out)
 
     assert jnp.allclose(jax.grad(loss)(0.1), 66.0)
     assert intensity(0.0, jnp.array([[1.0]]), age=jnp.array([10.0])).shape == (1, 1)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["bind_intensity", "bind_grouped_intensity", "bind_exit_intensity"],
+)
+def test_intensity_wrappers_are_not_top_level_aliases(name):
+    assert not hasattr(jact, name)
