@@ -264,11 +264,20 @@ def _duration_event_index(
     step_size: float,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     dtype = jnp.result_type(delay, 1.0)
-    x = jnp.asarray(delay, dtype=dtype) / jnp.asarray(step_size, dtype=dtype)
-    nearest = jnp.round(x)
+    step = jnp.asarray(step_size, dtype=dtype)
+    delay_index = _scheduled_event_index(delay, step_size)
+    effective_delay = delay_index.astype(dtype) * step
+    return delay_index, effective_delay
+
+
+def _is_near_grid_zero(
+    value: jnp.ndarray,
+    step_size: float,
+) -> jnp.ndarray:
+    dtype = jnp.result_type(value, 1.0)
+    x = jnp.asarray(value, dtype=dtype) / jnp.asarray(step_size, dtype=dtype)
     tol = jnp.sqrt(jnp.asarray(jnp.finfo(x.dtype).eps, dtype=x.dtype))
-    aligned = jnp.abs(x - nearest) <= tol
-    return nearest.astype(jnp.int32), aligned
+    return jnp.abs(x) <= tol
 
 
 def _solver_step_dynamics(
@@ -557,14 +566,16 @@ def _compute_cashflow_step(
                 state_index,
                 delay,
                 delay_index,
-                delay_aligned,
+                effective_delay,
                 payment_fn,
             ) in component[1]:
                 delay = _broadcast_batch(delay, template.shape[0])
                 delay_index = _broadcast_batch(delay_index, template.shape[0])
-                delay_aligned = _broadcast_batch(delay_aligned, template.shape[0])
+                effective_delay = _broadcast_batch(
+                    effective_delay,
+                    template.shape[0],
+                )
                 in_horizon = (delay >= 0) & (delay_index < n_steps)
-                active_density = delay_aligned & in_horizon
                 safe_index = jnp.clip(delay_index, 0, n_steps - 1)
                 density_at_delay = jnp.take_along_axis(
                     densities[state_index],
@@ -574,29 +585,31 @@ def _compute_cashflow_step(
                 payment = _evaluate_intensity_at_point(
                     payment_fn,
                     t,
-                    delay,
+                    effective_delay,
                     intensity_kwargs,
                 )
-                contribution = active_density.astype(template.dtype) * (
+                contribution = in_horizon.astype(template.dtype) * (
                     density_at_delay * payment
                 )
 
                 if point_mask[state_index]:
-                    point_duration = point_d_0[state_index] + t
-                    point_index, point_aligned = _duration_event_index(
-                        point_duration,
+                    remaining = effective_delay - point_d_0[state_index]
+                    trigger_index = _scheduled_event_index(remaining, step_size)
+                    current_index = jnp.round(t / step_size).astype(jnp.int32)
+                    not_past_target = (remaining >= 0) | _is_near_grid_zero(
+                        remaining,
                         step_size,
                     )
                     active_point = (
-                        delay_aligned
-                        & in_horizon
-                        & point_aligned
-                        & (point_index == delay_index)
+                        in_horizon
+                        & not_past_target
+                        & (trigger_index == current_index)
+                        & (trigger_index < n_steps)
                     )
                     point_payment = _evaluate_intensity_at_point(
                         payment_fn,
                         t,
-                        point_duration,
+                        effective_delay,
                         intensity_kwargs,
                     )
                     contribution = contribution + (
@@ -674,9 +687,12 @@ def _compute_duration_events(
                     if callable(delay_source)
                     else jnp.asarray(delay_source)
                 )
-                delay_index, delay_aligned = _duration_event_index(delay, step_size)
+                delay_index, effective_delay = _duration_event_index(
+                    delay,
+                    step_size,
+                )
                 attachments.append(
-                    (state_index, delay, delay_index, delay_aligned, payment_fn)
+                    (state_index, delay, delay_index, effective_delay, payment_fn)
                 )
             duration_events.append((_KIND_DURATION_EVENT, tuple(attachments)))
         else:

@@ -909,6 +909,70 @@ def test_duration_event_no_transition_point_mass_pays_once_at_delay():
     assert jnp.allclose(result.cashflows["waiting"], jnp.array([1000.0, 1000.0]))
 
 
+def test_duration_event_target_snaps_like_scheduled_event():
+    ss = jact.StateSpace(["disabled"], [])
+    model = ss.build(transitions={})
+
+    def delay(**kwargs):
+        return kwargs["target_duration"]
+
+    cashflows = ss.cashflows({"waiting": jact.cashflows.DurationEvent(
+        delays={"disabled": delay},
+        payments={"disabled": _constant_payment(7.0, 5)},
+    )})
+
+    result = model.solve(
+        initial="disabled",
+        horizon=3,
+        steps_per_unit=1,
+        probability=None,
+        cashflows=cashflows,
+        cashflow_views={"waiting": jact.cashflows.Raw("waiting")},
+        target_duration=jnp.array([
+            1.0 - 1e-4,
+            1.0 + 1e-4,
+            1.0 - 1e-3,
+            -1e-4,
+            3.0 - 1e-4,
+        ], dtype=jnp.float32),
+    ).cashflows["waiting"]
+
+    expected = jnp.array([
+        [0.0, 0.0, 7.0, 0.0, 0.0],
+        [7.0, 7.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0],
+    ])
+    assert jnp.allclose(result, expected)
+
+
+def test_duration_event_off_grid_initial_duration_triggers_by_reaching_target():
+    ss = jact.StateSpace(["disabled"], [])
+    model = ss.build(transitions={})
+    cashflows = ss.cashflows({"waiting": jact.cashflows.DurationEvent(
+        delays={"disabled": 0.5},
+        payments={"disabled": _constant_payment(11.0, 3)},
+    )})
+
+    result = model.solve(
+        initial="disabled",
+        initial_duration=jnp.array([0.37, 0.63, 0.5], dtype=jnp.float32),
+        horizon=1,
+        steps_per_unit=4,
+        probability=None,
+        cashflows=cashflows,
+        cashflow_views={"waiting": jact.cashflows.Raw("waiting")},
+        age=jnp.arange(3.0),
+    ).cashflows["waiting"]
+
+    expected = jnp.array([
+        [11.0, 0.0, 11.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+    ])
+    assert jnp.allclose(result, expected)
+
+
 def test_duration_event_constant_exit_matches_survival_to_delay():
     mu = 0.2
     benefit = 1000.0

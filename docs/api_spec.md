@@ -498,14 +498,15 @@ def when(**kwargs) -> jnp.ndarray: ...
 The `**kwargs` argument follows the same batch-axis rule as intensity
 callables. The return shape is `(batch,)`: one event time per individual.
 
-Duration-event delays use:
+Duration-event target durations use:
 
 ```python
 def delay(**kwargs) -> jnp.ndarray: ...
 ```
 
-Delay values may be Python scalars, rank-0 arrays, or callables returning a
-scalar or `(batch,)` array.
+The public field is named `delays` for compatibility, but these values are
+target state durations. They may be Python scalars, rank-0 arrays, or callables
+returning a scalar or `(batch,)` array.
 
 ### Scheduled-event policy
 
@@ -529,28 +530,33 @@ Multiple event times per component are out of scope.
 
 ### Duration-event policy
 
-Duration events are keyed by time already spent in the occupied state, not by
-calendar time:
+Duration events are keyed by target duration already spent in the occupied
+state, not by calendar time or elapsed time since the solve started:
 
-- each attached state has one delay per individual,
+- each attached state has one target duration per individual,
 - a state receives a duration-event payment only when it has both a delay and a
   payment callable in the component declaration,
-- delays may depend on solve-time covariates,
-- this first implementation is grid-aligned: a delay pays only when it is on a
-  solver duration-grid point, using the same near-grid floating-point tolerance
-  as scheduled-event snapping,
-- off-grid delays produce no payment,
-- `delay < 0` or an effective duration cell outside the solver grid produces no
-  payment,
+- target durations may depend on solve-time covariates,
+- effective target durations lie on the solver duration grid,
+- target durations near a solver grid point are snapped to that grid point to
+  absorb floating-point noise,
+- other off-grid target durations are floored to the duration-grid cell that
+  starts before the supplied target, matching scheduled-event indexing,
+- a negative target duration or an effective target duration outside the solver
+  grid produces no payment,
 - an event at duration `horizon` produces no payment because no solver step
   starts at the right boundary,
-- payment evaluation uses the step left endpoint `t_n` and the event duration,
-  not the midpoint sample,
+- payment evaluation uses the step left endpoint `t_n` and the effective target
+  duration, not the midpoint sample,
 - state occupancy uses the pre-step convention: the event sees mass occupying
   the state before transitions for that step are applied,
-- point masses pay when their exact current duration reaches the delay grid
-  point,
-- density mass pays from the matching duration-grid cell.
+- point masses keep their exact starting duration, which need not lie on the
+  solver grid,
+- a point mass pays when its exact current duration reaches the effective target
+  duration during the solve; starts already past the effective target do not
+  pay, while starts exactly at the effective target pay at the first solver
+  step,
+- density mass pays from the matching effective duration-grid cell.
 
 Duration events are one-time boundary events. They are not recurring rates for
 all durations greater than or equal to the delay.
