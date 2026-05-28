@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jact"
-version = "0.1.6"
+version = "0.1.7"
 description = "JAX-based transition probability computation for multi-state models"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,6 +41,9 @@ Repository = "https://github.com/stojl/jact"
 Issues = "https://github.com/stojl/jact/issues"
 Documentation = "https://github.com/stojl/jact/blob/main/docs/index.md"
 
+[project.scripts]
+jact-agent-skill = "jact.agents.installer:main"
+
 [project.optional-dependencies]
 dev = [
     "build>=1.2.0",
@@ -56,6 +59,9 @@ notebook = [
 [tool.setuptools]
 package-dir = {"" = "src"}
 include-package-data = false
+
+[tool.setuptools.package-data]
+jact = ["agents/jact/SKILL.md"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

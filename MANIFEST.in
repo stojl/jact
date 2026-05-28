@@ -1,5 +1,6 @@
 include README.md
 include LICENSE
+include src/jact/agents/jact/SKILL.md
 
 prune tests
 prune docs

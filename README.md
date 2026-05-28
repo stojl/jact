@@ -123,6 +123,8 @@ present_value = result.cashflows["pv_total"]
 - **Compute only what's needed**: The solver reduces to states reachable from the initial state.
 - **Exact seeded starts**: Initial point masses preserve per-individual starting duration `d_0` exactly.
 - **Batch-first**: Designed for 100K+ individuals in a single pass.
+- **Agent-ready guidance**: Ship `jact` modeling instructions to AI coding
+  agents with the bundled `jact-agent-skill` helper.
 
 ## Documentation
 
@@ -134,6 +136,37 @@ For a runnable walkthrough of the main workflow, see the
 [example notebook](https://github.com/stojl/jact/blob/main/docs/example_notebook.ipynb).
 For a fitting-to-solver workflow with neural-network intensities, see the
 [fitted neural-network notebook](https://github.com/stojl/jact/blob/main/docs/fitted_nn_notebook.ipynb).
+
+## AI agent skill
+
+Installed packages include an application-focused AI agent skill for writing
+`jact` modeling code. The skill helps coding agents choose the right
+`StateSpace`, intensity wrappers, probability reducers, initial distributions,
+and cashflow views. It is user-facing modeling guidance, separate from
+repository development guidance such as `AGENT.md`.
+
+The skill is packaged at `jact/agents/jact/SKILL.md` and includes YAML
+frontmatter (`name` and `description`) for agent CLIs that auto-discover skills.
+Use the generic helper to locate, print, or install it into the directory your
+agent CLI expects:
+
+```bash
+jact-agent-skill path
+jact-agent-skill print
+jact-agent-skill install --target ~/.config/my-agent/skills/jact
+```
+
+For example, to install it for a project-local skill-aware agent directory:
+
+```bash
+jact-agent-skill install --target .github/skills/jact
+```
+
+The same helper is available as a module:
+
+```bash
+python -m jact.agents install --target ~/.config/my-agent/skills/jact
+```
 
 ## Namespace
 
