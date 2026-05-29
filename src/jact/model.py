@@ -6,6 +6,17 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import jax
+import jax.numpy as jnp
+
+from .cashflows import (
+    ByKind,
+    ByState,
+    CashflowDeclaration,
+    Group,
+    Raw,
+    Total,
+)
 from .initial_distribution import InitialDistribution
 from .probability import ProbabilityOutput, StateProbability
 from .result import ModelResult
@@ -298,15 +309,17 @@ class Model:
 
     def solve(
         self,
-        initial: str | Any | InitialDistribution,
+        initial: str | jnp.ndarray | InitialDistribution,
         horizon: int,
         steps_per_unit: int,
         initial_duration: Any = 0.0,
         probability: None | ProbabilityOutput | Callable = StateProbability(),
-        cashflows: Any = None,
-        cashflow_views: Any = None,
+        cashflows: CashflowDeclaration | None = None,
+        cashflow_views: (
+            Mapping[str, Raw | Group | Total | ByState | ByKind] | None
+        ) = None,
         record_every: int = 1,
-        devices: int | Any = None,
+        devices: int | Sequence[jax.Device] | None = None,
         **kwargs,
     ) -> ModelResult:
         """Compute transition probabilities from a documented initial condition.
@@ -323,9 +336,10 @@ class Model:
             mass and duration values within it; model reduction follows
             the declared structural set, not runtime mass support.
         horizon : int
-            Number of time units to solve over.
+            Positive integer number of time units to solve over. Fractional
+            horizons are not accepted.
         steps_per_unit : int
-            Discretization resolution per time unit.
+            Positive integer discretization resolution per time unit.
         initial_duration : float or (batch,) array, optional
             Per-individual ``d_0`` for the ``str`` and ``(batch,)``
             shorthand forms of ``initial``. Default is ``0.0``.
@@ -345,9 +359,9 @@ class Model:
         cashflow_views : dict, optional
             Solve-time cashflow aggregation views.
         record_every : int, optional
-            Record probability output every ``record_every``-th solver
-            step. Must divide ``horizon * steps_per_unit``. Default is
-            ``1``.
+            Positive integer record stride. Record probability output every
+            ``record_every``-th solver step. Must divide
+            ``horizon * steps_per_unit``. Default is ``1``.
         devices : int or sequence of jax.Device, optional
             Select multiple local devices for batch-sharded execution.
             ``None`` keeps the single-device JIT path. ``1`` explicitly

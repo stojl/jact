@@ -26,6 +26,14 @@ def test_skill_text_reads_application_guidance():
     assert "## Debugging Shape Errors" in text
     assert "state_space.initial_distribution" in text
     assert "bind_exit_intensity" in text
+    assert "Cashflows can also act as integrators" in text
+    assert "full duration density" in text
+    assert "terminal=True" in text
+    assert "## JIT and Large Batches" in text
+    assert "fixed-size batches" in text
+    assert "same leading batch dimension" in text
+    assert "Pad the final partial batch" in text
+    assert "trim result arrays" in text
     assert "Release checks" not in text
 
 

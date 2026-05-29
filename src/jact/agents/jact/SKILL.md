@@ -22,6 +22,7 @@ When helping a user, first identify:
 - which transitions have known formulas versus fitted models,
 - covariates and their batch shape,
 - the initial condition and any starting durations,
+- whether the user needs one solve or repeated fixed-shape batch processing,
 - whether the desired output is state occupancy, duration diagnostics,
   component cashflows, grouped cashflows, or a terminal value.
 
@@ -33,6 +34,14 @@ When helping a user, first identify:
    user covariates.
 5. Select probability reducers and cashflow views that match the user's
    question.
+
+Before choosing an output form, classify the requested quantity by intent:
+
+- Use probability reducers for snapshot state occupancy or duration diagnostics.
+- Use cashflows for expected path integrals, event values, scheduled values, and
+  accumulated terminal values.
+- If the next step would be "sum over time" or "integrate over duration",
+  check whether a cashflow component already expresses that integral.
 
 Core pattern:
 
@@ -105,6 +114,31 @@ reachable_states = result.states
 - Treat a built `Model` as immutable. Build a new model when topology or
   transition assignments change.
 
+## JIT and Large Batches
+
+`jact` is designed for efficient JAX JIT execution. Treat `model.solve(...)` as
+crossing a compilation boundary: repeated production solves should keep the
+compiled problem shape stable whenever possible.
+
+For repeated solves, prefer reusing the same built `Model` and keeping these
+inputs fixed:
+
+- solver configuration: `horizon`, `steps_per_unit`, and `record_every`,
+- output structure: probability reducer, cashflow declarations, and cashflow
+  views,
+- execution mode: selected devices,
+- covariate and initial-condition array shapes, especially the leading batch
+  dimension.
+
+When the dataset is too large to solve in one call, process it in fixed-size
+batches with the same leading batch dimension. Pad the final partial batch to
+the regular batch size, call `solve`, then trim result arrays back to the real
+row count. This avoids compiling a separate solve for the final smaller batch.
+
+Do not suggest variable-size chunks for large workloads unless compile overhead
+is irrelevant. If batch sizes must vary, explain that shape changes may trigger
+additional JIT compilation.
+
 ## Initial Conditions
 
 Use the simplest initial condition that represents the problem:
@@ -117,8 +151,9 @@ Use the simplest initial condition that represents the problem:
 - `initial=state_space.initial_distribution(...)` for mixed starting masses
   across multiple states.
 
-Pass `initial_duration=...` only for simple shared-state starts. For more
-structured starts, prefer the `StateSpace` initial-distribution helpers.
+Pass `initial_duration=...` only with shorthand starts: `initial="healthy"` or
+a `(batch,)` integer array of initial-state indices. For helper-based starts,
+pass duration through the helper's `duration=...` argument.
 
 Example mixed initial distribution:
 
@@ -151,6 +186,10 @@ Choose the smallest reducer that answers the user's question:
   or point-mass inspection.
 - Use `probability=None` for cashflow-only valuation.
 
+Do not emit full duration density just to manually integrate it. If the user's
+quantity is an expected accumulated value, first try to express it as a
+cashflow with a terminal view.
+
 Do not use string probability modes such as `"state"` or `"full"`. Pass reducer
 instances from `jact.probability` or a custom callable.
 
@@ -177,6 +216,13 @@ def apply(params, x):
     linear = params["intercept"] + jnp.sum(x * params["coef"], axis=-1)
     return jnp.exp(linear)
 
+
+# Example fitted parameter container. Use the equivalent structure for the
+# fitted model being wrapped.
+fitted_params = {
+    "intercept": -7.0,
+    "coef": jnp.array([0.08, 0.02, 0.4]),
+}
 
 mortality = jact.wrappers.bind_intensity(apply, fitted_params, features)
 
@@ -210,6 +256,16 @@ def exit_apply(params, x):
     return jnp.exp(linear)
 
 
+fitted_exit_params = {
+    "intercept": jnp.array([-4.0, -7.0]),
+    "coef": jnp.array(
+        [
+            [0.04, 0.08],
+            [0.01, 0.02],
+        ]
+    ),
+}
+
 healthy_exits = jact.wrappers.bind_exit_intensity(
     exit_apply,
     fitted_exit_params,
@@ -224,7 +280,8 @@ model = state_space.build(
 ```
 
 The order of a multi-output exit callable follows `state_space.exits(source)`,
-which is ordered by target-state order.
+which is ordered by target-state order. For `groups={fn: [...]}`, output axis 0
+follows the transition-list order supplied for that grouped callable.
 
 ## Debugging Shape Errors
 
@@ -255,6 +312,18 @@ views:
 - Set `terminal=True` on a view when the user wants one accumulated value per
   individual instead of a time stream.
 - Use `weight=` for discounting, accumulation, or other time-dependent weights.
+
+Cashflows can also act as integrators for non-monetary quantities:
+
+- `StateRate({"state": payment_fn})` integrates occupancy in a state over time.
+- A constant payment of `1.0` gives expected time spent in that state.
+- A payment equal to `d` gives expected accumulated duration while in that
+  state.
+- A payment such as `jnp.where(d > threshold, 1.0, 0.0)` gives expected time in
+  the state with duration above `threshold`.
+- `terminal=True` returns the accumulated integral per individual;
+  `terminal=False` returns streamed interval contributions.
+- Use `probability=None` when only the integral is needed.
 
 ```python
 import jax.numpy as jnp
@@ -304,15 +373,57 @@ benefit_stream = result.cashflows["benefits"]
 present_value = result.cashflows["pv"]
 ```
 
+Example: expected future time spent disabled with duration greater than one.
+This uses the cashflow machinery as the integrator instead of emitting full
+duration density and manually summing it.
+
+```python
+def disabled_after_one_year(t, d, *, age):
+    return jnp.broadcast_to(
+        jnp.where(d > 1.0, 1.0, 0.0),
+        (age.shape[0], d.shape[-1]),
+    )
+
+
+cashflows = state_space.cashflows(
+    {
+        "disabled_duration_gt_1": jact.cashflows.StateRate(
+            {"disabled": disabled_after_one_year}
+        ),
+    }
+)
+
+result = model.solve(
+    initial=initial,
+    horizon=10,
+    steps_per_unit=12,
+    probability=None,
+    cashflows=cashflows,
+    cashflow_views={
+        "expected_time": jact.cashflows.Raw(
+            "disabled_duration_gt_1",
+            terminal=True,
+        ),
+    },
+    age=ages,
+)
+
+expected_time = result.cashflows["expected_time"]
+```
+
 ## Avoid
 
 - Do not import domain types such as `StateRate`, `Raw`, or `StateProbability`
   from the top-level `jact` namespace. Use `jact.cashflows`,
   `jact.probability`, and `jact.wrappers`.
+- Do not compute full duration density just to integrate it manually when a
+  cashflow component and terminal view can express the same integral.
 - Do not mutate model topology or transition assignments after construction.
   Create a new `StateSpace` or `Model`.
+- Do not build performance-sensitive examples that loop over variable-size
+  chunks. Use fixed-size batches, pad the final batch, and trim outputs.
 - Do not treat `notes/`, `archive/`, benchmark scripts, or development docs as
   public API.
 - Do not answer modeling questions with repository development instructions.
-  Point users to `docs/api_spec.md` for the full public contract when they need
-  details beyond this skill.
+  Point users to the public API spec when they need details beyond this skill:
+  `https://github.com/stojl/jact/blob/main/docs/api_spec.md`.
