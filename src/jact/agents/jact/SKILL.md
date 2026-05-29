@@ -151,8 +151,9 @@ Use the simplest initial condition that represents the problem:
 - `initial=state_space.initial_distribution(...)` for mixed starting masses
   across multiple states.
 
-Pass `initial_duration=...` only for simple shared-state starts. For more
-structured starts, prefer the `StateSpace` initial-distribution helpers.
+Pass `initial_duration=...` only with shorthand starts: `initial="healthy"` or
+a `(batch,)` integer array of initial-state indices. For helper-based starts,
+pass duration through the helper's `duration=...` argument.
 
 Example mixed initial distribution:
 
@@ -216,6 +217,13 @@ def apply(params, x):
     return jnp.exp(linear)
 
 
+# Example fitted parameter container. Use the equivalent structure for the
+# fitted model being wrapped.
+fitted_params = {
+    "intercept": -7.0,
+    "coef": jnp.array([0.08, 0.02, 0.4]),
+}
+
 mortality = jact.wrappers.bind_intensity(apply, fitted_params, features)
 
 model = state_space.build(
@@ -248,6 +256,16 @@ def exit_apply(params, x):
     return jnp.exp(linear)
 
 
+fitted_exit_params = {
+    "intercept": jnp.array([-4.0, -7.0]),
+    "coef": jnp.array(
+        [
+            [0.04, 0.08],
+            [0.01, 0.02],
+        ]
+    ),
+}
+
 healthy_exits = jact.wrappers.bind_exit_intensity(
     exit_apply,
     fitted_exit_params,
@@ -262,7 +280,8 @@ model = state_space.build(
 ```
 
 The order of a multi-output exit callable follows `state_space.exits(source)`,
-which is ordered by target-state order.
+which is ordered by target-state order. For `groups={fn: [...]}`, output axis 0
+follows the transition-list order supplied for that grouped callable.
 
 ## Debugging Shape Errors
 
@@ -406,5 +425,5 @@ expected_time = result.cashflows["expected_time"]
 - Do not treat `notes/`, `archive/`, benchmark scripts, or development docs as
   public API.
 - Do not answer modeling questions with repository development instructions.
-  Point users to `docs/api_spec.md` for the full public contract when they need
-  details beyond this skill.
+  Point users to the public API spec when they need details beyond this skill:
+  `https://github.com/stojl/jact/blob/main/docs/api_spec.md`.
