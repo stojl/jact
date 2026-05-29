@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 import jax
@@ -660,6 +661,18 @@ class TestSolverContinuityAndStability:
 
 
 class TestSolverEntry:
+    def test_model_solve_signature_reflects_integer_horizon(self):
+        model_signature = inspect.signature(jact.Model.solve)
+        top_level_signature = inspect.signature(jact.solve)
+
+        assert model_signature.parameters["horizon"].annotation == "int"
+        assert model_signature.parameters["steps_per_unit"].annotation == "int"
+        assert model_signature.parameters["record_every"].annotation == "int"
+        assert (
+            model_signature.parameters["horizon"].annotation
+            == top_level_signature.parameters["horizon"].annotation
+        )
+
     def test_invalid_solver_dimensions_are_rejected(self, illness_death_model):
         for horizon in (0, -1, 1.5):
             with pytest.raises(ValueError, match="horizon must be a positive integer"):
