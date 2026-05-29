@@ -34,6 +34,14 @@ When helping a user, first identify:
 5. Select probability reducers and cashflow views that match the user's
    question.
 
+Before choosing an output form, classify the requested quantity by intent:
+
+- Use probability reducers for snapshot state occupancy or duration diagnostics.
+- Use cashflows for expected path integrals, event values, scheduled values, and
+  accumulated terminal values.
+- If the next step would be "sum over time" or "integrate over duration",
+  check whether a cashflow component already expresses that integral.
+
 Core pattern:
 
 ```python
@@ -151,6 +159,10 @@ Choose the smallest reducer that answers the user's question:
   or point-mass inspection.
 - Use `probability=None` for cashflow-only valuation.
 
+Do not emit full duration density just to manually integrate it. If the user's
+quantity is an expected accumulated value, first try to express it as a
+cashflow with a terminal view.
+
 Do not use string probability modes such as `"state"` or `"full"`. Pass reducer
 instances from `jact.probability` or a custom callable.
 
@@ -256,6 +268,18 @@ views:
   individual instead of a time stream.
 - Use `weight=` for discounting, accumulation, or other time-dependent weights.
 
+Cashflows can also act as integrators for non-monetary quantities:
+
+- `StateRate({"state": payment_fn})` integrates occupancy in a state over time.
+- A constant payment of `1.0` gives expected time spent in that state.
+- A payment equal to `d` gives expected accumulated duration while in that
+  state.
+- A payment such as `jnp.where(d > threshold, 1.0, 0.0)` gives expected time in
+  the state with duration above `threshold`.
+- `terminal=True` returns the accumulated integral per individual;
+  `terminal=False` returns streamed interval contributions.
+- Use `probability=None` when only the integral is needed.
+
 ```python
 import jax.numpy as jnp
 import jact
@@ -304,11 +328,51 @@ benefit_stream = result.cashflows["benefits"]
 present_value = result.cashflows["pv"]
 ```
 
+Example: expected future time spent disabled with duration greater than one.
+This uses the cashflow machinery as the integrator instead of emitting full
+duration density and manually summing it.
+
+```python
+def disabled_after_one_year(t, d, *, age):
+    return jnp.broadcast_to(
+        jnp.where(d > 1.0, 1.0, 0.0),
+        (age.shape[0], d.shape[-1]),
+    )
+
+
+cashflows = state_space.cashflows(
+    {
+        "disabled_duration_gt_1": jact.cashflows.StateRate(
+            {"disabled": disabled_after_one_year}
+        ),
+    }
+)
+
+result = model.solve(
+    initial=initial,
+    horizon=10,
+    steps_per_unit=12,
+    probability=None,
+    cashflows=cashflows,
+    cashflow_views={
+        "expected_time": jact.cashflows.Raw(
+            "disabled_duration_gt_1",
+            terminal=True,
+        ),
+    },
+    age=ages,
+)
+
+expected_time = result.cashflows["expected_time"]
+```
+
 ## Avoid
 
 - Do not import domain types such as `StateRate`, `Raw`, or `StateProbability`
   from the top-level `jact` namespace. Use `jact.cashflows`,
   `jact.probability`, and `jact.wrappers`.
+- Do not compute full duration density just to integrate it manually when a
+  cashflow component and terminal view can express the same integral.
 - Do not mutate model topology or transition assignments after construction.
   Create a new `StateSpace` or `Model`.
 - Do not treat `notes/`, `archive/`, benchmark scripts, or development docs as
