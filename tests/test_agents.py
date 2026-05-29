@@ -29,6 +29,11 @@ def test_skill_text_reads_application_guidance():
     assert "Cashflows can also act as integrators" in text
     assert "full duration density" in text
     assert "terminal=True" in text
+    assert "## JIT and Large Batches" in text
+    assert "fixed-size batches" in text
+    assert "same leading batch dimension" in text
+    assert "Pad the final partial batch" in text
+    assert "trim result arrays" in text
     assert "Release checks" not in text
 
 

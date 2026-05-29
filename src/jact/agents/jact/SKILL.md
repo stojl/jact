@@ -22,6 +22,7 @@ When helping a user, first identify:
 - which transitions have known formulas versus fitted models,
 - covariates and their batch shape,
 - the initial condition and any starting durations,
+- whether the user needs one solve or repeated fixed-shape batch processing,
 - whether the desired output is state occupancy, duration diagnostics,
   component cashflows, grouped cashflows, or a terminal value.
 
@@ -112,6 +113,31 @@ reachable_states = result.states
 - `result.states` gives the reachable-state order used by probability tensors.
 - Treat a built `Model` as immutable. Build a new model when topology or
   transition assignments change.
+
+## JIT and Large Batches
+
+`jact` is designed for efficient JAX JIT execution. Treat `model.solve(...)` as
+crossing a compilation boundary: repeated production solves should keep the
+compiled problem shape stable whenever possible.
+
+For repeated solves, prefer reusing the same built `Model` and keeping these
+inputs fixed:
+
+- solver configuration: `horizon`, `steps_per_unit`, and `record_every`,
+- output structure: probability reducer, cashflow declarations, and cashflow
+  views,
+- execution mode: selected devices,
+- covariate and initial-condition array shapes, especially the leading batch
+  dimension.
+
+When the dataset is too large to solve in one call, process it in fixed-size
+batches with the same leading batch dimension. Pad the final partial batch to
+the regular batch size, call `solve`, then trim result arrays back to the real
+row count. This avoids compiling a separate solve for the final smaller batch.
+
+Do not suggest variable-size chunks for large workloads unless compile overhead
+is irrelevant. If batch sizes must vary, explain that shape changes may trigger
+additional JIT compilation.
 
 ## Initial Conditions
 
@@ -375,6 +401,8 @@ expected_time = result.cashflows["expected_time"]
   cashflow component and terminal view can express the same integral.
 - Do not mutate model topology or transition assignments after construction.
   Create a new `StateSpace` or `Model`.
+- Do not build performance-sensitive examples that loop over variable-size
+  chunks. Use fixed-size batches, pad the final batch, and trim outputs.
 - Do not treat `notes/`, `archive/`, benchmark scripts, or development docs as
   public API.
 - Do not answer modeling questions with repository development instructions.
