@@ -60,6 +60,16 @@ class _RowHazards(NamedTuple):
     point_total: jnp.ndarray
 
 
+class _SameStepTransfers(NamedTuple):
+    """Mass transferred inside one step and settled for reuse."""
+
+    raw_inflow: jnp.ndarray
+    survived_inflow: jnp.ndarray
+    chained_by_source: tuple[tuple[jnp.ndarray, ...], ...]
+    next_inflow_zero: jnp.ndarray
+    next_inflow_one: jnp.ndarray
+
+
 def _stack_state_densities(state: tuple[StateCarry, ...]) -> jnp.ndarray:
     return jnp.stack(tuple(carry.density for carry in state), axis=0)
 
@@ -181,7 +191,8 @@ def _transfer_factor(total_hazard: jnp.ndarray) -> jnp.ndarray:
 def _advance_density(
     density: jnp.ndarray,
     total_hazard: jnp.ndarray,
-    inflow: jnp.ndarray,
+    inflow_zero: jnp.ndarray,
+    inflow_one: jnp.ndarray,
 ) -> jnp.ndarray:
     def survive(values: jnp.ndarray, hazard: jnp.ndarray) -> jnp.ndarray:
         survived = values + values * jnp.expm1(-hazard)
@@ -189,7 +200,7 @@ def _advance_density(
 
     if density.shape[-1] == 1:
         survived = survive(density[..., 0], total_hazard[..., 0])
-        return density.at[..., 0].set(survived + inflow)
+        return density.at[..., 0].set(survived + inflow_zero + inflow_one)
 
     next_density = jnp.zeros_like(density)
     next_density = next_density.at[..., 1:-1].set(
@@ -199,8 +210,24 @@ def _advance_density(
         survive(density[..., -1], total_hazard[..., -1])
         + survive(density[..., -2], total_hazard[..., -2])
     )
-    next_density = next_density.at[..., 0].set(inflow)
+    next_density = next_density.at[..., 0].set(inflow_zero)
+    next_density = next_density.at[..., 1].add(inflow_one)
     return next_density
+
+
+def _split_midpoint_inflow(
+    inflow: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    half = 0.5 * inflow
+    return half, inflow - half
+
+
+def _incoming_state_indices(row_hazards: tuple[_RowHazards, ...]) -> frozenset[int]:
+    return frozenset(
+        target_index
+        for hz in row_hazards
+        for target_index, _hazard in hz.density_hazards
+    )
 
 
 def _zero_leaves(count: int, template: jnp.ndarray) -> tuple[jnp.ndarray, ...]:
@@ -294,6 +321,7 @@ def _solver_step_dynamics(
     jnp.ndarray,
     tuple[bool, ...],
     tuple[_RowHazards, ...],
+    _SameStepTransfers,
 ]:
     densities = _stack_state_densities(state)
     point_values, point_d_0, point_log_values, point_mask = _stack_point_masses(state)
@@ -342,13 +370,90 @@ def _solver_step_dynamics(
             )
         )
 
+    row_hazards = tuple(row_hazards)
+    transfers = _compute_same_step_transfers(
+        densities,
+        point_values,
+        point_mask,
+        row_hazards,
+    )
+
     return (
         densities,
         point_values,
         point_d_0,
         point_log_values,
         point_mask,
-        tuple(row_hazards),
+        row_hazards,
+        transfers,
+    )
+
+
+def _compute_same_step_transfers(
+    densities: jnp.ndarray,
+    point_values: jnp.ndarray,
+    point_mask: tuple[bool, ...],
+    row_hazards: tuple[_RowHazards, ...],
+) -> _SameStepTransfers:
+    raw_inflow = jnp.zeros(densities.shape[:-1], dtype=densities.dtype)
+
+    for i, hz in enumerate(row_hazards):
+        for j, density_hazard in hz.density_hazards:
+            transferred = density_hazard * hz.density_transfer_factor
+            raw_inflow = raw_inflow.at[j].add(
+                jnp.sum(densities[i] * transferred, axis=-1)
+            )
+
+        if point_mask[i]:
+            for j, point_hazard in hz.point_hazards:
+                raw_inflow = raw_inflow.at[j].add(
+                    point_values[i] * point_hazard * hz.point_transfer_factor
+                )
+
+    survived_inflow = jnp.zeros_like(raw_inflow)
+    next_inflow_zero = jnp.zeros_like(raw_inflow)
+    next_inflow_one = jnp.zeros_like(raw_inflow)
+    chained_by_source = []
+    incoming_state_indices = _incoming_state_indices(row_hazards)
+    for i, hz in enumerate(row_hazards):
+        chained_from_source = []
+        inflow = raw_inflow[i]
+        if i in incoming_state_indices:
+            if hz.density_hazards:
+                half_total = 0.5 * hz.density_total[..., 0]
+                half_survival = jnp.exp(-half_total)
+                half_transfer_factor = _transfer_factor(half_total)
+                survived = inflow * half_survival
+                survived_inflow = survived_inflow.at[i].add(survived)
+                zero, one = _split_midpoint_inflow(survived)
+                next_inflow_zero = next_inflow_zero.at[i].add(zero)
+                next_inflow_one = next_inflow_one.at[i].add(one)
+
+                for j, density_hazard in hz.density_hazards:
+                    chained = (
+                        inflow
+                        * (0.5 * density_hazard[..., 0])
+                        * half_transfer_factor
+                    )
+                    next_inflow_zero = next_inflow_zero.at[j].add(chained)
+                    chained_from_source.append(chained)
+            else:
+                survived_inflow = survived_inflow.at[i].add(inflow)
+                zero, one = _split_midpoint_inflow(inflow)
+                next_inflow_zero = next_inflow_zero.at[i].add(zero)
+                next_inflow_one = next_inflow_one.at[i].add(one)
+        else:
+            for _target_index, _density_hazard in hz.density_hazards:
+                chained_from_source.append(jnp.zeros_like(inflow))
+
+        chained_by_source.append(tuple(chained_from_source))
+
+    return _SameStepTransfers(
+        raw_inflow=raw_inflow,
+        survived_inflow=survived_inflow,
+        chained_by_source=tuple(chained_by_source),
+        next_inflow_zero=next_inflow_zero,
+        next_inflow_one=next_inflow_one,
     )
 
 
@@ -359,33 +464,28 @@ def _advance_solver_step_from_dynamics(
     point_log_values: jnp.ndarray,
     point_mask: tuple[bool, ...],
     row_hazards: tuple[_RowHazards, ...],
+    same_step_transfers: _SameStepTransfers,
 ) -> tuple[StateCarry, ...]:
-    next_inflow = jnp.zeros(densities.shape[:-1], dtype=densities.dtype)
     next_point_values = point_values
     next_point_log_values = point_log_values
 
     for i, hz in enumerate(row_hazards):
-        for j, density_hazard in hz.density_hazards:
-            transferred = density_hazard * hz.density_transfer_factor
-            next_inflow = next_inflow.at[j].add(
-                jnp.sum(densities[i] * transferred, axis=-1)
-            )
-
         if point_mask[i]:
             next_log_value = point_log_values[i] - hz.point_total
             next_point_log_values = next_point_log_values.at[i].set(next_log_value)
             next_point_values = next_point_values.at[i].set(
                 jnp.exp(next_log_value)
             )
-            for j, point_hazard in hz.point_hazards:
-                next_inflow = next_inflow.at[j].add(
-                    point_values[i] * point_hazard * hz.point_transfer_factor
-                )
 
     next_densities = []
     for i, hz in enumerate(row_hazards):
         next_densities.append(
-            _advance_density(densities[i], hz.density_total, next_inflow[i])
+            _advance_density(
+                densities[i],
+                hz.density_total,
+                same_step_transfers.next_inflow_zero[i],
+                same_step_transfers.next_inflow_one[i],
+            )
         )
 
     return _dense_state_to_tuple(
@@ -404,6 +504,7 @@ def _compute_cashflow_step(
     point_log_values: jnp.ndarray,
     point_mask: tuple[bool, ...],
     row_hazards: tuple[_RowHazards, ...],
+    same_step_transfers: _SameStepTransfers,
     t: jnp.ndarray,
     duration_mid: jnp.ndarray,
     duration_left: jnp.ndarray,
@@ -428,6 +529,7 @@ def _compute_cashflow_step(
     event_by_kind = _zero_leaves(4, template)
     t_mid = t + 0.5 * step_size
     n_steps = duration_mid.shape[-1]
+    incoming_state_indices = _incoming_state_indices(row_hazards)
 
     for component_index, component in enumerate(cashflow_components):
         kind = component[0]
@@ -460,6 +562,17 @@ def _compute_cashflow_step(
                     )
                     contribution = contribution + (
                         step_size * point_midpoint * point_payment
+                    )
+                if state_index in incoming_state_indices:
+                    same_step_inflow = same_step_transfers.survived_inflow[state_index]
+                    same_step_payment = _evaluate_intensity_at_point(
+                        payment_fn,
+                        t_mid,
+                        jnp.full_like(template, 0.5 * step_size),
+                        intensity_kwargs,
+                    )
+                    contribution = contribution + (
+                        0.5 * step_size * same_step_inflow * same_step_payment
                     )
                 component_total, by_state, by_kind = _add_cashflow_contribution(
                     component_total,
@@ -501,6 +614,17 @@ def _compute_cashflow_step(
                         * hz.point_transfer_factor
                         * point_payment
                     )
+                if source_index in incoming_state_indices:
+                    chained_exit = same_step_transfers.chained_by_source[source_index][
+                        hazard_slot
+                    ]
+                    chained_payment = _evaluate_intensity_at_point(
+                        payment_fn,
+                        t_mid,
+                        jnp.zeros_like(template),
+                        intensity_kwargs,
+                    )
+                    contribution = contribution + chained_exit * chained_payment
                 component_total, by_state, by_kind = _add_cashflow_contribution(
                     component_total,
                     by_state,

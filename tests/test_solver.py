@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 from typing import Any
 
 import jax
@@ -110,6 +111,29 @@ def _symmetric_two_state_cycle_closed_form(
 ) -> jnp.ndarray:
     oscillation = 0.5 * jnp.exp(-2.0 * rate * times)
     return jnp.stack([0.5 + oscillation, 0.5 - oscillation], axis=-1)
+
+
+def _duration_dependent_transfer_closed_form(
+    horizon: float,
+    source_rate: float,
+    target_base: float,
+    target_duration_coef: float,
+) -> jnp.ndarray:
+    healthy = math.exp(-source_rate * horizon)
+    a = source_rate - target_base
+    c = target_duration_coef
+    scale = math.sqrt(c / 2.0)
+    integral = (
+        math.exp(a * a / (2.0 * c))
+        * math.sqrt(math.pi / (2.0 * c))
+        * (
+            math.erf(scale * (horizon - a / c))
+            - math.erf(scale * (0.0 - a / c))
+        )
+    )
+    disabled = source_rate * math.exp(-source_rate * horizon) * integral
+    dead = 1.0 - healthy - disabled
+    return jnp.asarray([healthy, disabled, dead], dtype=jnp.float32)
 
 
 def _scalar_output_intensity(t, d, **kwargs):
@@ -525,6 +549,57 @@ class TestSolverContinuityAndStability:
         assert probability.shape == expected.shape
         assert jnp.allclose(probability, expected, atol=9e-3, rtol=0.0)
 
+    def test_duration_dependent_target_state_converges_at_second_order(self):
+        source_rate = 0.7
+        target_base = 0.2
+        target_duration_coef = 0.5
+        horizon = 2
+        expected = _duration_dependent_transfer_closed_form(
+            horizon,
+            source_rate,
+            target_base,
+            target_duration_coef,
+        )
+
+        def source_to_target(t, d, **kwargs):
+            del t
+            return jnp.full(
+                (kwargs["age"].shape[0], d.shape[-1]),
+                source_rate,
+                dtype=d.dtype,
+            )
+
+        def target_to_dead(t, d, **kwargs):
+            del t
+            return jnp.broadcast_to(
+                target_base + target_duration_coef * d,
+                (kwargs["age"].shape[0], d.shape[-1]),
+            )
+
+        model = jact.StateSpace(
+            states=["healthy", "disabled", "dead"],
+            transitions=[("healthy", "disabled"), ("disabled", "dead")],
+        ).build(
+            transitions={
+                ("healthy", "disabled"): source_to_target,
+                ("disabled", "dead"): target_to_dead,
+            }
+        )
+
+        errors = []
+        for steps_per_unit in (16, 32, 64):
+            probability = model.solve(
+                initial="healthy",
+                horizon=horizon,
+                steps_per_unit=steps_per_unit,
+                probability=StateProbability(),
+                age=jnp.arange(1, dtype=jnp.float32),
+            ).probability
+            errors.append(float(jnp.max(jnp.abs(probability[-1, 0] - expected))))
+
+        assert errors[0] / errors[1] > 3.5
+        assert errors[1] / errors[2] > 3.5
+
     def test_grid_aligned_discontinuity_uses_stable_midpoint_path(self):
         state_space = jact.StateSpace(
             states=["healthy", "dead"],
@@ -624,6 +699,39 @@ class TestSolverContinuityAndStability:
             rtol=0.0,
         )
         assert jnp.all(probability[-1, :, 1] > 0.999)
+
+    def test_same_step_inflow_uses_exponential_survival_for_large_target_exit(self):
+        onset = 2.0
+        exit_rate = 20.0
+        horizon = 1
+        steps_per_unit = 1
+        state_space = jact.StateSpace(
+            states=["healthy", "disabled", "dead"],
+            transitions=[("healthy", "disabled"), ("disabled", "dead")],
+        )
+        model = state_space.build(
+            transitions={
+                ("healthy", "disabled"): _constant_intensity(onset),
+                ("disabled", "dead"): _constant_intensity(exit_rate),
+            }
+        )
+
+        probability = model.solve(
+            initial="healthy",
+            horizon=horizon,
+            steps_per_unit=steps_per_unit,
+            probability=StateProbability(),
+            age=jnp.arange(1, dtype=jnp.float32),
+        ).probability
+        assert probability is not None
+
+        raw_inflow = 1.0 - jnp.exp(-onset)
+        half_exit = 0.5 * exit_rate
+        expected_disabled = raw_inflow * jnp.exp(-half_exit)
+        expected_dead = raw_inflow * (-jnp.expm1(-half_exit))
+
+        assert jnp.allclose(probability[-1, 0, 1], expected_disabled, rtol=1e-5)
+        assert jnp.allclose(probability[-1, 0, 2], expected_dead, rtol=1e-5)
 
     def test_solve_matches_closed_form_from_disabled_on_reduced_subgraph(
         self, illness_death_model
