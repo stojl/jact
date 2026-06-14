@@ -11,12 +11,38 @@ The important distinction is:
 - `ScheduledEvent` and `DurationEvent` remain grid/snapshot events and do
   not use interval quadrature corrections.
 
+## Stored duration representation
+
+The solver variable named `density` is not used as a pointwise density value
+that must later be multiplied by a duration step. It stores duration-grid
+probability mass increments. The duration quadrature weight has already been
+folded into each stored value.
+
+Each slot is attached to a representative boundary duration:
+
+```text
+d_k = k * dt
+```
+
+Existing mass in slot `k` ages along the characteristic during the step, so
+hazards and payments for that mass are sampled at:
+
+```text
+d_k + dt / 2
+```
+
+This is also not a pure finite-volume cell average over
+`[k * dt, (k + 1) * dt)`. It is a duration-indexed mass increment with a
+representative grid duration. Sums over `k` therefore marginalize stored
+probability masses directly; they do not receive another duration-grid `dt`
+factor.
+
 ## Per-step inputs
 
 For one step `[t, t + dt]`, `_solver_step_dynamics` evaluates transition
 intensities once, at the existing midpoint samples:
 
-- density hazards at `(t + dt / 2, duration_mid)`,
+- mass-increment hazards at `(t + dt / 2, duration_mid)`,
 - point-mass hazards at `(t + dt / 2, d_0 + t + dt / 2)`.
 
 Those evaluations produce integrated hazards:
@@ -60,41 +86,44 @@ the interval cashflow correction.
 
 New inflow enters the target state during the step, not at the next grid
 boundary. To avoid first-order lag, the solver settles that inflow over the
-latter half-step using the target row's duration-zero integrated hazards.
+latter half-step using the target row's integrated hazards at representative
+duration zero.
 
 For a target/intermediate state `j` that can itself exit during the step:
 
 ```text
 half_total_j    = 0.5 * H_j[0]
-half_survival_j = 1 / (1 + half_total_j)
+half_survival_j = exp(-half_total_j)
 S_j             = I_j * half_survival_j
 ```
 
 `S_j` is the same-step inflow that survives in state `j` to the end of the
-step under the mass-conserving settlement approximation.
+step under the half-step settlement approximation.
 
 For each downstream transition `j -> l`, the same-step chained exit mass is:
 
 ```text
-C_jl = I_j * 0.5 * H_jl[0] * half_survival_j
+C_jl = I_j * 0.5 * H_jl[0] * (1 - exp(-half_total_j)) / half_total_j
 ```
 
-If `j` has no outgoing density hazards, `S_j = I_j` and there is no chained
-exit.
+The transfer-factor ratio uses the usual value `1` when `half_total_j == 0`.
+
+If `j` has no outgoing mass-increment hazards, `S_j = I_j` and there is no
+chained exit.
 
 This scheme intentionally reuses `H_j[0]` and `H_jl[0]`. It does not perform
 extra quarter-step or endpoint intensity evaluations.
 
-## Density advancement
+## Duration-grid mass advancement
 
-The existing density shift still handles pre-step mass survival:
+The existing duration-grid shift still handles pre-step mass survival:
 
 ```text
 p_i_next[k + 1] += p_i[k] * exp(-H_i[k])
 ```
 
-Same-step surviving target inflow is split between duration bins zero and
-one:
+Same-step surviving target inflow is split between representative duration
+slots zero and one:
 
 ```text
 p_j_next[0] += 0.5 * S_j
@@ -102,8 +131,15 @@ p_j_next[1] += 0.5 * S_j
 ```
 
 This midpoint split places the newly entered surviving mass at an average
-duration of roughly `dt / 2` at the next grid boundary. If there is only one
-duration bin, both halves remain in bin zero.
+representative duration of roughly `dt / 2` at the next grid boundary:
+
+```text
+0.5 * 0 + 0.5 * dt = dt / 2
+```
+
+The split preserves total mass and the first duration moment on the
+representative-duration grid. If there is only one duration slot, both halves
+remain in slot zero.
 
 Chained exit mass `C_jl` enters the downstream target `l` at duration zero:
 
@@ -119,6 +155,10 @@ step is unchanged:
 ```text
 dt * sum_k p_i[k] * exp(-0.5 * H_i[k]) * payment_i(t + dt / 2, d_mid[k])
 ```
+
+The `dt` here is the clock-time quadrature weight for the state-rate
+cashflow. There is no additional duration-grid `dt`, because `p_i[k]` is
+already a probability mass increment.
 
 The same-step target-state correction adds a latter-half-step payment for
 surviving inflow:
@@ -145,6 +185,10 @@ the step is unchanged:
 ```text
 sum_k p_i[k] * H_ij[k] * F_i[k] * payment_ij(t + dt / 2, d_mid[k])
 ```
+
+The integrated hazard `H_ij[k]` already contains the clock-time `dt`, and
+`p_i[k]` already contains the duration-grid increment. There is no separate
+duration integration factor in this sum.
 
 The same-step chained-exit correction adds:
 
@@ -176,9 +220,9 @@ payment(t, duration_left)
 and uses the pre-step state snapshot. Newly transferred same-step mass does
 not participate in an event at the beginning of that same step.
 
-`DurationEvent` remains grid/snapshot based. It reads the density at the
-snapped duration index and uses the effective snapped duration. It does not
-receive a same-step interval correction.
+`DurationEvent` remains grid/snapshot based. It reads the stored
+duration-grid mass at the snapped duration index and uses the effective
+snapped duration. It does not receive a same-step interval correction.
 
 Event contributions continue to flow through the separate event
 accumulators so view weights apply at event time rather than midpoint time.
