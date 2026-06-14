@@ -700,6 +700,39 @@ class TestSolverContinuityAndStability:
         )
         assert jnp.all(probability[-1, :, 1] > 0.999)
 
+    def test_same_step_inflow_uses_exponential_survival_for_large_target_exit(self):
+        onset = 2.0
+        exit_rate = 20.0
+        horizon = 1
+        steps_per_unit = 1
+        state_space = jact.StateSpace(
+            states=["healthy", "disabled", "dead"],
+            transitions=[("healthy", "disabled"), ("disabled", "dead")],
+        )
+        model = state_space.build(
+            transitions={
+                ("healthy", "disabled"): _constant_intensity(onset),
+                ("disabled", "dead"): _constant_intensity(exit_rate),
+            }
+        )
+
+        probability = model.solve(
+            initial="healthy",
+            horizon=horizon,
+            steps_per_unit=steps_per_unit,
+            probability=StateProbability(),
+            age=jnp.arange(1, dtype=jnp.float32),
+        ).probability
+        assert probability is not None
+
+        raw_inflow = 1.0 - jnp.exp(-onset)
+        half_exit = 0.5 * exit_rate
+        expected_disabled = raw_inflow * jnp.exp(-half_exit)
+        expected_dead = raw_inflow * (-jnp.expm1(-half_exit))
+
+        assert jnp.allclose(probability[-1, 0, 1], expected_disabled, rtol=1e-5)
+        assert jnp.allclose(probability[-1, 0, 2], expected_dead, rtol=1e-5)
+
     def test_solve_matches_closed_form_from_disabled_on_reduced_subgraph(
         self, illness_death_model
     ):

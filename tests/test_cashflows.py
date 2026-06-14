@@ -665,6 +665,50 @@ def test_chained_transition_lump_from_same_step_inflow_converges_at_second_order
     _assert_second_order(*errors)
 
 
+def test_large_target_exit_same_step_cashflows_use_exponential_settlement():
+    onset = 2.0
+    exit_rate = 20.0
+    horizon = 1
+    payment = 3.0
+    benefit = 5.0
+    ss = jact.StateSpace(
+        ["healthy", "disabled", "dead"],
+        [("healthy", "disabled"), ("disabled", "dead")],
+    )
+    model = ss.build(transitions={
+        ("healthy", "disabled"): _constant_intensity(onset),
+        ("disabled", "dead"): _constant_intensity(exit_rate),
+    })
+    cashflows = ss.cashflows({
+        "annuity": jact.cashflows.StateRate({
+            "disabled": _constant_payment(payment)
+        }),
+        "death": jact.cashflows.TransitionLump({
+            ("disabled", "dead"): _constant_payment(benefit)
+        }),
+    })
+
+    result = model.solve(
+        initial="healthy",
+        horizon=horizon,
+        steps_per_unit=1,
+        probability=None,
+        cashflows=cashflows,
+        cashflow_views={
+            "annuity": jact.cashflows.Raw("annuity", terminal=True),
+            "death": jact.cashflows.Raw("death", terminal=True),
+        },
+    ).cashflows
+
+    raw_inflow = 1.0 - jnp.exp(-onset)
+    half_exit = 0.5 * exit_rate
+    expected_annuity = 0.5 * raw_inflow * jnp.exp(-half_exit) * payment
+    expected_death = raw_inflow * (-jnp.expm1(-half_exit)) * benefit
+
+    assert jnp.allclose(result["annuity"][0], expected_annuity, rtol=1e-5)
+    assert jnp.allclose(result["death"][0], expected_death, rtol=1e-5)
+
+
 def test_same_step_interval_cashflow_views_preserve_aggregation_identities():
     onset = 0.35
     exit_rate = 0.55

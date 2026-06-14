@@ -421,7 +421,8 @@ def _compute_same_step_transfers(
         if i in incoming_state_indices:
             if hz.density_hazards:
                 half_total = 0.5 * hz.density_total[..., 0]
-                half_survival = 1.0 / (1.0 + half_total)
+                half_survival = jnp.exp(-half_total)
+                half_transfer_factor = _transfer_factor(half_total)
                 survived = inflow * half_survival
                 survived_inflow = survived_inflow.at[i].add(survived)
                 zero, one = _split_midpoint_inflow(survived)
@@ -429,7 +430,11 @@ def _compute_same_step_transfers(
                 next_inflow_one = next_inflow_one.at[i].add(one)
 
                 for j, density_hazard in hz.density_hazards:
-                    chained = inflow * (0.5 * density_hazard[..., 0]) * half_survival
+                    chained = (
+                        inflow
+                        * (0.5 * density_hazard[..., 0])
+                        * half_transfer_factor
+                    )
                     next_inflow_zero = next_inflow_zero.at[j].add(chained)
                     chained_from_source.append(chained)
             else:
