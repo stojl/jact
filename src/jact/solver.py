@@ -1089,8 +1089,12 @@ def _add_selected_view_values(
     )
 
 
-_PMAP_IN_AXES = (0, None, None, None, None, 0, None, None, None, None, None)
+_PMAP_IN_AXES: Any = (0, None, None, None, None, 0, None, None, None, None, None)
 _PMAP_STATIC_ARGNUMS = (3, 4, 7, 8, 9, 10)
+_jax_checkpoint: Callable[[Callable[..., Any]], Callable[..., Any]] = getattr(
+    jax,
+    "checkpoint",
+)
 
 
 @partial(
@@ -1283,7 +1287,7 @@ def _midpoint_solver(
 
     # Rematerialize one recorded block at a time during reverse-mode so the
     # transpose does not need to retain every inner solver step.
-    block_scan = jax.checkpoint(block_scan)
+    block_scan = _jax_checkpoint(block_scan)
     initial_probability = prob_callback(state_0)
     block_starts = jnp.arange(n_records, dtype=duration_mid.dtype) * (
         record_every * step_size
