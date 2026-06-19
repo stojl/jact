@@ -49,6 +49,31 @@ def test_bind_intensity_returns_batch_by_duration_output():
     assert jnp.allclose(out, expected)
 
 
+@pytest.mark.parametrize(
+    ("raw_output", "expected_shape"),
+    [
+        (jnp.array(0.2), ()),
+        (jnp.array([0.2, 0.3]), (2,)),
+        (jnp.array([[0.2, 0.3]]), (1, 2)),
+        (jnp.array([[0.2], [0.3]]), (2, 1)),
+    ],
+)
+def test_bind_intensity_accepts_broadcastable_raw_outputs(
+    raw_output,
+    expected_shape,
+):
+    def apply_broadcastable(params, features):
+        del params, features
+        return raw_output
+
+    intensity = jact.wrappers.bind_intensity(apply_broadcastable, {}, _feature_fn)
+
+    out = intensity(0.0, jnp.array([[1.0, 2.0]]), age=jnp.array([10.0, 20.0]))
+
+    assert out.shape == expected_shape
+    assert jnp.all(out >= 0.0)
+
+
 def test_bind_grouped_intensity_normalizes_batch_duration_output_axis_last():
     intensity = jact.wrappers.bind_grouped_intensity(
         _apply_grouped_last,
@@ -93,6 +118,25 @@ def test_bind_exit_intensity_rejects_mismatched_output_count():
         intensity(0.0, jnp.array([[1.0]]), age=jnp.array([10.0]))
 
 
+def test_bind_grouped_intensity_accepts_broadcastable_selected_outputs():
+    def apply_grouped_scalars(params, features):
+        del features
+        return jnp.array(params["rates"])
+
+    intensity = jact.wrappers.bind_grouped_intensity(
+        apply_grouped_scalars,
+        {"rates": [0.1, 0.2, 0.3]},
+        _feature_fn,
+        output_count=3,
+        output_axis=0,
+    )
+
+    out = intensity(0.0, jnp.array([[1.0, 2.0]]), age=jnp.array([10.0, 20.0]))
+
+    assert out.shape == (3,)
+    assert jnp.allclose(out, jnp.array([0.1, 0.2, 0.3]))
+
+
 @pytest.mark.parametrize(
     ("apply_fn", "feature_fn", "match"),
     [
@@ -106,13 +150,13 @@ def test_wrappers_reject_non_callable_functions(apply_fn, feature_fn, match):
 
 
 def test_bind_intensity_rejects_invalid_output_rank():
-    def apply_rank_one(params, features):
+    def apply_wrong_width(params, features):
         del params
-        return features[:, 0]
+        return jnp.ones((features.shape[0], features.shape[1] + 1))
 
-    intensity = jact.wrappers.bind_intensity(apply_rank_one, {}, _feature_fn)
+    intensity = jact.wrappers.bind_intensity(apply_wrong_width, {}, _feature_fn)
 
-    with pytest.raises(ValueError, match=r"\(batch, D\)"):
+    with pytest.raises(ValueError, match="broadcast"):
         intensity(0.0, jnp.array([[1.0, 2.0]]), age=jnp.array([10.0]))
 
 

@@ -27,6 +27,7 @@ from jact.solver import (
     _SOURCE_COMPONENT,
     _midpoint_solver,
     _shard_batch_tree,
+    _split_scalar_and_batch_kwargs,
     _unshard_batch_tree,
 )
 
@@ -149,6 +150,26 @@ def _rank_one_output_intensity(t, d, **kwargs):
 def _wrong_width_output_intensity(t, d, **kwargs):
     batch = kwargs["age"].shape[0]
     return jnp.full((batch, d.shape[-1] + 1), 0.1)
+
+
+def _duration_axis_output_intensity(t, d, **kwargs):
+    del t, kwargs
+    return jnp.full((d.shape[-1],), 0.1)
+
+
+def _one_by_duration_output_intensity(t, d, **kwargs):
+    del t, kwargs
+    return jnp.full((1, d.shape[-1]), 0.1)
+
+
+def _batch_by_one_output_intensity(t, d, **kwargs):
+    del t
+    return jnp.full((kwargs["age"].shape[0], 1), 0.1)
+
+
+def _batch_by_duration_output_intensity(t, d, **kwargs):
+    del t
+    return jnp.full((kwargs["age"].shape[0], d.shape[-1]), 0.1)
 
 
 def _rate_parameter_intensity(t, d, **kwargs):
@@ -930,17 +951,18 @@ class TestSolverEntry:
             )
 
     @pytest.mark.parametrize(
-        ("intensity_fn", "steps_per_unit"),
+        "intensity_fn",
         [
-            (_scalar_output_intensity, 4),
-            (_rank_one_output_intensity, 4),
-            (_wrong_width_output_intensity, 4),
+            _scalar_output_intensity,
+            _duration_axis_output_intensity,
+            _one_by_duration_output_intensity,
+            _batch_by_one_output_intensity,
+            _batch_by_duration_output_intensity,
         ],
     )
-    def test_reference_callable_output_shape_is_validated(
+    def test_transition_intensity_outputs_broadcast_to_solver_grid(
         self,
         intensity_fn,
-        steps_per_unit,
     ):
         state_space = jact.StateSpace(
             states=["healthy", "dead"],
@@ -950,16 +972,108 @@ class TestSolverEntry:
             transitions={("healthy", "dead"): intensity_fn}
         )
 
-        with pytest.raises(
-            ValueError,
-            match=r"Reference intensity output must have shape \(batch, 4\)\.",
-        ):
+        probability = model.solve(
+            initial="healthy",
+            horizon=1,
+            steps_per_unit=4,
+            age=jnp.arange(2, dtype=jnp.float32),
+        ).probability
+
+        assert probability.shape == (5, 2, 2)
+        expected_survival = jnp.exp(-0.1 * jnp.linspace(0.0, 1.0, 5))
+        assert jnp.allclose(probability[:, 0, 0], expected_survival, atol=2e-3)
+
+    def test_transition_intensity_rejects_incompatible_broadcast_shape(self):
+        state_space = jact.StateSpace(
+            states=["healthy", "dead"],
+            transitions=[("healthy", "dead")],
+        )
+        model = state_space.build(
+            transitions={("healthy", "dead"): _wrong_width_output_intensity}
+        )
+
+        with pytest.raises(ValueError, match=r"broadcast.*\(2, 4\)"):
             model.solve(
                 initial="healthy",
                 horizon=1,
-                steps_per_unit=steps_per_unit,
+                steps_per_unit=4,
                 age=jnp.arange(2, dtype=jnp.float32),
             )
+
+    @pytest.mark.parametrize(
+        "intensity_fn",
+        [
+            _scalar_output_intensity,
+            lambda t, d, **kwargs: (
+                jnp.full((kwargs["age"].shape[0],), 0.1)
+                if d.shape[-1] == 1
+                else jnp.full((kwargs["age"].shape[0], d.shape[-1]), 0.1)
+            ),
+            lambda t, d, **kwargs: jnp.full((kwargs["age"].shape[0], 1), 0.1),
+        ],
+    )
+    def test_point_mass_intensity_outputs_broadcast_to_batch(
+        self,
+        intensity_fn,
+    ):
+        state_space = jact.StateSpace(
+            states=["healthy", "dead"],
+            transitions=[("healthy", "dead")],
+        )
+        model = state_space.build(
+            transitions={("healthy", "dead"): intensity_fn}
+        )
+
+        point_mass = model.solve(
+            initial="healthy",
+            initial_duration=1.0,
+            horizon=1,
+            steps_per_unit=4,
+            probability=PointMass(),
+            age=jnp.arange(2, dtype=jnp.float32),
+        ).probability["healthy"]
+
+        assert point_mass.shape == (5, 2)
+        assert jnp.allclose(point_mass[-1], jnp.exp(jnp.array([-0.1, -0.1])))
+
+    def test_scalar_only_solve_defaults_to_one_individual(self):
+        state_space = jact.StateSpace(
+            states=["healthy", "dead"],
+            transitions=[("healthy", "dead")],
+        )
+
+        def scalar_rate(t, d, **kwargs):
+            del t, d
+            return kwargs["rate"]
+
+        model = state_space.build(transitions={("healthy", "dead"): scalar_rate})
+
+        probability = model.solve(
+            initial="healthy",
+            horizon=1,
+            steps_per_unit=4,
+            rate=jnp.array(0.1, dtype=jnp.float32),
+        ).probability
+
+        assert probability.shape == (5, 1, 2)
+
+    def test_batch_size_can_come_only_from_initial_duration(self):
+        state_space = jact.StateSpace(
+            states=["healthy", "dead"],
+            transitions=[("healthy", "dead")],
+        )
+        model = state_space.build(
+            transitions={("healthy", "dead"): _scalar_output_intensity}
+        )
+
+        probability = model.solve(
+            initial="healthy",
+            initial_duration=jnp.array([0.0, 1.0, 2.0], dtype=jnp.float32),
+            horizon=1,
+            steps_per_unit=4,
+        ).probability
+
+        assert probability.shape == (5, 3, 2)
 
     def test_invalid_state_name_is_rejected(self, illness_death_model):
         with pytest.raises(ValueError, match="not a declared state"):
@@ -1324,6 +1438,23 @@ class TestMultiDeviceSupport:
         assert original_size == 3
         assert sharded["density"].shape == (2, 2, 5)
         assert sharded["cashflows"]["pv"].shape == (2, 2)
+
+    def test_scalar_kwargs_are_split_from_batch_kwargs_before_sharding(self):
+        kwargs = {
+            "age": jnp.arange(3, dtype=jnp.float32),
+            "rate": jnp.array(0.2, dtype=jnp.float32),
+            "features": jnp.ones((3, 2), dtype=jnp.float32),
+        }
+
+        scalar_kwargs, batch_kwargs = _split_scalar_and_batch_kwargs(kwargs)
+        sharded, original_size = _shard_batch_tree(batch_kwargs, 2)
+
+        assert set(scalar_kwargs) == {"rate"}
+        assert set(batch_kwargs) == {"age", "features"}
+        assert original_size == 3
+        assert scalar_kwargs["rate"].shape == ()
+        assert sharded["age"].shape == (2, 2)
+        assert sharded["features"].shape == (2, 2, 2)
 
     def test_unshard_helper_restores_solver_output_batch_axis(self):
         sharded = {

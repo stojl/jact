@@ -100,14 +100,20 @@ reachable_states = result.states
 ## Application Contracts
 
 - Single-transition intensity callables use `fn(t, d, **kwargs)` and return
-  non-negative arrays shaped `(batch, D)`.
-- Grouped intensity callables and exit callables return non-negative arrays
-  shaped `(K, batch, D)`, where `K` is the number of covered transitions.
+  non-negative arrays broadcastable to `(batch, D)`. Useful shapes include
+  scalar `()`, `(D,)`, `(1, D)`, `(batch, 1)`, and `(batch, D)`.
+- Grouped intensity callables and exit callables keep a leading output axis
+  shaped `(K, ...)`, where `K` is the number of covered transitions. Each
+  selected output must be broadcastable to `(batch, D)`.
 - `t` is scalar-like for the current solver time. `d` is the duration grid with
   the duration axis last; use `d.shape[-1]` for `D`.
 - User covariates are passed as keyword arguments to `solve`, then forwarded to
-  intensity and cashflow callables. Batched covariates should use leading shape
-  `(batch, ...)`.
+  intensity and cashflow callables. Batched covariates use leading shape
+  `(batch, ...)`; scalar covariates with shape `()` are replicated constants and
+  do not define batch size.
+- Batch size is inferred from initial masses/durations, per-individual initial
+  states, `initial_duration`, and non-scalar covariates. Callable outputs never
+  determine batch size; scalar-only inputs solve one individual.
 - Recorded probability outputs and streamed cashflow outputs use time as the
   leading axis. Probability snapshots include `t=0`; streamed cashflows do not.
 - `result.states` gives the reachable-state order used by probability tensors.
@@ -197,8 +203,8 @@ instances from `jact.probability` or a custom callable.
 
 When feature construction and model application are separate, wrap fitted models
 with `jact.wrappers` instead of mixing feature logic into the transition map.
-The wrappers validate shapes, clamp hazards to non-negative values, and normalize
-grouped outputs.
+The wrappers validate broadcast compatibility, clamp hazards to non-negative
+values, and normalize grouped output axes.
 
 ```python
 import jax.numpy as jnp
@@ -288,17 +294,18 @@ follows the transition-list order supplied for that grouped callable.
 Most modeling mistakes are shape mistakes. Check these before changing the
 state-space topology:
 
-- Return `(batch, D)` from each single-transition intensity, not `(D,)`,
-  `(batch,)`, or `(batch, 1)` unless `D == 1`.
-- Use `jnp.broadcast_to(value[:, None], (value.shape[0], d.shape[-1]))` when a
-  covariate is per individual but the solver needs one value per duration-grid
-  cell.
+- Single-transition intensity outputs must be broadcastable to `(batch, D)`.
+  Scalars, `(D,)`, `(1, D)`, `(batch, 1)`, and `(batch, D)` are natural choices.
+- Do not return `(batch,)` for a grid intensity unless it is genuinely
+  broadcastable to the current `(batch, D)` shape. Use `(batch, 1)` for one
+  per-individual value shared across all duration-grid cells.
 - Use `jnp.broadcast_to(d, (batch, d.shape[-1]))` when an intensity depends on
-  duration.
+  duration and downstream feature code needs the explicit batch axis.
 - For grouped, exit, or fitted multi-output models, normalize to
-  `(K, batch, D)`. If the fitted model emits `(batch, D, K)`, use
-  `jact.wrappers.bind_grouped_intensity(..., output_axis=-1)`.
-- All covariates passed to `solve` must agree on the leading batch dimension.
+  a leading output axis of length `K`. If the fitted model emits
+  `(batch, D, K)`, use `jact.wrappers.bind_grouped_intensity(..., output_axis=-1)`.
+- All non-scalar covariates passed to `solve` must agree on the leading batch
+  dimension. Scalar covariates are constants.
 
 ## Cashflow Guidance
 

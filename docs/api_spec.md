@@ -110,9 +110,9 @@ Assignment modes:
 
 | Kwarg | Coverage | Callable return shape |
 |---|---|---|
-| `transitions={(src, tgt): fn}` | Exactly one transition | `(batch, D)` |
-| `exits={src: fn}` | Every exit from `src`, ordered by `state_space.targets(src)` | `(n_targets, batch, D)` |
-| `groups={fn: [(src, tgt), ...]}` | Arbitrary listed transitions | `(n_transitions, batch, D)` |
+| `transitions={(src, tgt): fn}` | Exactly one transition | broadcastable to `(batch, D)` |
+| `exits={src: fn}` | Every exit from `src`, ordered by `state_space.targets(src)` | leading output axis, each selected output broadcastable to `(batch, D)` |
+| `groups={fn: [(src, tgt), ...]}` | Arbitrary listed transitions | leading output axis, each selected output broadcastable to `(batch, D)` |
 
 Notes:
 
@@ -121,7 +121,7 @@ Notes:
 - `build()` rejects gaps, overlaps, unknown transitions, empty groups, and
   non-callable assignments.
 - `exits` and `groups` are sliced at model-build time so the solver always sees
-  per-transition callables returning `(batch, D)`.
+  one selected transition output, then broadcasts that output to `(batch, D)`.
 
 ### Reduction
 
@@ -314,17 +314,21 @@ Arguments:
 |---|---|---|
 | `t` | scalar float | Clock time |
 | `d` | `(1, D)` | Duration grid broadcast over batch |
-| `**kwargs` | `(batch, ...)` arrays | Solve-time covariates |
+| `**kwargs` | scalar or `(batch, ...)` arrays | Solve-time covariates |
 
 Interpretation:
 
 - `t` is clock time,
 - `d` is duration in the current state,
-- `**kwargs` are solve-time covariates with axis 0 as the batch axis. A
-  rank-1 value such as `jnp.arange(batch_size)` is batched with one scalar per
-  individual; a value with shape `(batch_size, 1)` is also batched, with one
-  length-1 vector per individual. Scalars with shape `()` are not accepted as
-  covariates; close over constants in the callable instead.
+- `**kwargs` are solve-time covariates. Scalars with shape `()` are replicated
+  constants and do not define batch size. Non-scalar covariates use axis 0 as
+  the batch axis. A rank-1 value such as `jnp.arange(batch_size)` is batched
+  with one scalar per individual; a value with shape `(batch_size, 1)` is also
+  batched, with one length-1 vector per individual.
+- Batch size is inferred only from solver inputs: `InitialDistribution`
+  masses/durations, per-individual `initial`, `initial_duration`, and
+  non-scalar covariates. If none of those has a batch axis, the solve represents
+  one individual. Callable outputs never define batch size.
 - attained-age or calendar-time effects are expressed through covariates such
   as `baseline_age + t`.
 
@@ -332,9 +336,12 @@ Return shapes:
 
 | Assignment mode | Shape |
 |---|---|
-| `transitions` | `(batch, D)` |
-| `exits` | `(n_targets, batch, D)` |
-| `groups` | `(n_transitions, batch, D)` |
+| `transitions` | broadcastable to `(batch, D)` |
+| `exits` | leading target axis; each selected output broadcastable to `(batch, D)` |
+| `groups` | leading transition axis; each selected output broadcastable to `(batch, D)` |
+
+Useful single-transition return shapes include scalar `()`, `(D,)`, `(1, D)`,
+`(batch, 1)`, and `(batch, D)`.
 
 All intensity callables must be pure and JIT-compatible.
 
@@ -376,8 +383,7 @@ If `model_state is not None`, the apply call receives a variable mapping:
 raw = apply_fn({"params": params, **model_state}, features, **apply_kwargs)
 ```
 
-The raw output must have shape `(batch, D)`. Scalar, rank-1, rank-3, and
-wrong-width outputs are rejected. The returned hazard is
+The raw output must be broadcastable to `(batch, D)`. The returned hazard is
 `jnp.maximum(raw, 0.0)`.
 
 ### Grouped and exit intensities
@@ -407,10 +413,11 @@ jact.wrappers.bind_exit_intensity(
 ```
 
 `bind_exit_intensity()` is an alias-shaped helper for readability when the
-callable is passed through `exits={...}`. Both helpers accept a rank-3 raw
-output, move `output_axis` to the front, and require normalized shape
-`(output_count, batch, D)`. For example, model output `(batch, D, K)` uses
-`output_axis=-1`, while output `(K, batch, D)` uses `output_axis=0`.
+callable is passed through `exits={...}`. Both helpers move `output_axis` to
+the front and require `output_count` on that normalized leading axis. Each
+selected output must be broadcastable to `(batch, D)`. For example, model
+output `(batch, D, K)` uses `output_axis=-1`, while output `(K, batch, D)` uses
+`output_axis=0`.
 
 The returned grouped hazard is `jnp.maximum(normalized, 0.0)`.
 
@@ -488,7 +495,7 @@ def payment(t, d, **kwargs) -> jnp.ndarray: ...
 ```
 
 The `**kwargs` argument follows the same batch-axis rule as intensity
-callables. The return shape is always `(batch, D)`.
+callables. The return value must be broadcastable to `(batch, D)`.
 
 Scheduled-event timing uses a separate rule:
 
@@ -497,7 +504,8 @@ def when(**kwargs) -> jnp.ndarray: ...
 ```
 
 The `**kwargs` argument follows the same batch-axis rule as intensity
-callables. The return shape is `(batch,)`: one event time per individual.
+callables. The return value must be scalar or broadcastable to `(batch,)`: one
+event time per individual.
 
 Duration-event target durations use:
 
@@ -506,7 +514,8 @@ def at_duration(**kwargs) -> jnp.ndarray: ...
 ```
 
 `at_durations` values are target state durations. They may be Python scalars,
-rank-0 arrays, or callables returning a scalar or `(batch,)` array.
+rank-0 arrays, or callables returning a scalar or value broadcastable to
+`(batch,)`.
 
 ### Scheduled-event policy
 
@@ -604,7 +613,7 @@ View types:
 Shared view fields:
 
 - `weight`: `None`, a Python scalar, a rank-0 array, or a callable
-  `(t, **kwargs) -> (batch,)` or broadcast-compatible array. It is evaluated
+  `(t, **kwargs)` returning a scalar or value broadcastable to `(batch,)`. It is evaluated
   once per inner solver step at that step's midpoint and multiplies the
   contribution attributed to that step. Callable weights receive the same
   batch-major `**kwargs` as intensity and payment callables.
@@ -627,7 +636,7 @@ Default and validation rules:
 - `Raw(name=...)` and `Group(members)` must reference declared component names,
 - `Group.members` is frozen during validation,
 - `terminal` must be `bool`,
-- non-scalar array weights are rejected.
+- non-scalar array weights must be broadcastable to `(batch,)`.
 
 Semantics:
 
@@ -678,7 +687,7 @@ Parameters:
 | `cashflow_views` | mapping or `None` | Solve-time views; requires `cashflows` |
 | `record_every` | positive int | Must divide `horizon * steps_per_unit` |
 | `devices` | int, sequence of `jax.Device`, or `None` | Optional local devices for batch-sharded execution |
-| `**kwargs` | arrays | Covariates with a shared leading batch dimension |
+| `**kwargs` | arrays | Scalar constants or covariates with a shared leading batch dimension |
 
 Validation and defaults:
 
@@ -686,7 +695,8 @@ Validation and defaults:
 - reserved covariate names `initial` and `initial_duration` are rejected,
 - legacy kwargs `callback` and `freeze_initial` are rejected,
 - `cashflows` must be declared from `model.state_space`,
-- covariate values must have shape `(batch, ...)`; scalars are rejected,
+- non-scalar covariate values must have shape `(batch, ...)` with a shared
+  leading batch dimension; scalar covariates are replicated constants,
 - `record_every` must divide `horizon * steps_per_unit`,
 - `devices` must not be `bool`,
 - integer `devices` counts must be positive,
@@ -709,11 +719,12 @@ shapes are unchanged for every setting:
 - `devices=(device0, device1, ...)`: run on the supplied local device
   sequence.
 
-Multi-device execution shards only the leading batch axis. Every solver
-covariate in `**kwargs`, every initial mass/duration array, and every solver
-carry leaf is padded if needed so the batch divides evenly by the selected
-device count, then reshaped from `(batch, ...)` to
-`(devices, per_device_batch, ...)`.
+Multi-device execution shards only the leading batch axis. Every non-scalar
+solver covariate in `**kwargs`, every initial mass/duration array, and every
+solver carry leaf is padded if needed so the batch divides evenly by the
+selected device count, then reshaped from `(batch, ...)` to
+`(devices, per_device_batch, ...)`. Scalar covariates are passed to every device
+unchanged.
 
 Inside intensity, payment, scheduled-event, and callable weight functions on
 the multi-device path, each callable sees only its local shard:
@@ -733,6 +744,9 @@ kwargs["age"].shape == (3,)
 kwargs["x"].shape == (3, 4)
 ```
 
+Scalar covariates with shape `()` keep that scalar shape inside callables on the
+multi-device path.
+
 The padded rows are internal only. Solver outputs are merged back and sliced to
 the original public batch size, so probability leaves still use `(T, 5, ...)`,
 streamed cashflow leaves still use `(T_out, 5)`, and terminal cashflow leaves
@@ -747,9 +761,8 @@ Only axis 0 is treated as the batch axis. For example:
 | `(B, K)` | one length-`K` vector per individual |
 | `(B, T, K)` | one `(T, K)` array per individual |
 
-All non-batch dimensions are preserved on each shard. Non-batched scalar
-covariates with shape `()` are rejected before device selection, including on
-the single-device path.
+All non-batch dimensions are preserved on each shard. Scalar covariates with
+shape `()` are replicated constants and do not define the batch size.
 
 Initial forms:
 

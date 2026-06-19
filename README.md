@@ -63,7 +63,8 @@ onset_fn = jact.wrappers.bind_intensity(apply, fitted_params, features)
 For fitted models that emit several hazards at once, use
 `jact.wrappers.bind_grouped_intensity(..., output_count=K)` or
 `jact.wrappers.bind_exit_intensity(..., output_count=K)`. The wrappers clamp
-outputs to non-negative hazards and normalize grouped outputs to `(K, batch, D)`.
+outputs to non-negative hazards and normalize grouped output axes. Raw fitted
+model outputs only need to be broadcastable to the solver shape.
 
 ## Cashflow example
 

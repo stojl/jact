@@ -367,8 +367,9 @@ class Model:
             ``None`` keeps the single-device JIT path. ``1`` explicitly
             selects one device and also uses the single-device path.
         **kwargs
-            Covariate arrays of shape ``(batch, ...)`` passed to
-            intensity callables.
+            Scalar constants or covariate arrays of shape ``(batch, ...)``
+            passed to intensity and cashflow callables. Scalar covariates do
+            not define batch size.
 
         Returns
         -------
@@ -412,15 +413,15 @@ def _make_slice_wrapper(fn: Callable, index: int) -> Callable:
     Parameters
     ----------
     fn : callable
-        Multi-output intensity function returning shape
-        ``(n_transitions, batch, D)``.
+        Multi-output intensity function with a leading transition axis.
     index : int
         Which transition to slice.
 
     Returns
     -------
     callable
-        Function with signature ``(t, grid, **kwargs) -> (batch, D)``.
+        Function with signature ``(t, grid, **kwargs)`` returning one
+        transition output broadcastable to ``(batch, D)``.
     """
 
     def wrapper(t, grid, **kwargs):
