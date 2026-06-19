@@ -21,12 +21,18 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-try:
-    from jax.errors import JaxRuntimeError as XlaRuntimeError
-except ImportError:
-    from jaxlib.xla_extension import XlaRuntimeError
-
 import jact
+
+try:
+    from jaxlib.xla_extension import XlaRuntimeError as _FallbackXlaRuntimeError
+except ImportError:
+    _FallbackXlaRuntimeError = RuntimeError
+
+XlaRuntimeError: type[BaseException] = getattr(
+    jax.errors,
+    "JaxRuntimeError",
+    _FallbackXlaRuntimeError,
+)
 
 BATCH = 8
 

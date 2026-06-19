@@ -121,37 +121,64 @@ def _dense_state_to_tuple(
     return tuple(state)
 
 
+def _broadcast_grid_output(
+    value: Any,
+    target_shape: tuple[int, int],
+    label: str,
+) -> jnp.ndarray:
+    arr = jnp.asarray(value)
+    try:
+        return jnp.broadcast_to(arr, target_shape)
+    except ValueError as exc:
+        raise ValueError(
+            f"{label} with shape {arr.shape} cannot broadcast to "
+            f"{target_shape}."
+        ) from exc
+
+
+def _broadcast_vector_output(
+    value: Any,
+    target_shape: tuple[int, ...],
+    label: str,
+) -> jnp.ndarray:
+    arr = jnp.asarray(value)
+    try:
+        return jnp.broadcast_to(arr, target_shape)
+    except ValueError as exc:
+        raise ValueError(
+            f"{label} with shape {arr.shape} cannot broadcast to "
+            f"{target_shape}."
+        ) from exc
+
+
+def _broadcast_point_output(
+    value: Any,
+    batch_size: int,
+    label: str,
+) -> jnp.ndarray:
+    arr = jnp.asarray(value)
+    if arr.ndim == 2 and arr.shape == (batch_size, 1):
+        arr = arr[:, 0]
+    try:
+        return _broadcast_vector_output(arr, (batch_size,), label)
+    except ValueError:
+        return _broadcast_grid_output(arr, (batch_size, 1), label)[:, 0]
+
+
 def _evaluate_intensity_at_point(
     fn: Callable[..., jnp.ndarray],
     t: jnp.ndarray,
     d_per_individual: jnp.ndarray,
     intensity_kwargs: dict[str, jnp.ndarray],
 ) -> jnp.ndarray:
-    """Evaluate a point intensity, preferring a batched call shape."""
+    """Evaluate a point intensity and normalize to one value per individual."""
     d_batched = d_per_individual[:, None]
-    batched_result = jnp.asarray(fn(t, d_batched, **intensity_kwargs))
-
-    if (
-        batched_result.ndim >= 2
-        and batched_result.shape[0] == d_per_individual.shape[0]
-        and batched_result.shape[-1] == 1
-    ):
-        return jnp.squeeze(batched_result, axis=-1)
-
-    names = tuple(intensity_kwargs.keys())
-    values = tuple(intensity_kwargs[name] for name in names)
-
-    def eval_one(d_i, *covariates):
-        kwargs = {
-            name: jnp.expand_dims(value, axis=0)
-            for name, value in zip(names, covariates)
-        }
-        return jnp.squeeze(fn(t, d_i[None, None], **kwargs), axis=(0, 1))
-
-    return jax.vmap(
-        eval_one,
-        in_axes=(0,) + (0,) * len(values),
-    )(d_per_individual, *values)
+    output = fn(t, d_batched, **intensity_kwargs)
+    return _broadcast_point_output(
+        output,
+        d_per_individual.shape[0],
+        "Point callable output",
+    )
 
 
 def _integrated_density_hazard(
@@ -160,8 +187,13 @@ def _integrated_density_hazard(
     duration_mid: jnp.ndarray,
     step_size: float,
     intensity_kwargs: dict[str, jnp.ndarray],
+    batch_size: int,
 ) -> jnp.ndarray:
-    midpoint = jnp.asarray(fn(t + 0.5 * step_size, duration_mid, **intensity_kwargs))
+    midpoint = _broadcast_grid_output(
+        fn(t + 0.5 * step_size, duration_mid, **intensity_kwargs),
+        (batch_size, duration_mid.shape[-1]),
+        "Intensity output",
+    )
     return jnp.maximum(step_size * midpoint, 0.0)
 
 
@@ -270,8 +302,13 @@ def _call_payment(
     t: jnp.ndarray,
     d: jnp.ndarray,
     intensity_kwargs: dict[str, jnp.ndarray],
+    target_shape: tuple[int, int],
 ) -> jnp.ndarray:
-    return jnp.asarray(fn(t, d, **intensity_kwargs))
+    return _broadcast_grid_output(
+        fn(t, d, **intensity_kwargs),
+        target_shape,
+        "Payment output",
+    )
 
 
 def _scheduled_event_index(
@@ -343,6 +380,7 @@ def _solver_step_dynamics(
                 duration_mid,
                 step_size,
                 intensity_kwargs,
+                densities.shape[1],
             )
             density_total = density_total + density_hazard
             density_hazards.append((target_index, density_hazard))
@@ -545,6 +583,7 @@ def _compute_cashflow_step(
                     t_mid,
                     duration_mid,
                     intensity_kwargs,
+                    (densities.shape[1], duration_mid.shape[-1]),
                 )
                 contribution = step_size * jnp.sum(
                     density_midpoint * payment,
@@ -592,6 +631,7 @@ def _compute_cashflow_step(
                     t_mid,
                     duration_mid,
                     intensity_kwargs,
+                    (densities.shape[1], duration_mid.shape[-1]),
                 )
                 contribution = jnp.sum(
                     densities[source_index]
@@ -636,6 +676,16 @@ def _compute_cashflow_step(
 
         elif kind == _KIND_SCHEDULED_EVENT:
             event_time, event_index = scheduled_events[component_index]
+            event_time = _broadcast_vector_output(
+                event_time,
+                template.shape,
+                "Scheduled event time",
+            )
+            event_index = _broadcast_vector_output(
+                event_index,
+                template.shape,
+                "Scheduled event index",
+            )
             current_index = jnp.round(t / step_size).astype(jnp.int32)
             active = (
                 (event_index == current_index)
@@ -649,6 +699,7 @@ def _compute_cashflow_step(
                     t,
                     duration_left,
                     intensity_kwargs,
+                    (densities.shape[1], duration_left.shape[-1]),
                 )
                 contribution = active * jnp.sum(
                     densities[state_index] * payment,
@@ -693,14 +744,20 @@ def _compute_cashflow_step(
                 effective_at_duration,
                 payment_fn,
             ) in component[1]:
-                at_duration = _broadcast_batch(at_duration, template.shape[0])
-                at_duration_index = _broadcast_batch(
-                    at_duration_index,
-                    template.shape[0],
+                at_duration = _broadcast_vector_output(
+                    at_duration,
+                    template.shape,
+                    "Duration event target",
                 )
-                effective_at_duration = _broadcast_batch(
+                at_duration_index = _broadcast_vector_output(
+                    at_duration_index,
+                    template.shape,
+                    "Duration event index",
+                )
+                effective_at_duration = _broadcast_vector_output(
                     effective_at_duration,
-                    template.shape[0],
+                    template.shape,
+                    "Effective duration event target",
                 )
                 in_horizon = (at_duration >= 0) & (at_duration_index < n_steps)
                 safe_index = jnp.clip(at_duration_index, 0, n_steps - 1)
@@ -861,9 +918,7 @@ def _evaluate_weight(
         return jnp.ones_like(template)
     value = weight(t, **intensity_kwargs) if callable(weight) else weight
     arr = jnp.asarray(value, dtype=template.dtype)
-    if arr.ndim == 0:
-        return jnp.broadcast_to(arr, template.shape)
-    return arr
+    return _broadcast_vector_output(arr, template.shape, "Cashflow view weight")
 
 
 def _compute_cashflow_views(
@@ -1034,8 +1089,12 @@ def _add_selected_view_values(
     )
 
 
-_PMAP_IN_AXES = (0, None, None, None, None, 0, None, None, None, None)
-_PMAP_STATIC_ARGNUMS = (3, 4, 6, 7, 8, 9)
+_PMAP_IN_AXES: Any = (0, None, None, None, None, 0, None, None, None, None, None)
+_PMAP_STATIC_ARGNUMS = (3, 4, 7, 8, 9, 10)
+_jax_checkpoint: Callable[[Callable[..., Any]], Callable[..., Any]] = getattr(
+    jax,
+    "checkpoint",
+)
 
 
 @partial(
@@ -1049,12 +1108,14 @@ def _midpoint_solver_pmapped_all_devices(
     duration_left: jnp.ndarray,
     step_size: float,
     solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
-    intensity_kwargs: dict[str, jnp.ndarray],
+    batch_kwargs: dict[str, jnp.ndarray],
+    scalar_kwargs: dict[str, jnp.ndarray],
     prob_callback: Callable[..., Any],
     record_every: int,
     cashflow_components: tuple[Any, ...] = (),
     cashflow_views: tuple[Any, ...] = (),
 ):
+    intensity_kwargs = {**scalar_kwargs, **batch_kwargs}
     return _midpoint_solver(
         state_0,
         duration_mid,
@@ -1071,10 +1132,37 @@ def _midpoint_solver_pmapped_all_devices(
 
 def _midpoint_solver_pmapped_on_devices(devices: tuple[jax.Device, ...]):
     return jax.pmap(
-        _midpoint_solver,
+        _midpoint_solver_pmapped_wrapper,
         in_axes=_PMAP_IN_AXES,
         static_broadcasted_argnums=_PMAP_STATIC_ARGNUMS,
         devices=devices,
+    )
+
+
+def _midpoint_solver_pmapped_wrapper(
+    state_0: tuple[StateCarry, ...],
+    duration_mid: jnp.ndarray,
+    duration_left: jnp.ndarray,
+    step_size: float,
+    solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
+    batch_kwargs: dict[str, jnp.ndarray],
+    scalar_kwargs: dict[str, jnp.ndarray],
+    prob_callback: Callable[..., Any],
+    record_every: int,
+    cashflow_components: tuple[Any, ...] = (),
+    cashflow_views: tuple[Any, ...] = (),
+):
+    return _midpoint_solver(
+        state_0,
+        duration_mid,
+        duration_left,
+        step_size,
+        solver_matrix,
+        {**scalar_kwargs, **batch_kwargs},
+        prob_callback,
+        record_every,
+        cashflow_components,
+        cashflow_views,
     )
 
 
@@ -1199,7 +1287,7 @@ def _midpoint_solver(
 
     # Rematerialize one recorded block at a time during reverse-mode so the
     # transpose does not need to retain every inner solver step.
-    block_scan = jax.checkpoint(block_scan)
+    block_scan = _jax_checkpoint(block_scan)
     initial_probability = prob_callback(state_0)
     block_starts = jnp.arange(n_records, dtype=duration_mid.dtype) * (
         record_every * step_size
@@ -1242,14 +1330,47 @@ def _get_covariate_batch_size(kwargs: dict[str, Any]) -> int | None:
     for name, value in kwargs.items():
         shape = jnp.shape(value)
         if len(shape) == 0:
-            raise ValueError(
-                f"Covariate '{name}' must have shape (batch, ...), got scalar."
-            )
+            continue
         if batch_size is None:
             batch_size = shape[0]
         elif batch_size != shape[0]:
             raise ValueError("Covariate batch dimensions must match.")
     return batch_size
+
+
+def _split_scalar_and_batch_kwargs(
+    kwargs: dict[str, Any],
+) -> tuple[dict[str, jnp.ndarray], dict[str, jnp.ndarray]]:
+    scalar_kwargs: dict[str, jnp.ndarray] = {}
+    batch_kwargs: dict[str, jnp.ndarray] = {}
+    for name, value in kwargs.items():
+        arr = jnp.asarray(value)
+        if arr.ndim == 0:
+            scalar_kwargs[name] = arr
+        else:
+            batch_kwargs[name] = arr
+    return scalar_kwargs, batch_kwargs
+
+
+def _solver_value_dtype(
+    canonical: Any,
+    kwargs: dict[str, Any],
+) -> jnp.dtype:
+    leaves = [
+        jnp.asarray(value)
+        for value in (
+            *canonical.masses,
+            *canonical.durations,
+            *kwargs.values(),
+        )
+        if value is not None
+    ]
+    float_leaves = [
+        leaf for leaf in leaves if jnp.issubdtype(leaf.dtype, jnp.inexact)
+    ]
+    if not float_leaves:
+        return jnp.asarray(0.0).dtype
+    return jnp.result_type(*float_leaves)
 
 
 def _broadcast_batch(value: Any, batch_size: int) -> jnp.ndarray:
@@ -1510,15 +1631,16 @@ def _run_midpoint_solver(
         )
 
     sharded_state_0, batch_size = _shard_batch_tree(state_0, len(devices))
-    if jax.tree_util.tree_leaves(intensity_kwargs):
-        sharded_kwargs, kwargs_batch_size = _shard_batch_tree(
-            intensity_kwargs,
+    scalar_kwargs, batch_kwargs = _split_scalar_and_batch_kwargs(intensity_kwargs)
+    if batch_kwargs:
+        sharded_batch_kwargs, kwargs_batch_size = _shard_batch_tree(
+            batch_kwargs,
             len(devices),
         )
         if kwargs_batch_size != batch_size:
             raise ValueError("Covariate batch dimensions must match solver batch size.")
     else:
-        sharded_kwargs = intensity_kwargs
+        sharded_batch_kwargs = {}
 
     if devices == tuple(jax.local_devices()):
         sharded_result = _midpoint_solver_pmapped_all_devices(
@@ -1527,7 +1649,8 @@ def _run_midpoint_solver(
             duration_left,
             step_size,
             solver_matrix,
-            sharded_kwargs,
+            sharded_batch_kwargs,
+            scalar_kwargs,
             prob_callback,
             record_every,
             cashflow_components,
@@ -1540,7 +1663,8 @@ def _run_midpoint_solver(
             duration_left,
             step_size,
             solver_matrix,
-            sharded_kwargs,
+            sharded_batch_kwargs,
+            scalar_kwargs,
             prob_callback,
             record_every,
             cashflow_components,
@@ -1629,36 +1753,19 @@ def solve(
             "InitialDistribution batch size must match covariate batch size."
         )
 
-    reference_fn = _get_reference_function(solver_matrix)
-    if reference_fn is None:
-        reference_fn = _cashflow_reference_function(cashflows)
-    if reference_fn is None:
-        raise ValueError(
-            "The intensity matrix contains no callables. Cannot solve."
-        )
-
-    reference_output = jnp.asarray(reference_fn(0.0, duration_left, **kwargs))
-    if reference_output.ndim != 2 or reference_output.shape[1] != solver_steps:
-        raise ValueError(
-            "Reference intensity output must have shape "
-            f"(batch, {solver_steps})."
-        )
-    reference_batch = reference_output.shape[0]
-
     batch_size = distribution_batch
     if batch_size is None:
         batch_size = covariate_batch
     if batch_size is None:
-        batch_size = reference_batch
-    if reference_batch != batch_size:
-        raise ValueError("Intensity batch size must match solver batch size.")
+        batch_size = 1
+    value_dtype = _solver_value_dtype(canonical, kwargs)
 
     declared_index = {
         state: i for i, state in enumerate(canonical.states)
     }
     state_0 = []
     for state_name in reduced.reachable_states:
-        density = jnp.zeros((batch_size, solver_steps), dtype=reference_output.dtype)
+        density = jnp.zeros((batch_size, solver_steps), dtype=value_dtype)
         point_mass = None
         if state_name in declared_index:
             idx = declared_index[state_name]

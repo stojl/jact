@@ -362,6 +362,62 @@ def test_state_rate_no_transition_interval_and_terminal_outputs():
     assert jnp.allclose(result.cashflows["pv"], jnp.array([2.0]))
 
 
+def test_cashflow_only_scalar_payment_defaults_to_one_individual():
+    ss = jact.StateSpace(["active"], [])
+    model = ss.build(transitions={})
+
+    def scalar_payment(t, d, **kwargs):
+        del t, d, kwargs
+        return jnp.array(2.0, dtype=jnp.float32)
+
+    cashflows = ss.cashflows({"premium": jact.cashflows.StateRate({
+        "active": scalar_payment
+    })})
+
+    result = model.solve(
+        initial="active",
+        horizon=1,
+        steps_per_unit=4,
+        probability=None,
+        cashflows=cashflows,
+        cashflow_views={"premium": jact.cashflows.Raw("premium", terminal=True)},
+    )
+
+    assert result.cashflows["premium"].shape == (1,)
+    assert jnp.allclose(result.cashflows["premium"], jnp.array([2.0]))
+
+
+def test_duration_event_target_broadcasts_singleton_to_batch():
+    ss = jact.StateSpace(["active"], [])
+    model = ss.build(transitions={})
+
+    def singleton_target(**kwargs):
+        del kwargs
+        return jnp.array([0.5], dtype=jnp.float32)
+
+    def scalar_payment(t, d, **kwargs):
+        del t, d, kwargs
+        return jnp.array(3.0, dtype=jnp.float32)
+
+    cashflows = ss.cashflows({"benefit": jact.cashflows.DurationEvent(
+        at_durations={"active": singleton_target},
+        payments={"active": scalar_payment},
+    )})
+
+    result = model.solve(
+        initial="active",
+        initial_duration=jnp.array([0.0, 0.25], dtype=jnp.float32),
+        horizon=1,
+        steps_per_unit=4,
+        probability=None,
+        cashflows=cashflows,
+        cashflow_views={"benefit": jact.cashflows.Raw("benefit", terminal=True)},
+    )
+
+    assert result.cashflows["benefit"].shape == (2,)
+    assert jnp.allclose(result.cashflows["benefit"], jnp.array([3.0, 3.0]))
+
+
 def test_transition_lump_matches_integrated_transition_probability():
     rate = 0.2
     benefit = 10.0

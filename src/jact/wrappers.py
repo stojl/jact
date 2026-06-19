@@ -137,26 +137,44 @@ def _apply_model(
 
 
 def _check_single_shape(output: Any, d: Any) -> None:
-    if output.ndim != 2 or output.shape[-1] != jnp.shape(d)[-1]:
+    expected = (1, jnp.shape(d)[-1])
+    if not _can_broadcast_to(output.shape, expected):
         raise ValueError(
-            "Wrapped intensity output must have shape (batch, D); "
-            f"got {output.shape}."
+            "Wrapped intensity output must be broadcastable to (batch, D); "
+            f"got {output.shape} for duration width {expected[-1]}."
         )
 
 
 def _check_grouped_rank(output: Any) -> None:
-    if output.ndim != 3:
+    if output.ndim == 0:
         raise ValueError(
-            "Grouped intensity output must be rank 3 before axis normalization; "
+            "Grouped intensity output must include an output axis; "
             f"got shape {output.shape}."
         )
 
 
 def _check_grouped_shape(output: Any, d: Any, output_count: int) -> None:
     expected_width = jnp.shape(d)[-1]
-    if output.shape[0] != output_count or output.shape[-1] != expected_width:
+    if output.shape[0] != output_count:
         raise ValueError(
-            "Grouped intensity output must normalize to shape "
-            f"(output_count, batch, D) with output_count={output_count}; "
+            "Grouped intensity output must include output_count="
+            f"{output_count} on its normalized leading axis; "
             f"got {output.shape}."
         )
+    selected_shape = output.shape[1:]
+    if not _can_broadcast_to(selected_shape, (1, expected_width)):
+        raise ValueError(
+            "Each grouped intensity output must be broadcastable to "
+            f"(batch, D) with D={expected_width}; got {output.shape}."
+        )
+
+
+def _can_broadcast_to(
+    shape: tuple[int, ...],
+    target_shape: tuple[int, ...],
+) -> bool:
+    try:
+        jnp.broadcast_shapes(shape, target_shape)
+    except ValueError:
+        return False
+    return True
