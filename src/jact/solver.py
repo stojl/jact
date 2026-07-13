@@ -1,4 +1,4 @@
-# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportUntypedFunctionDecorator=false, reportPrivateUsage=false
+# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportUntypedFunctionDecorator=false, reportPrivateUsage=false
 """Semi-Markov solver with midpoint quadrature."""
 
 from __future__ import annotations
@@ -6,11 +6,10 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from numbers import Integral
-from typing import Any, NamedTuple, cast
+from typing import Any, NamedTuple, TypeAlias, TypeVar, cast
 
 import jax
 import jax.numpy as jnp
-from jax.typing import ArrayLike
 
 from ._cashflow_ir import (
     CashflowComponentSpecs,
@@ -21,6 +20,8 @@ from ._cashflow_ir import (
     ComponentSumSource,
     DurationEventSpec,
     DurationTargetPayment,
+    FormattedCashflows,
+    FormattedCashflowValue,
     KindSource,
     PreparedCashflowView,
     PreparedCashflowViews,
@@ -64,7 +65,7 @@ from .probability import (
     resolve_callback,
 )
 from .result import ModelResult
-from .typing import Intensity, Payment, Weight
+from .typing import ArrayLike, Intensity, Payment, Weight
 
 __all__ = ["solve"]
 
@@ -72,6 +73,9 @@ _KIND_STATE_RATE = 0
 _KIND_TRANSITION_LUMP = 1
 _KIND_SCHEDULED_EVENT = 2
 _KIND_DURATION_EVENT = 3
+
+_ProbabilityTree: TypeAlias = Any
+_PyTreeT = TypeVar("_PyTreeT")
 
 class _RowHazards(NamedTuple):
     """Per-source-state hazards shared between the advance and cashflow steps."""
@@ -98,7 +102,7 @@ class _SameStepTransfers(NamedTuple):
 class _SolverResult(NamedTuple):
     """Fixed internal solver output; callback leaves remain deliberately dynamic."""
 
-    probability: Any
+    probability: _ProbabilityTree
     cashflow_streams: CashflowStreamValues | None
     cashflow_terminal: CashflowViewValues | None
 
@@ -111,10 +115,10 @@ def _stack_point_masses(
     state: tuple[StateCarry, ...],
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, tuple[bool, ...]]:
     value_template = state[0].density[:, 0]
-    values = []
-    d_0 = []
-    log_values = []
-    mask = []
+    values: list[jnp.ndarray] = []
+    d_0: list[jnp.ndarray] = []
+    log_values: list[jnp.ndarray] = []
+    mask: list[bool] = []
     for carry in state:
         if carry.point_mass is None:
             values.append(jnp.zeros_like(value_template))
@@ -141,7 +145,7 @@ def _dense_state_to_tuple(
     point_log_values: jnp.ndarray,
     point_mask: tuple[bool, ...],
 ) -> tuple[StateCarry, ...]:
-    state = []
+    state: list[StateCarry] = []
     for i, has_point_mass in enumerate(point_mask):
         point_mass = None
         if has_point_mass:
@@ -348,7 +352,7 @@ def _scheduled_event_index(
     event_time: jnp.ndarray,
     step_size: float,
 ) -> jnp.ndarray:
-    dtype = jnp.result_type(event_time, 1.0)
+    dtype = cast(Any, jnp.result_type(event_time, 1.0))
     x = jnp.asarray(event_time, dtype=dtype) / jnp.asarray(step_size, dtype=dtype)
     nearest = jnp.round(x)
     tol = jnp.sqrt(jnp.asarray(jnp.finfo(x.dtype).eps, dtype=x.dtype))
@@ -360,7 +364,7 @@ def _duration_event_index(
     at_duration: jnp.ndarray,
     step_size: float,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    dtype = jnp.result_type(at_duration, 1.0)
+    dtype = cast(Any, jnp.result_type(at_duration, 1.0))
     step = jnp.asarray(step_size, dtype=dtype)
     at_duration_index = _scheduled_event_index(at_duration, step_size)
     effective_at_duration = at_duration_index.astype(dtype) * step
@@ -371,7 +375,7 @@ def _is_near_grid_zero(
     value: jnp.ndarray,
     step_size: float,
 ) -> jnp.ndarray:
-    dtype = jnp.result_type(value, 1.0)
+    dtype = cast(Any, jnp.result_type(value, 1.0))
     x = jnp.asarray(value, dtype=dtype) / jnp.asarray(step_size, dtype=dtype)
     tol = jnp.sqrt(jnp.asarray(jnp.finfo(x.dtype).eps, dtype=x.dtype))
     return jnp.abs(x) <= tol
@@ -395,13 +399,13 @@ def _solver_step_dynamics(
 ]:
     densities = _stack_state_densities(state)
     point_values, point_d_0, point_log_values, point_mask = _stack_point_masses(state)
-    row_hazards = []
+    row_hazards_list: list[_RowHazards] = []
 
     for source_index, row in enumerate(solver_matrix):
         density_total = jnp.zeros_like(densities[source_index])
         point_total = jnp.zeros_like(point_values[source_index])
-        density_hazards = []
-        point_hazards = []
+        density_hazards: list[tuple[int, jnp.ndarray]] = []
+        point_hazards: list[tuple[int, jnp.ndarray]] = []
 
         for target_index, fn in enumerate(row):
             if fn is None:
@@ -429,7 +433,7 @@ def _solver_step_dynamics(
                 point_total = point_total + point_hazard
                 point_hazards.append((target_index, point_hazard))
 
-        row_hazards.append(
+        row_hazards_list.append(
             _RowHazards(
                 density_hazards=tuple(density_hazards),
                 point_hazards=tuple(point_hazards),
@@ -441,7 +445,7 @@ def _solver_step_dynamics(
             )
         )
 
-    row_hazards = tuple(row_hazards)
+    row_hazards = tuple(row_hazards_list)
     transfers = _compute_same_step_transfers(
         densities,
         point_values,
@@ -484,10 +488,10 @@ def _compute_same_step_transfers(
     survived_inflow = jnp.zeros_like(raw_inflow)
     next_inflow_zero = jnp.zeros_like(raw_inflow)
     next_inflow_one = jnp.zeros_like(raw_inflow)
-    chained_by_source = []
+    chained_by_source: list[tuple[jnp.ndarray, ...]] = []
     incoming_state_indices = _incoming_state_indices(row_hazards)
     for i, hz in enumerate(row_hazards):
-        chained_from_source = []
+        chained_from_source: list[jnp.ndarray] = []
         inflow = raw_inflow[i]
         if i in incoming_state_indices:
             if hz.density_hazards:
@@ -548,7 +552,7 @@ def _advance_solver_step_from_dynamics(
                 jnp.exp(next_log_value)
             )
 
-    next_densities = []
+    next_densities: list[jnp.ndarray] = []
     for i, hz in enumerate(row_hazards):
         next_densities.append(
             _advance_density(
@@ -904,7 +908,7 @@ def _compute_duration_events(
     duration_events: list[ResolvedDurationEvent | None] = []
     for component in cashflow_components:
         if isinstance(component, DurationEventSpec):
-            targets = []
+            targets: list[ResolvedDurationTarget] = []
             for attachment in component.targets:
                 at_duration_source = attachment.at_duration
                 at_duration = (
@@ -985,7 +989,7 @@ def _compute_cashflow_views(
     midpoint_by_kind = tuple(
         total - event for total, event in zip(by_kind, event_by_kind)
     )
-    view_values = []
+    view_values: list[tuple[jnp.ndarray, ...]] = []
     for view in cashflow_views:
         factor = _evaluate_weight(
             view.weight,
@@ -1048,7 +1052,10 @@ def _shard_batch_array(
     return value.reshape((device_count, per_device) + value.shape[1:]), batch_size
 
 
-def _shard_batch_tree(tree: Any, device_count: int) -> tuple[Any, int]:
+def _shard_batch_tree(
+    tree: _PyTreeT,
+    device_count: int,
+) -> tuple[_PyTreeT, int]:
     """Pad and shard a batch-major PyTree over a leading device axis."""
     batch_sizes: list[int] = []
 
@@ -1062,7 +1069,7 @@ def _shard_batch_tree(tree: Any, device_count: int) -> tuple[Any, int]:
         batch_sizes.append(batch_size)
         return sharded
 
-    sharded = jax.tree_util.tree_map(shard, tree)
+    sharded = cast(_PyTreeT, jax.tree_util.tree_map(shard, tree))
     if not batch_sizes:
         raise ValueError("Cannot shard an empty tree.")
     batch_size = batch_sizes[0]
@@ -1086,7 +1093,10 @@ def _unshard_batch_array(value: jnp.ndarray, original_batch_size: int) -> jnp.nd
     return merged[:, :original_batch_size, ...]
 
 
-def _unshard_batch_tree(tree: Any, original_batch_size: int) -> Any:
+def _unshard_batch_tree(
+    tree: _PyTreeT,
+    original_batch_size: int,
+) -> _PyTreeT:
     """Merge a pmapped solver output tree back onto the public batch axis."""
 
     def unshard(value: Any) -> Any:
@@ -1094,7 +1104,7 @@ def _unshard_batch_tree(tree: Any, original_batch_size: int) -> Any:
             return None
         return _unshard_batch_array(jnp.asarray(value), original_batch_size)
 
-    return jax.tree_util.tree_map(unshard, tree)
+    return cast(_PyTreeT, jax.tree_util.tree_map(unshard, tree))
 
 
 def _add_selected_view_values(
@@ -1142,7 +1152,7 @@ def _midpoint_solver_pmapped_all_devices(
     cashflow_views: PreparedCashflowViews = (),
 ) -> _SolverResult:
     intensity_kwargs = {**scalar_kwargs, **batch_kwargs}
-    return _midpoint_solver(
+    return cast(_SolverResult, _midpoint_solver(
         state_0,
         duration_mid,
         duration_left,
@@ -1153,7 +1163,7 @@ def _midpoint_solver_pmapped_all_devices(
         record_every,
         cashflow_components,
         cashflow_views,
-    )
+    ))
 
 
 def _midpoint_solver_pmapped_on_devices(
@@ -1180,7 +1190,7 @@ def _midpoint_solver_pmapped_wrapper(
     cashflow_components: CashflowComponentSpecs = (),
     cashflow_views: PreparedCashflowViews = (),
 ) -> _SolverResult:
-    return _midpoint_solver(
+    return cast(_SolverResult, _midpoint_solver(
         state_0,
         duration_mid,
         duration_left,
@@ -1191,7 +1201,7 @@ def _midpoint_solver_pmapped_wrapper(
         record_every,
         cashflow_components,
         cashflow_views,
-    )
+    ))
 
 
 @partial(
@@ -1388,7 +1398,7 @@ def _split_scalar_and_batch_kwargs(
 def _solver_value_dtype(
     canonical: _CanonicalDistribution,
     kwargs: Mapping[str, jnp.ndarray],
-) -> jnp.dtype:
+) -> Any:
     leaves = [
         jnp.asarray(value)
         for value in (
@@ -1401,8 +1411,8 @@ def _solver_value_dtype(
         leaf for leaf in leaves if jnp.issubdtype(leaf.dtype, jnp.inexact)
     ]
     if not float_leaves:
-        return jnp.asarray(0.0).dtype
-    return jnp.result_type(*float_leaves)
+        return cast(Any, jnp.asarray(0.0).dtype)
+    return cast(Any, jnp.result_type(*float_leaves))
 
 
 def _broadcast_batch(value: ArrayLike, batch_size: int) -> jnp.ndarray:
@@ -1592,12 +1602,12 @@ def _prepare_cashflow_views(
 def _format_cashflow_view_values(
     raw_result: _SolverResult,
     prepared_views: PreparedCashflowViews,
-) -> dict[str, Any]:
+) -> FormattedCashflows:
     streams = raw_result.cashflow_streams
     terminals = raw_result.cashflow_terminal
     if streams is None or terminals is None:
         raise ValueError("Solver result does not contain cashflows.")
-    formatted: dict[str, Any] = {}
+    formatted: FormattedCashflows = {}
     for index, view in enumerate(prepared_views):
         view_values = terminals[index] if view.terminal else streams[index]
         if view_values is None:
@@ -1605,10 +1615,10 @@ def _format_cashflow_view_values(
         if view.output == "single":
             formatted[view.name] = view_values[0]
         else:
-            formatted[view.name] = {
+            formatted[view.name] = cast(FormattedCashflowValue, {
                 leaf_name: value
                 for leaf_name, value in zip(view.leaf_names, view_values)
-            }
+            })
     return formatted
 
 
@@ -1650,7 +1660,7 @@ def _run_midpoint_solver(
     devices: tuple[jax.Device, ...],
 ) -> _SolverResult:
     if len(devices) <= 1:
-        return _midpoint_solver(
+        return cast(_SolverResult, _midpoint_solver(
             state_0,
             duration_mid,
             duration_left,
@@ -1661,7 +1671,7 @@ def _run_midpoint_solver(
             record_every,
             cashflow_components,
             cashflow_views,
-        )
+        ))
 
     sharded_state_0, batch_size = _shard_batch_tree(state_0, len(devices))
     scalar_kwargs, batch_kwargs = _split_scalar_and_batch_kwargs(intensity_kwargs)
@@ -1799,7 +1809,7 @@ def solve(
     declared_index = {
         state: i for i, state in enumerate(canonical.states)
     }
-    state_0 = []
+    state_0: list[StateCarry] = []
     for state_name in reduced.reachable_states:
         density = jnp.zeros((batch_size, solver_steps), dtype=value_dtype)
         point_mass = None

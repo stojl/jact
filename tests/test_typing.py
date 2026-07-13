@@ -22,7 +22,13 @@ from jact.probability import (
     _point_mass_callback,
     _state_probability_callback,
 )
-from jact.solver import _canonicalize_initial, _SolverResult
+from jact.solver import (
+    _canonicalize_initial,
+    _format_cashflow_view_values,
+    _shard_batch_tree,
+    _SolverResult,
+    _unshard_batch_tree,
+)
 
 
 def _grid_callable(
@@ -87,6 +93,12 @@ def _internal_type_check(
     shortcut: jact.InitialDistribution = _canonicalize_initial(
         initial_value, 0.0
     )
+    tree = {"value": jnp.ones((1, 2))}
+    sharded_tree: dict[str, jnp.ndarray]
+    sharded_tree, original_size = _shard_batch_tree(tree, 1)
+    unsharded_tree: dict[str, jnp.ndarray] = _unshard_batch_tree(
+        sharded_tree, original_size
+    )
     normalised_view = _normalised_view(Total(weight=jnp.asarray(0.5)))
     normalised_weight: jact.typing.Weight | Scalar | None = (
         normalised_view.weight
@@ -98,6 +110,20 @@ def _internal_type_check(
         sources=(),
         leaf_names=("total",),
         output="single",
+    )
+    rebuilt: jact.ModelResult = jact.ModelResult.tree_unflatten(
+        ("healthy",),
+        (state_probability, {"total": state_probability}),
+    )
+    formatted_cashflows: dict[
+        str, jnp.ndarray | dict[str, jnp.ndarray]
+    ] = _format_cashflow_view_values(
+        _SolverResult(
+            probability=None,
+            cashflow_streams=((state_probability,),),
+            cashflow_terminal=((state_probability,),),
+        ),
+        (prepared_view,),
     )
     _ = (
         canonical,
@@ -113,6 +139,9 @@ def _internal_type_check(
         sliced_output,
         shortcut,
         prepared_view,
+        unsharded_tree,
+        rebuilt,
+        formatted_cashflows,
     )
 
 
