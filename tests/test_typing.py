@@ -10,6 +10,7 @@ import jax.numpy as jnp
 
 import jact
 from jact.initial_distribution import _CanonicalDistribution, _component_payload
+from jact.model import ReducedModel, SolverMatrix, _make_slice_wrapper
 from jact.probability import (
     ComponentsResult,
     PointMassResult,
@@ -51,6 +52,7 @@ weight: jact.typing.Weight = _weight_callable
 
 def _internal_type_check(
     initial: jact.InitialDistribution,
+    model: jact.Model,
     state: tuple[StateCarry, ...],
 ) -> None:
     """Static assertions for the internal types tightened in this pass."""
@@ -70,6 +72,15 @@ def _internal_type_check(
     probability: Any = solver_result.probability
     streams = solver_result.cashflow_streams
     terminal = solver_result.cashflow_terminal
+    reduced: ReducedModel = model.reduce("healthy")
+    solver_matrix: SolverMatrix = reduced.solver_matrix
+    sliced_intensity: jact.typing.Intensity = _make_slice_wrapper(
+        grouped_intensity, 0
+    )
+    sliced_output: jact.typing.ArrayLike = sliced_intensity(
+        jnp.asarray(0.0),
+        jnp.zeros((1, 1)),
+    )
     _ = (
         canonical,
         mass_value,
@@ -80,6 +91,8 @@ def _internal_type_check(
         probability,
         streams,
         terminal,
+        solver_matrix,
+        sliced_output,
     )
 
 

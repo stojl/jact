@@ -1,10 +1,11 @@
+# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportPrivateUsage=false
 """Model definition: a StateSpace bound to intensity callables."""
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, TypeAlias
 
 import jax
 import jax.numpy as jnp
@@ -23,13 +24,19 @@ from .typing import GroupedIntensity, Intensity
 __all__ = ["Model", "ReducedModel", "TransitionInfo"]
 
 
+Transition: TypeAlias = tuple[str, str]
+Assignment: TypeAlias = Literal["transitions", "exits", "groups"]
+SolverRow: TypeAlias = tuple[Intensity | None, ...]
+SolverMatrix: TypeAlias = tuple[SolverRow, ...]
+
+
 @dataclass(frozen=True)
 class TransitionInfo:
     """Metadata about how a transition's intensity is provided."""
 
     source: str
     target: str
-    assignment: str  # "transitions", "exits", or "groups"
+    assignment: Assignment
     callable: Intensity | GroupedIntensity
     index: int | None  # index into multi-output callable, None for single
 
@@ -55,7 +62,7 @@ class ReducedModel:
 
     initial_states: tuple[str, ...]
     reachable_states: tuple[str, ...]
-    solver_matrix: tuple[tuple[Intensity | None, ...], ...]
+    solver_matrix: SolverMatrix
     n_states: int
 
 
@@ -79,15 +86,17 @@ class Model:
     def __init__(
         self,
         state_space: StateSpace,
-        transitions: Mapping[tuple[str, str], Intensity] | None = None,
+        transitions: Mapping[Transition, Intensity] | None = None,
         exits: Mapping[str, GroupedIntensity] | None = None,
-        groups: Mapping[GroupedIntensity, Sequence[tuple[str, str]]] | None = None,
+        groups: Mapping[GroupedIntensity, Sequence[Transition]] | None = None,
     ) -> None:
         self._state_space = state_space
-        self._transitions_map = transitions or {}
-        self._exits_map = exits or {}
-        self._groups_map = groups or {}
-        self._transition_info: dict[tuple[str, str], TransitionInfo] = {}
+        self._transitions_map: Mapping[Transition, Intensity] = transitions or {}
+        self._exits_map: Mapping[str, GroupedIntensity] = exits or {}
+        self._groups_map: Mapping[
+            GroupedIntensity, Sequence[Transition]
+        ] = groups or {}
+        self._transition_info: dict[Transition, TransitionInfo] = {}
 
         self._validate_and_register()
         self._build_full_solver_matrix()
@@ -98,7 +107,7 @@ class Model:
 
     def _validate_and_register(self) -> None:
         """Check that every transition is covered exactly once."""
-        covered: dict[tuple[str, str], str] = {}
+        covered: dict[Transition, Assignment] = {}
 
         # Single transitions
         for (src, tgt), fn in self._transitions_map.items():
@@ -146,10 +155,10 @@ class Model:
         self,
         src: str,
         tgt: str,
-        assignment: str,
+        assignment: Assignment,
         fn: Intensity | GroupedIntensity,
         index: int | None,
-        covered: dict[tuple[str, str], str],
+        covered: dict[Transition, Assignment],
     ) -> None:
         """Register a single transition, checking for conflicts."""
         if not callable(fn):
@@ -234,7 +243,7 @@ class Model:
         if len(declared_initial) != len(set(declared_initial)):
             raise ValueError("initial state set must not contain duplicates.")
 
-        reachable_set = set()
+        reachable_set: set[str] = set()
         for state in declared_initial:
             reachable_set.update(self._state_space.reachable_from(state))
 
@@ -250,10 +259,12 @@ class Model:
         n_reachable = len(reachable)
 
         # Map reachable state names to their indices in the full matrix
-        full_indices = [self._state_space.state_index(s) for s in reachable]
+        full_indices: tuple[int, ...] = tuple(
+            self._state_space.state_index(state) for state in reachable
+        )
 
         # Extract the submatrix
-        reduced_matrix = tuple(
+        reduced_matrix: SolverMatrix = tuple(
             tuple(
                 self._full_solver_matrix[full_indices[i]][full_indices[j]]
                 for j in range(n_reachable)
@@ -398,7 +409,7 @@ class Model:
     # ------------------------------------------------------------------ #
 
     def __repr__(self) -> str:
-        assignments = []
+        assignments: list[str] = []
         for (src, tgt), info in sorted(self._transition_info.items()):
             assignments.append(f"  {src}->{tgt}: {info.assignment}")
         body = "\n".join(assignments)
@@ -422,8 +433,13 @@ def _make_slice_wrapper(fn: GroupedIntensity, index: int) -> Intensity:
         transition output broadcastable to ``(batch, D)``.
     """
 
-    def wrapper(t, grid, **kwargs):
-        full_output = jnp.asarray(fn(t, grid, **kwargs))
+    def wrapper(
+        t: jnp.ndarray,
+        grid: jnp.ndarray,
+        **kwargs: Any,
+    ) -> ArrayLike:
+        full_output: jnp.ndarray = jnp.asarray(fn(t, grid, **kwargs))
+        size: int | None
         try:
             size = full_output.shape[0]
         except Exception:
