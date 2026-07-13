@@ -1,9 +1,11 @@
+# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportUntypedClassDecorator=false
+
 """Typed result of `Model.solve()`."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import jax
 
@@ -51,8 +53,9 @@ class ModelResult:
             if x is None:
                 return "None"
             if isinstance(x, dict):
+                values = cast(dict[object, Any], x)
                 inner = ", ".join(
-                    f"{k!r}: {summarize(v)}" for k, v in x.items()
+                    f"{k!r}: {summarize(v)}" for k, v in values.items()
                 )
                 return "{" + inner + "}"
             if hasattr(x, "shape") and hasattr(x, "dtype"):

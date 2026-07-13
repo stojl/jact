@@ -1,11 +1,25 @@
+# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false
+
 """Callable protocols used by jact models and cashflows."""
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeAlias
 
 import jax.numpy as jnp
-from jax.typing import ArrayLike
+import numpy as np
+from jax import Array
+
+ArrayLike: TypeAlias = (
+    Array
+    | np.ndarray[Any, Any]
+    | np.bool_
+    | np.number[Any]
+    | bool
+    | int
+    | float
+    | complex
+)
 
 __all__ = [
     "ArrayLike",
@@ -72,7 +86,9 @@ class When(Protocol):
     The return value must be scalar or broadcastable to ``(batch,)``.
     """
 
-    def __call__(self, **kwargs: Any) -> ArrayLike: ...
+    def __call__(
+        self, **kwargs: Any
+    ) -> ArrayLike: ...
 
 
 class DurationAt(Protocol):
@@ -81,7 +97,9 @@ class DurationAt(Protocol):
     The return value must be scalar or broadcastable to ``(batch,)``.
     """
 
-    def __call__(self, **kwargs: Any) -> ArrayLike: ...
+    def __call__(
+        self, **kwargs: Any
+    ) -> ArrayLike: ...
 
 
 class Weight(Protocol):
@@ -90,4 +108,6 @@ class Weight(Protocol):
     The return value must be scalar or broadcastable to ``(batch,)``.
     """
 
-    def __call__(self, t: jnp.ndarray, /, **kwargs: Any) -> ArrayLike: ...
+    def __call__(
+        self, t: jnp.ndarray, /, **kwargs: Any
+    ) -> ArrayLike: ...

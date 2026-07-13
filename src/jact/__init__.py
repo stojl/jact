@@ -1,3 +1,5 @@
+# pyright: strict, reportMissingImports=false
+
 """jact — JAX-based transition probability computation for multi-state models.
 
 A framework for computing transition probabilities in semi-Markov
@@ -40,7 +42,7 @@ from . import cashflows, probability, typing, wrappers
 from .initial_distribution import InitialDistribution
 from .model import Model
 from .result import ModelResult
-from .solver import solve
+from .solver import solve  # pyright: ignore[reportUnknownVariableType]
 from .state_space import StateSpace
 
 try:
