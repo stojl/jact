@@ -1,5 +1,7 @@
 """Typed result of `Model.solve()`."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,11 +32,17 @@ class ModelResult:
     probability: Any = None
     cashflows: Any = None
 
-    def tree_flatten(self):
+    def tree_flatten(
+        self,
+    ) -> tuple[tuple[Any, Any], tuple[str, ...]]:
         return (self.probability, self.cashflows), self.states
 
     @classmethod
-    def tree_unflatten(cls, aux, children):
+    def tree_unflatten(
+        cls,
+        aux: tuple[str, ...],
+        children: tuple[Any, Any],
+    ) -> ModelResult:
         probability, cashflows = children
         return cls(states=aux, probability=probability, cashflows=cashflows)
 

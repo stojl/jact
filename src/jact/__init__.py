@@ -36,7 +36,7 @@ Example
 
 from importlib.metadata import PackageNotFoundError, version
 
-from . import cashflows, probability, wrappers
+from . import cashflows, probability, typing, wrappers
 from .initial_distribution import InitialDistribution
 from .model import Model
 from .result import ModelResult
@@ -57,5 +57,6 @@ __all__ = [
     "solve",
     "cashflows",
     "probability",
+    "typing",
     "wrappers",
 ]

@@ -7,8 +7,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import jax
 import jax.numpy as jnp
-
-ArrayLike = Any
+from jax.typing import ArrayLike
 
 __all__ = ["InitialDistribution"]
 
@@ -134,7 +133,7 @@ class InitialDistribution:
         self,
         components: Mapping[str, Mapping[str, ArrayLike]],
         normalise: bool = True,
-    ):
+    ) -> None:
         if not components:
             raise ValueError("components must be a non-empty mapping.")
 
@@ -268,7 +267,12 @@ class InitialDistribution:
     def declared_initial_states(self) -> tuple[str, ...] | None:
         return self._declared_states
 
-    def tree_flatten(self):
+    def tree_flatten(
+        self,
+    ) -> tuple[
+        tuple[ArrayLike | None, ...],
+        tuple[str, tuple[str, ...] | None, bool, int],
+    ]:
         children = (
             *self._masses,
             *self._durations,
@@ -284,7 +288,11 @@ class InitialDistribution:
         return children, aux
 
     @classmethod
-    def tree_unflatten(cls, aux, children):
+    def tree_unflatten(
+        cls,
+        aux: tuple[str, tuple[str, ...] | None, bool, int],
+        children: tuple[ArrayLike | None, ...],
+    ) -> InitialDistribution:
         kind, declared_states, normalise, n_components = aux
         masses = tuple(children[:n_components])
         durations = tuple(children[n_components : 2 * n_components])
@@ -379,10 +387,10 @@ class InitialDistribution:
         if self._kind != "per_individual":
             return
 
+        indices = jnp.asarray(self._state_indices)
+        n_states = len(self.active_initial_states(model_states))
+        is_valid = jnp.all((indices >= 0) & (indices < n_states))
         try:
-            indices = jnp.asarray(self._state_indices)
-            n_states = len(self.active_initial_states(model_states))
-            is_valid = jnp.all((indices >= 0) & (indices < n_states))
             if not bool(is_valid):
                 _raise_invalid_per_individual_indices(False)
         except Exception as exc:  # pragma: no cover - tracer path

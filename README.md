@@ -177,10 +177,13 @@ The top-level `jact` namespace exposes the core types: `jact.StateSpace`,
 
 - `jact.cashflows` for declarations and views (`StateRate`,
   `TransitionLump`, `ScheduledEvent`, `DurationEvent`, `Raw`, `Group`,
-  `Total`, `ByState`, `ByKind`).
+  `Total`, `ByState`, `ByKind`) and their `CashflowComponent` and
+  `CashflowView` unions.
 - `jact.probability` for output reducers (`StateProbability`,
   `DensityProbability`, `Density`, `PointMass`, `MarginalComponents`,
   `Full`).
+- `jact.typing` for callable protocols (`Intensity`, `GroupedIntensity`,
+  `Payment`, `When`, `DurationAt`, `Weight`).
 - `jact.wrappers` for fitted-model intensity helpers (`bind_intensity`,
   `bind_grouped_intensity`, `bind_exit_intensity`).
 

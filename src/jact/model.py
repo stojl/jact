@@ -2,25 +2,23 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import jax
 import jax.numpy as jnp
+from jax.typing import ArrayLike
 
 from .cashflows import (
-    ByKind,
-    ByState,
     CashflowDeclaration,
-    Group,
-    Raw,
-    Total,
+    CashflowView,
 )
 from .initial_distribution import InitialDistribution
-from .probability import ProbabilityOutput, StateProbability
+from .probability import CallbackFn, ProbabilityOutput, StateProbability
 from .result import ModelResult
 from .state_space import StateSpace
+from .typing import GroupedIntensity, Intensity
 
 __all__ = ["Model", "ReducedModel", "TransitionInfo"]
 
@@ -32,7 +30,7 @@ class TransitionInfo:
     source: str
     target: str
     assignment: str  # "transitions", "exits", or "groups"
-    callable: Any
+    callable: Intensity | GroupedIntensity
     index: int | None  # index into multi-output callable, None for single
 
 
@@ -57,7 +55,7 @@ class ReducedModel:
 
     initial_states: tuple[str, ...]
     reachable_states: tuple[str, ...]
-    solver_matrix: tuple[tuple[Any, ...], ...]
+    solver_matrix: tuple[tuple[Intensity | None, ...], ...]
     n_states: int
 
 
@@ -81,10 +79,10 @@ class Model:
     def __init__(
         self,
         state_space: StateSpace,
-        transitions: Mapping[tuple[str, str], Any] | None = None,
-        exits: Mapping[str, Any] | None = None,
-        groups: Mapping[Any, Sequence[tuple[str, str]]] | None = None,
-    ):
+        transitions: Mapping[tuple[str, str], Intensity] | None = None,
+        exits: Mapping[str, GroupedIntensity] | None = None,
+        groups: Mapping[GroupedIntensity, Sequence[tuple[str, str]]] | None = None,
+    ) -> None:
         self._state_space = state_space
         self._transitions_map = transitions or {}
         self._exits_map = exits or {}
@@ -149,7 +147,7 @@ class Model:
         src: str,
         tgt: str,
         assignment: str,
-        fn: Any,
+        fn: Intensity | GroupedIntensity,
         index: int | None,
         covered: dict[tuple[str, str], str],
     ) -> None:
@@ -188,7 +186,7 @@ class Model:
         """
         J = self._state_space.n_states
 
-        self._full_solver_matrix: list[list[Any]] = [
+        self._full_solver_matrix: list[list[Intensity | None]] = [
             [None for _ in range(J)] for _ in range(J)
         ]
 
@@ -309,18 +307,18 @@ class Model:
 
     def solve(
         self,
-        initial: str | jnp.ndarray | InitialDistribution,
+        initial: str | ArrayLike | InitialDistribution,
         horizon: int,
         steps_per_unit: int,
-        initial_duration: Any = 0.0,
-        probability: None | ProbabilityOutput | Callable = StateProbability(),
+        initial_duration: ArrayLike = 0.0,
+        probability: None | ProbabilityOutput | CallbackFn = StateProbability(),
         cashflows: CashflowDeclaration | None = None,
         cashflow_views: (
-            Mapping[str, Raw | Group | Total | ByState | ByKind] | None
+            Mapping[str, CashflowView] | None
         ) = None,
         record_every: int = 1,
         devices: int | Sequence[jax.Device] | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> ModelResult:
         """Compute transition probabilities from a documented initial condition.
 
@@ -407,7 +405,7 @@ class Model:
         return f"Model(\n{body}\n)"
 
 
-def _make_slice_wrapper(fn: Callable, index: int) -> Callable:
+def _make_slice_wrapper(fn: GroupedIntensity, index: int) -> Intensity:
     """Create a callable that evaluates fn and returns output[index].
 
     Parameters
@@ -425,7 +423,7 @@ def _make_slice_wrapper(fn: Callable, index: int) -> Callable:
     """
 
     def wrapper(t, grid, **kwargs):
-        full_output = fn(t, grid, **kwargs)
+        full_output = jnp.asarray(fn(t, grid, **kwargs))
         try:
             size = full_output.shape[0]
         except Exception:

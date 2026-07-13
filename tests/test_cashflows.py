@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -152,7 +153,7 @@ def test_cashflow_declaration_validation():
         })
 
     with pytest.raises(TypeError, match="cashflow components"):
-        ss.cashflows({"bad": object()})
+        ss.cashflows({"bad": object()})  # type: ignore[arg-type]
 
     cashflows = ss.cashflows({"premium": jact.cashflows.StateRate({
         "healthy": _constant_payment(1.0)
@@ -245,6 +246,34 @@ def test_duration_event_declaration_validation_and_mapping_copies():
     assert isinstance(component, jact.cashflows.DurationEvent)
     assert set(component.at_durations) == {"disabled"}
     assert set(component.payments) == {"disabled"}
+
+
+def test_rank_zero_array_duration_target_survives_jitted_solve():
+    ss = jact.StateSpace(["active"], [])
+    model = ss.build(transitions={})
+    cashflows = ss.cashflows({
+        "milestone": jact.cashflows.DurationEvent(
+            at_durations={"active": jnp.array(0.5)},
+            payments={"active": _constant_payment(3.0)},
+        )
+    })
+
+    component = cashflows.component("milestone")
+    assert isinstance(component, jact.cashflows.DurationEvent)
+    assert component.at_durations["active"] == 0.5
+
+    result = jax.jit(
+        lambda: model.solve(
+            initial="active",
+            horizon=1,
+            steps_per_unit=4,
+            probability=None,
+            cashflows=cashflows,
+            cashflow_views={"pv": jact.cashflows.Total(terminal=True)},
+        )
+    )()
+
+    assert jnp.allclose(result.cashflows["pv"], jnp.array([3.0]))
 
 
 def test_discount_factor_removed_from_public_api():

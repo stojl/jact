@@ -7,6 +7,8 @@ from typing import Any
 
 import jax.numpy as jnp
 
+from .typing import GroupedIntensity, Intensity
+
 __all__ = [
     "bind_intensity",
     "bind_grouped_intensity",
@@ -21,7 +23,7 @@ def bind_intensity(
     *,
     model_state: Mapping[str, Any] | None = None,
     apply_kwargs: Mapping[str, Any] | None = None,
-) -> Callable:
+) -> Intensity:
     """Bind a fitted model apply function as a single-transition intensity."""
     _validate_common(apply_fn, feature_fn, model_state, apply_kwargs)
     bound_apply_kwargs = {} if apply_kwargs is None else dict(apply_kwargs)
@@ -45,7 +47,7 @@ def bind_grouped_intensity(
     output_axis: int = -1,
     model_state: Mapping[str, Any] | None = None,
     apply_kwargs: Mapping[str, Any] | None = None,
-) -> Callable:
+) -> GroupedIntensity:
     """Bind a fitted model apply function as a grouped intensity callable."""
     _validate_grouped(
         apply_fn,
@@ -78,7 +80,7 @@ def bind_exit_intensity(
     output_axis: int = -1,
     model_state: Mapping[str, Any] | None = None,
     apply_kwargs: Mapping[str, Any] | None = None,
-) -> Callable:
+) -> GroupedIntensity:
     """Bind a fitted model apply function for an ``exits={...}`` assignment."""
     return bind_grouped_intensity(
         apply_fn,

@@ -12,6 +12,12 @@ import jax.numpy as jnp
 import pytest
 
 import jact
+from jact._cashflow_ir import (
+    ComponentSource,
+    PreparedCashflowView,
+    StatePayment,
+    StateRateSpec,
+)
 from jact.probability import (
     Density,
     DensityProbability,
@@ -23,9 +29,9 @@ from jact.probability import (
     _PointMass,
 )
 from jact.solver import (
-    _KIND_STATE_RATE,
-    _SOURCE_COMPONENT,
     _midpoint_solver,
+    _prepare_cashflow_components,
+    _prepare_cashflow_views,
     _shard_batch_tree,
     _split_scalar_and_batch_kwargs,
     _unshard_batch_tree,
@@ -494,15 +500,15 @@ class TestSolverContinuityAndStability:
             {},
             lambda _state: None,
             solver_steps,
-            ((_KIND_STATE_RATE, ((0, unit_payment),)),),
+            (StateRateSpec((StatePayment(0, unit_payment),)),),
             (
-                (
-                    "annuity",
-                    True,
-                    None,
-                    ((_SOURCE_COMPONENT, 0),),
-                    ("annuity",),
-                    "single",
+                PreparedCashflowView(
+                    name="annuity",
+                    terminal=True,
+                    weight=None,
+                    sources=(ComponentSource(0),),
+                    leaf_names=("annuity",),
+                    output="single",
                 ),
             ),
         )
@@ -1281,6 +1287,47 @@ class TestBuiltInCallbacks:
         illness_death_model.solve(probability=probability_output, **kwargs)
         cache_after_first = _solver_cache._cache_size()
         illness_death_model.solve(probability=probability_output, **kwargs)
+        cache_after_second = _solver_cache._cache_size()
+
+        assert cache_after_first == cache_before + 1
+        assert cache_after_second == cache_after_first
+
+    def test_equivalent_prepared_cashflows_are_hashable_and_reuse_cache(
+        self, illness_death_model
+    ):
+        _solver_cache.clear_cache()
+        payment = _constant_payment(1.0)
+        cashflows = illness_death_model.state_space.cashflows({
+            "annuity": jact.cashflows.StateRate({"healthy": payment})
+        })
+        reduced = illness_death_model.reduce(("healthy",))
+        components = _prepare_cashflow_components(
+            cashflows,
+            reduced.reachable_states,
+            reduced.solver_matrix,
+        )
+        views = _prepare_cashflow_views(
+            cashflows,
+            {"pv": jact.cashflows.Total(terminal=True)},
+            reduced.reachable_states,
+        )
+
+        assert isinstance(hash(components), int)
+        assert isinstance(hash(views), int)
+
+        kwargs = dict(
+            initial="healthy",
+            horizon=1,
+            steps_per_unit=8,
+            probability=None,
+            cashflows=cashflows,
+            cashflow_views={"pv": jact.cashflows.Total(terminal=True)},
+            age=jnp.arange(2, dtype=jnp.float32),
+        )
+        cache_before = _solver_cache._cache_size()
+        illness_death_model.solve(**kwargs)
+        cache_after_first = _solver_cache._cache_size()
+        illness_death_model.solve(**kwargs)
         cache_after_second = _solver_cache._cache_size()
 
         assert cache_after_first == cache_before + 1

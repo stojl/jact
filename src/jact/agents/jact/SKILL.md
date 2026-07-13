@@ -422,7 +422,7 @@ expected_time = result.cashflows["expected_time"]
 
 - Do not import domain types such as `StateRate`, `Raw`, or `StateProbability`
   from the top-level `jact` namespace. Use `jact.cashflows`,
-  `jact.probability`, and `jact.wrappers`.
+  `jact.probability`, `jact.typing`, and `jact.wrappers`.
 - Do not compute full duration density just to integrate it manually when a
   cashflow component and terminal view can express the same integral.
 - Do not mutate model topology or transition assignments after construction.

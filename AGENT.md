@@ -15,7 +15,7 @@ pytest -x                         # stop on first failure
 ```
 
 **Quality checks:**
-- **pyright** (basic mode) catches type mismatches and undefined names
+- **pyright** (standard mode) checks public and internal type consistency
 - **ruff** enforces import order, detects unused code, and flags common errors
 - Run both before committing: `pyright && ruff check src/jact`
 
@@ -58,11 +58,11 @@ specification in the repo.
   (`StateProbability`, `DensityProbability`, `Density`, `PointMass`,
   `MarginalComponents`, `Full`), a custom callable
   `(state) -> PyTree`, or `None`. Strings are rejected.
-- Public types live under three submodules: `jact.cashflows` (declarations
-  and views), `jact.probability` (output reducers), and `jact.wrappers`
-  (fitted-model intensity helpers). The top level only
-  exposes `StateSpace`, `Model`, `InitialDistribution`, `ModelResult`,
-  `solve`, and the submodules. There are no flat aliases.
+- Public types live under four submodules: `jact.cashflows` (declarations
+  and views), `jact.probability` (output reducers), `jact.typing` (callable
+  protocols), and `jact.wrappers` (fitted-model intensity helpers). The top
+  level only exposes `StateSpace`, `Model`, `InitialDistribution`,
+  `ModelResult`, `solve`, and the submodules. There are no flat aliases.
 - If `cashflows` is supplied and `cashflow_views` is omitted or `None`, the
   solver defaults to `{"raw": jact.cashflows.Raw()}`. `cashflow_views={}`
   is allowed and returns an empty mapping.

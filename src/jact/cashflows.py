@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from numbers import Number
-from typing import Any
+from typing import Any, TypeAlias
 
 import jax.numpy as jnp
+from jax.typing import ArrayLike
+
+from .state_space import StateSpace
+from .typing import DurationAt, Payment, Weight, When
 
 Scalar = int | float
-Weight = Callable[..., jnp.ndarray] | Scalar | jnp.ndarray | None
 
 __all__ = [
     "ByKind",
     "ByState",
+    "CashflowComponent",
     "CashflowDeclaration",
+    "CashflowView",
     "DurationEvent",
     "Group",
     "Raw",
@@ -30,30 +35,30 @@ __all__ = [
 class StateRate:
     """Payment-rate callables attached to occupied states."""
 
-    payments: Mapping[str, Callable[..., jnp.ndarray]]
+    payments: Mapping[str, Payment]
 
 
 @dataclass(frozen=True)
 class TransitionLump:
     """Lump-sum payment callables attached to transitions."""
 
-    payments: Mapping[tuple[str, str], Callable[..., jnp.ndarray]]
+    payments: Mapping[tuple[str, str], Payment]
 
 
 @dataclass(frozen=True)
 class ScheduledEvent:
     """State-conditioned payments at deterministic event times."""
 
-    when: Callable[..., jnp.ndarray]
-    payments: Mapping[str, Callable[..., jnp.ndarray]]
+    when: When
+    payments: Mapping[str, Payment]
 
 
 @dataclass(frozen=True)
 class DurationEvent:
     """State-duration conditioned one-time payments."""
 
-    at_durations: Mapping[str, float | Callable[..., jnp.ndarray]]
-    payments: Mapping[str, Callable[..., jnp.ndarray]]
+    at_durations: Mapping[str, ArrayLike | DurationAt]
+    payments: Mapping[str, Payment]
 
 
 @dataclass(frozen=True)
@@ -61,7 +66,7 @@ class Raw:
     """Return one raw component or all raw components."""
 
     name: str | None = None
-    weight: Weight = None
+    weight: Weight | Scalar | ArrayLike | None = None
     terminal: bool = False
 
 
@@ -70,7 +75,7 @@ class Group:
     """Return the sum of selected raw components."""
 
     members: Sequence[str]
-    weight: Weight = None
+    weight: Weight | Scalar | ArrayLike | None = None
     terminal: bool = False
 
 
@@ -78,7 +83,7 @@ class Group:
 class Total:
     """Return the sum of all raw components."""
 
-    weight: Weight = None
+    weight: Weight | Scalar | ArrayLike | None = None
     terminal: bool = False
 
 
@@ -86,7 +91,7 @@ class Total:
 class ByState:
     """Return cashflows split by reachable state."""
 
-    weight: Weight = None
+    weight: Weight | Scalar | ArrayLike | None = None
     terminal: bool = False
 
 
@@ -94,19 +99,22 @@ class ByState:
 class ByKind:
     """Return cashflows split by component kind."""
 
-    weight: Weight = None
+    weight: Weight | Scalar | ArrayLike | None = None
     terminal: bool = False
+
+
+CashflowComponent: TypeAlias = (
+    StateRate | TransitionLump | ScheduledEvent | DurationEvent
+)
+CashflowView: TypeAlias = Raw | Group | Total | ByState | ByKind
 
 
 @dataclass(frozen=True)
 class CashflowDeclaration:
     """Validated cashflow components bound to a state-space topology."""
 
-    state_space: Any
-    components: tuple[
-        tuple[str, StateRate | TransitionLump | ScheduledEvent | DurationEvent],
-        ...,
-    ]
+    state_space: StateSpace
+    components: tuple[tuple[str, CashflowComponent], ...]
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -115,7 +123,7 @@ class CashflowDeclaration:
     def component(
         self,
         name: str,
-    ) -> StateRate | TransitionLump | ScheduledEvent | DurationEvent:
+    ) -> CashflowComponent:
         for component_name, component in self.components:
             if component_name == name:
                 return component
@@ -146,10 +154,15 @@ def _validate_at_duration_mapping(
 ) -> Mapping[Any, Any]:
     if not isinstance(at_durations, Mapping) or not at_durations:
         raise ValueError(f"{field} must be a non-empty mapping.")
-    for at_duration in at_durations.values():
-        if not (callable(at_duration) or _is_scalar_array_like(at_duration)):
+    normalised = {}
+    for state, at_duration in at_durations.items():
+        if callable(at_duration):
+            normalised[state] = at_duration
+        elif _is_scalar_array_like(at_duration):
+            normalised[state] = jnp.asarray(at_duration).item()
+        else:
             raise TypeError(f"{field} values must be scalar or callable.")
-    return dict(at_durations)
+    return normalised
 
 
 def _validate_state_payments(state_space: Any, payments: Mapping[Any, Any]) -> None:
@@ -175,19 +188,14 @@ def _normalise_weight(weight: Any) -> Any:
 
 
 def validate_cashflow_components(
-    state_space: Any,
-    components: Mapping[
-        str,
-        StateRate | TransitionLump | ScheduledEvent | DurationEvent,
-    ],
+    state_space: StateSpace,
+    components: Mapping[str, CashflowComponent],
 ) -> CashflowDeclaration:
     """Validate and freeze a component mapping for a state space."""
     if not isinstance(components, Mapping) or not components:
         raise ValueError("cashflows() requires a non-empty component mapping.")
 
-    frozen: list[
-        tuple[str, StateRate | TransitionLump | ScheduledEvent | DurationEvent]
-    ] = []
+    frozen: list[tuple[str, CashflowComponent]] = []
     seen: set[str] = set()
     for name, component in components.items():
         _check_component_name(name)
@@ -281,8 +289,8 @@ def _normalised_view_kwargs(view: Any) -> dict[str, Any]:
 
 def validate_cashflow_views(
     declaration: CashflowDeclaration,
-    views: Mapping[str, Raw | Group | Total | ByState | ByKind] | None,
-) -> tuple[tuple[str, Raw | Group | Total | ByState | ByKind], ...]:
+    views: Mapping[str, CashflowView] | None,
+) -> tuple[tuple[str, CashflowView], ...]:
     """Validate and freeze solve-time cashflow views."""
     if views is None:
         views = {"raw": Raw()}
@@ -290,7 +298,7 @@ def validate_cashflow_views(
         raise TypeError("cashflow_views must be a mapping or None.")
 
     component_names = set(declaration.names)
-    frozen: list[tuple[str, Raw | Group | Total | ByState | ByKind]] = []
+    frozen: list[tuple[str, CashflowView]] = []
     seen: set[str] = set()
     for name, view in views.items():
         if not isinstance(name, str) or not name:

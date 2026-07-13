@@ -15,7 +15,7 @@ from maintainer-only material.
 
 ## Packaging intent
 
-PyPI artifacts should contain the package from `src/` plus core metadata such
-as `README.md` and `LICENSE`. Internal notes, archive material, tools, tests,
-and benchmarks are repository assets and are excluded from distribution
-artifacts.
+PyPI artifacts should contain the package from `src/`, its PEP 561 `py.typed`
+marker, and core metadata such as `README.md` and `LICENSE`. Internal notes,
+archive material, tools, tests, and benchmarks are repository assets and are
+excluded from distribution artifacts.
