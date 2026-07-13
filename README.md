@@ -201,6 +201,8 @@ For local development from this repository:
 
 ```bash
 pip install -e '.[dev]'
+pyright
+ruff check src tests
 pytest
 ```
 
@@ -221,6 +223,8 @@ Before cutting a PyPI release:
 rm -rf build dist src/*.egg-info
 python -m build --no-isolation
 python -m twine check dist/*
+pyright
+ruff check src tests
 pytest -q
 ```
 

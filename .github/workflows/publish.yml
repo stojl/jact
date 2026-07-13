@@ -43,6 +43,12 @@ jobs:
       - name: Run full test suite
         run: pytest -q
 
+      - name: Run Pyright
+        run: pyright
+
+      - name: Run Ruff
+        run: ruff check src tests
+
       - name: Build distributions
         run: python -m build
 
