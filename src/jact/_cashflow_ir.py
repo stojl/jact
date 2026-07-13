@@ -115,6 +115,7 @@ class PreparedCashflowView(NamedTuple):
 PreparedCashflowViews: TypeAlias = tuple[PreparedCashflowView, ...]
 CashflowLeaves: TypeAlias = tuple[jnp.ndarray, ...]
 CashflowViewValues: TypeAlias = tuple[CashflowLeaves, ...]
+CashflowStreamValues: TypeAlias = tuple[CashflowLeaves | None, ...]
 
 
 class StepAggregation(NamedTuple):

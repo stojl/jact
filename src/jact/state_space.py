@@ -1,10 +1,11 @@
+# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false
 """State space definition for multi-state models."""
 
 from __future__ import annotations
 
 import json
 from collections import deque
-from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Hashable, Iterable, Mapping, Sequence, TypeVar, cast
 
 import jax.numpy as jnp
 from jax.typing import ArrayLike
@@ -19,9 +20,12 @@ if TYPE_CHECKING:
 __all__ = ["StateSpace"]
 
 
-def _duplicates(values: Sequence[Any]) -> set[Any]:
-    seen = set()
-    repeated = set()
+_HashableT = TypeVar("_HashableT", bound=Hashable)
+
+
+def _duplicates(values: Sequence[_HashableT]) -> set[_HashableT]:
+    seen: set[_HashableT] = set()
+    repeated: set[_HashableT] = set()
     for value in values:
         if value in seen:
             repeated.add(value)
@@ -81,7 +85,7 @@ class StateSpace:
         transitions: Sequence[tuple[str, str]],
     ) -> None:
         for state in states:
-            if not isinstance(state, str):
+            if not isinstance(state, str):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise TypeError(
                     "State names must be strings, "
                     f"got {type(state)}."
@@ -434,10 +438,15 @@ class StateSpace:
         StateSpace
         """
         with open(path) as f:
-            data = json.load(f)
+            data = cast(dict[str, object], json.load(f))
+        states = cast(Iterable[str], data["states"])
+        raw_transitions = cast(Iterable[Sequence[str]], data["transitions"])
         return cls(
-            states=data["states"],
-            transitions=[tuple(t) for t in data["transitions"]],
+            states=states,
+            transitions=[
+                cast(tuple[str, str], tuple(transition))
+                for transition in raw_transitions
+            ],
         )
 
     # ------------------------------------------------------------------ #

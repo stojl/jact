@@ -1,9 +1,10 @@
+# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportUntypedClassDecorator=false
 """Initial state-and-duration distribution for solver entry."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, Sequence, cast
 
 import jax
 import jax.numpy as jnp
@@ -25,7 +26,7 @@ def _as_tuple_of_unique_states(
     if len(states) != len(set(states)):
         raise ValueError("initial_states must contain unique state names.")
     for state in states:
-        if not isinstance(state, str):
+        if not isinstance(state, str):  # pyright: ignore[reportUnnecessaryIsInstance]
             raise TypeError(
                 "initial_states must contain only strings, "
                 f"got {type(state)}"
@@ -55,7 +56,7 @@ def _validate_non_negative_if_concrete(name: str, value: ArrayLike) -> None:
 
 
 def _component_payload(
-    payload: Any,
+    payload: object,
 ) -> tuple[ArrayLike, ArrayLike]:
     if not isinstance(payload, Mapping):
         raise TypeError(
@@ -66,7 +67,8 @@ def _component_payload(
         raise ValueError(
             "Each component must contain both 'mass' and 'duration'."
         )
-    return payload["mass"], payload["duration"]
+    values = cast(Mapping[str, object], payload)
+    return cast(ArrayLike, values["mass"]), cast(ArrayLike, values["duration"])
 
 
 def _validate_integer_indices_if_concrete(states: ArrayLike) -> None:
@@ -143,7 +145,7 @@ class InitialDistribution:
         batch_size: int | None = None
 
         for state, payload in components.items():
-            if not isinstance(state, str):
+            if not isinstance(state, str):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise TypeError(
                     "components keys must be state names (strings), "
                     f"got {type(state)}"

@@ -513,7 +513,8 @@ class TestSolverContinuityAndStability:
             ),
         )
 
-        annuity = result["cashflow_terminal"][0][0]
+        assert result.cashflow_terminal is not None
+        annuity = result.cashflow_terminal[0][0]
         expected = (1.0 - jnp.exp(-rate * horizon)) / rate
 
         assert jnp.allclose(annuity, expected, atol=5e-6, rtol=0.0)

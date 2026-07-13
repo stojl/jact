@@ -1,3 +1,4 @@
+# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportUntypedFunctionDecorator=false, reportPrivateUsage=false
 """Semi-Markov solver with midpoint quadrature."""
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from jax.typing import ArrayLike
 
 from ._cashflow_ir import (
     CashflowComponentSpecs,
+    CashflowStreamValues,
     CashflowViewSource,
     CashflowViewValues,
     ComponentSource,
@@ -51,7 +53,7 @@ from .cashflows import (
     TransitionLump,
     validate_cashflow_views,
 )
-from .initial_distribution import InitialDistribution
+from .initial_distribution import InitialDistribution, _CanonicalDistribution
 from .model import Model
 from .probability import (
     CallbackFn,
@@ -91,6 +93,14 @@ class _SameStepTransfers(NamedTuple):
     chained_by_source: tuple[tuple[jnp.ndarray, ...], ...]
     next_inflow_zero: jnp.ndarray
     next_inflow_one: jnp.ndarray
+
+
+class _SolverResult(NamedTuple):
+    """Fixed internal solver output; callback leaves remain deliberately dynamic."""
+
+    probability: Any
+    cashflow_streams: CashflowStreamValues | None
+    cashflow_terminal: CashflowViewValues | None
 
 
 def _stack_state_densities(state: tuple[StateCarry, ...]) -> jnp.ndarray:
@@ -145,7 +155,7 @@ def _dense_state_to_tuple(
 
 
 def _broadcast_grid_output(
-    value: Any,
+    value: ArrayLike,
     target_shape: tuple[int, int],
     label: str,
 ) -> jnp.ndarray:
@@ -160,7 +170,7 @@ def _broadcast_grid_output(
 
 
 def _broadcast_vector_output(
-    value: Any,
+    value: ArrayLike,
     target_shape: tuple[int, ...],
     label: str,
 ) -> jnp.ndarray:
@@ -175,7 +185,7 @@ def _broadcast_vector_output(
 
 
 def _broadcast_point_output(
-    value: Any,
+    value: ArrayLike,
     batch_size: int,
     label: str,
 ) -> jnp.ndarray:
@@ -762,7 +772,7 @@ def _compute_cashflow_step(
                     contribution=contribution,
                 )
 
-        elif isinstance(component, DurationEventSpec):
+        elif isinstance(component, DurationEventSpec):  # pyright: ignore[reportUnnecessaryIsInstance]
             duration_event = duration_events[component_index]
             assert duration_event is not None
             for target in duration_event.targets:
@@ -1042,7 +1052,7 @@ def _shard_batch_tree(tree: Any, device_count: int) -> tuple[Any, int]:
     """Pad and shard a batch-major PyTree over a leading device axis."""
     batch_sizes: list[int] = []
 
-    def shard(value):
+    def shard(value: Any) -> Any:
         if value is None:
             return None
         arr = jnp.asarray(value)
@@ -1079,7 +1089,7 @@ def _unshard_batch_array(value: jnp.ndarray, original_batch_size: int) -> jnp.nd
 def _unshard_batch_tree(tree: Any, original_batch_size: int) -> Any:
     """Merge a pmapped solver output tree back onto the public batch axis."""
 
-    def unshard(value):
+    def unshard(value: Any) -> Any:
         if value is None:
             return None
         return _unshard_batch_array(jnp.asarray(value), original_batch_size)
@@ -1103,6 +1113,8 @@ def _add_selected_view_values(
     )
 
 
+# JAX accepts arbitrary PyTree axis specifications here, but its public typing
+# does not currently expose a corresponding recursive alias.
 _PMAP_IN_AXES: Any = (0, None, None, None, None, 0, None, None, None, None, None)
 _PMAP_STATIC_ARGNUMS = (3, 4, 7, 8, 9, 10)
 _jax_checkpoint: Callable[[Callable[..., Any]], Callable[..., Any]] = getattr(
@@ -1124,11 +1136,11 @@ def _midpoint_solver_pmapped_all_devices(
     solver_matrix: Sequence[Sequence[Intensity | None]],
     batch_kwargs: dict[str, jnp.ndarray],
     scalar_kwargs: dict[str, jnp.ndarray],
-    prob_callback: Callable[..., Any],
+    prob_callback: CallbackFn,
     record_every: int,
     cashflow_components: CashflowComponentSpecs = (),
     cashflow_views: PreparedCashflowViews = (),
-):
+) -> _SolverResult:
     intensity_kwargs = {**scalar_kwargs, **batch_kwargs}
     return _midpoint_solver(
         state_0,
@@ -1144,7 +1156,9 @@ def _midpoint_solver_pmapped_all_devices(
     )
 
 
-def _midpoint_solver_pmapped_on_devices(devices: tuple[jax.Device, ...]):
+def _midpoint_solver_pmapped_on_devices(
+    devices: tuple[jax.Device, ...],
+) -> Callable[..., _SolverResult]:
     return jax.pmap(
         _midpoint_solver_pmapped_wrapper,
         in_axes=_PMAP_IN_AXES,
@@ -1161,11 +1175,11 @@ def _midpoint_solver_pmapped_wrapper(
     solver_matrix: Sequence[Sequence[Intensity | None]],
     batch_kwargs: dict[str, jnp.ndarray],
     scalar_kwargs: dict[str, jnp.ndarray],
-    prob_callback: Callable[..., Any],
+    prob_callback: CallbackFn,
     record_every: int,
     cashflow_components: CashflowComponentSpecs = (),
     cashflow_views: PreparedCashflowViews = (),
-):
+) -> _SolverResult:
     return _midpoint_solver(
         state_0,
         duration_mid,
@@ -1198,11 +1212,11 @@ def _midpoint_solver(
     step_size: float,
     solver_matrix: Sequence[Sequence[Intensity | None]],
     intensity_kwargs: dict[str, jnp.ndarray],
-    prob_callback: Callable[..., Any],
+    prob_callback: CallbackFn,
     record_every: int,
     cashflow_components: CashflowComponentSpecs = (),
     cashflow_views: PreparedCashflowViews = (),
-):
+) -> _SolverResult:
     """Run the midpoint solver and record probability outputs."""
     n_steps = duration_mid.shape[-1]
     n_records = n_steps // record_every
@@ -1221,11 +1235,31 @@ def _midpoint_solver(
         intensity_kwargs,
     )
 
-    def block_scan(carry, block_start):
+    def block_scan(
+        carry: tuple[tuple[StateCarry, ...], CashflowViewValues],
+        block_start: jnp.ndarray,
+    ) -> tuple[
+        tuple[tuple[StateCarry, ...], CashflowViewValues],
+        tuple[Any, CashflowStreamValues],
+    ]:
         state_carry, terminal_carry = carry
         offsets = jnp.arange(record_every, dtype=duration_mid.dtype)
 
-        def step_scan(inner_carry, offset):
+        def step_scan(
+            inner_carry: tuple[
+                tuple[StateCarry, ...],
+                CashflowViewValues,
+                CashflowViewValues,
+            ],
+            offset: jnp.ndarray,
+        ) -> tuple[
+            tuple[
+                tuple[StateCarry, ...],
+                CashflowViewValues,
+                CashflowViewValues,
+            ],
+            None,
+        ]:
             inner_state, block_cashflows, terminal_cashflows = inner_carry
             current_t = block_start + offset * step_size
 
@@ -1297,42 +1331,36 @@ def _midpoint_solver(
     block_starts = jnp.arange(n_records, dtype=duration_mid.dtype) * (
         record_every * step_size
     )
-    (final_state, final_terminal), scan_output = jax.lax.scan(
+    (_final_state, final_terminal), scan_output = jax.lax.scan(
         block_scan,
         (state_0, terminal_0),
         block_starts,
     )
     probability, cashflow_streams = scan_output
 
+    def prepend_initial(arr: Any, init: Any) -> Any:
+        if init is None:
+            return None
+        return jnp.concatenate([jnp.expand_dims(init, axis=0), arr], axis=0)
+
     probability = jax.tree_util.tree_map(
-        lambda arr, init: (
-            None
-            if init is None
-            else jnp.concatenate([jnp.expand_dims(init, axis=0), arr], axis=0)
-        ),
+        prepend_initial,
         probability,
         initial_probability,
     )
 
-    result = {"probability": probability}
-    if has_cashflows:
-        result["cashflow_streams"] = cashflow_streams
-        result["cashflow_terminal"] = final_terminal
-    return result
+    return _SolverResult(
+        probability=probability,
+        cashflow_streams=cashflow_streams if has_cashflows else None,
+        cashflow_terminal=final_terminal if has_cashflows else None,
+    )
 
 
-def _get_reference_function(solver_matrix):
-    """Find the first non-None callable in the solver matrix."""
-    for row in solver_matrix:
-        for fn in row:
-            if fn is not None:
-                return fn
-    return None
-
-
-def _get_covariate_batch_size(kwargs: dict[str, Any]) -> int | None:
+def _get_covariate_batch_size(
+    kwargs: Mapping[str, jnp.ndarray],
+) -> int | None:
     batch_size = None
-    for name, value in kwargs.items():
+    for value in kwargs.values():
         shape = jnp.shape(value)
         if len(shape) == 0:
             continue
@@ -1344,7 +1372,7 @@ def _get_covariate_batch_size(kwargs: dict[str, Any]) -> int | None:
 
 
 def _split_scalar_and_batch_kwargs(
-    kwargs: dict[str, Any],
+    kwargs: Mapping[str, jnp.ndarray],
 ) -> tuple[dict[str, jnp.ndarray], dict[str, jnp.ndarray]]:
     scalar_kwargs: dict[str, jnp.ndarray] = {}
     batch_kwargs: dict[str, jnp.ndarray] = {}
@@ -1358,8 +1386,8 @@ def _split_scalar_and_batch_kwargs(
 
 
 def _solver_value_dtype(
-    canonical: Any,
-    kwargs: dict[str, Any],
+    canonical: _CanonicalDistribution,
+    kwargs: Mapping[str, jnp.ndarray],
 ) -> jnp.dtype:
     leaves = [
         jnp.asarray(value)
@@ -1378,7 +1406,7 @@ def _solver_value_dtype(
     return jnp.result_type(*float_leaves)
 
 
-def _broadcast_batch(value: Any, batch_size: int) -> jnp.ndarray:
+def _broadcast_batch(value: ArrayLike, batch_size: int) -> jnp.ndarray:
     arr = jnp.asarray(value)
     if arr.ndim == 0:
         return jnp.broadcast_to(arr, (batch_size,))
@@ -1387,7 +1415,7 @@ def _broadcast_batch(value: Any, batch_size: int) -> jnp.ndarray:
     raise ValueError("Expected a scalar or (batch,) array.")
 
 
-def _validate_positive_integer(name: str, value: Any) -> int:
+def _validate_positive_integer(name: str, value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, Integral):
         raise ValueError(f"{name} must be a positive integer.")
     value = int(value)
@@ -1398,7 +1426,7 @@ def _validate_positive_integer(name: str, value: Any) -> int:
 
 def _canonicalize_initial(
     initial: str | jnp.ndarray | InitialDistribution,
-    initial_duration: Any,
+    initial_duration: ArrayLike,
 ) -> InitialDistribution:
     if isinstance(initial, InitialDistribution):
         try:
@@ -1421,8 +1449,8 @@ def _canonicalize_initial(
 
 
 def _seed_point_mass(
-    mass: Any,
-    duration: Any,
+    mass: ArrayLike,
+    duration: ArrayLike,
     batch_size: int,
 ) -> _PointMass:
     return _PointMass(
@@ -1481,7 +1509,7 @@ def _prepare_cashflow_components(
             prepared.append(
                 ScheduledEventSpec(when=component.when, payments=payments)
             )
-        elif isinstance(component, DurationEvent):
+        elif isinstance(component, DurationEvent):  # pyright: ignore[reportUnnecessaryIsInstance]
             targets = tuple(
                 DurationTargetPayment(
                     state_index=state_index[state],
@@ -1535,7 +1563,7 @@ def _prepare_cashflow_views(
                 StateSource(index) for index, _state in enumerate(reachable_states)
             )
             output = "mapping"
-        elif isinstance(view, ByKind):
+        elif isinstance(view, ByKind):  # pyright: ignore[reportUnnecessaryIsInstance]
             leaf_names = (
                 "state_rate",
                 "transition_lump",
@@ -1560,14 +1588,18 @@ def _prepare_cashflow_views(
 
 
 def _format_cashflow_view_values(
-    raw_result: dict[str, Any],
+    raw_result: _SolverResult,
     prepared_views: PreparedCashflowViews,
 ) -> dict[str, Any]:
-    streams = raw_result["cashflow_streams"]
-    terminals = raw_result["cashflow_terminal"]
-    formatted = {}
+    streams = raw_result.cashflow_streams
+    terminals = raw_result.cashflow_terminal
+    if streams is None or terminals is None:
+        raise ValueError("Solver result does not contain cashflows.")
+    formatted: dict[str, Any] = {}
     for index, view in enumerate(prepared_views):
         view_values = terminals[index] if view.terminal else streams[index]
+        if view_values is None:
+            raise ValueError("Solver result is missing a cashflow view.")
         if view.output == "single":
             formatted[view.name] = view_values[0]
         else:
@@ -1576,17 +1608,6 @@ def _format_cashflow_view_values(
                 for leaf_name, value in zip(view.leaf_names, view_values)
             }
     return formatted
-
-
-def _cashflow_reference_function(
-    declaration: CashflowDeclaration | None,
-) -> Payment | None:
-    if declaration is None:
-        return None
-    for _name, component in declaration.components:
-        for fn in component.payments.values():
-            return fn
-    return None
 
 
 def _resolve_devices(
@@ -1620,12 +1641,12 @@ def _run_midpoint_solver(
     step_size: float,
     solver_matrix: Sequence[Sequence[Intensity | None]],
     intensity_kwargs: dict[str, jnp.ndarray],
-    prob_callback: Callable[..., Any],
+    prob_callback: CallbackFn,
     record_every: int,
     cashflow_components: CashflowComponentSpecs,
     cashflow_views: PreparedCashflowViews,
     devices: tuple[jax.Device, ...],
-) -> dict[str, Any]:
+) -> _SolverResult:
     if len(devices) <= 1:
         return _midpoint_solver(
             state_0,
@@ -1722,7 +1743,9 @@ def solve(
     probability_disabled = probability is None
     if cashflow_views is not None and cashflows is None:
         raise ValueError("cashflow_views requires cashflows.")
-    if cashflows is not None and not isinstance(cashflows, CashflowDeclaration):
+    if cashflows is not None and not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+        cashflows, CashflowDeclaration
+    ):
         raise TypeError("cashflows must be a CashflowDeclaration or None.")
     if cashflows is not None and cashflows.state_space is not model.state_space:
         raise ValueError("cashflows must be declared from model.state_space.")
@@ -1753,7 +1776,8 @@ def solve(
     )
 
     distribution_batch = canonical.batch_size
-    covariate_batch = _get_covariate_batch_size(kwargs)
+    intensity_kwargs = {name: jnp.asarray(value) for name, value in kwargs.items()}
+    covariate_batch = _get_covariate_batch_size(intensity_kwargs)
     if (
         distribution_batch is not None
         and covariate_batch is not None
@@ -1768,7 +1792,7 @@ def solve(
         batch_size = covariate_batch
     if batch_size is None:
         batch_size = 1
-    value_dtype = _solver_value_dtype(canonical, kwargs)
+    value_dtype = _solver_value_dtype(canonical, intensity_kwargs)
 
     declared_index = {
         state: i for i, state in enumerate(canonical.states)
@@ -1792,14 +1816,14 @@ def solve(
         duration_left,
         step_size,
         solver_matrix,
-        kwargs,
+        intensity_kwargs,
         prob_callback,
         record_every,
         prepared_cashflow_components,
         prepared_cashflow_views,
         selected_devices,
     )
-    probability_out = None if probability_disabled else result["probability"]
+    probability_out = None if probability_disabled else result.probability
     cashflows_out = None
     if cashflows is not None:
         cashflows_out = _format_cashflow_view_values(

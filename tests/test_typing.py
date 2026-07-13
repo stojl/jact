@@ -9,6 +9,17 @@ from typing import Any, get_type_hints
 import jax.numpy as jnp
 
 import jact
+from jact.initial_distribution import _CanonicalDistribution, _component_payload
+from jact.probability import (
+    ComponentsResult,
+    PointMassResult,
+    StateCarry,
+    _density_callback,
+    _full_callback,
+    _point_mass_callback,
+    _state_probability_callback,
+)
+from jact.solver import _SolverResult
 
 
 def _grid_callable(
@@ -36,6 +47,40 @@ payment: jact.typing.Payment = _grid_callable
 when: jact.typing.When = _source_callable
 duration_at: jact.typing.DurationAt = _source_callable
 weight: jact.typing.Weight = _weight_callable
+
+
+def _internal_type_check(
+    initial: jact.InitialDistribution,
+    state: tuple[StateCarry, ...],
+) -> None:
+    """Static assertions for the internal types tightened in this pass."""
+    canonical: _CanonicalDistribution = initial.canonicalize(("healthy",))
+    mass, duration = _component_payload({"mass": 1.0, "duration": 0.0})
+    mass_value: jact.typing.ArrayLike = mass
+    duration_value: jact.typing.ArrayLike = duration
+    state_probability: jnp.ndarray = _state_probability_callback(state)
+    density: jnp.ndarray = _density_callback(state)
+    point_mass: PointMassResult = _point_mass_callback(("healthy",))(state)
+    full: ComponentsResult = _full_callback(("healthy",))(state)
+    solver_result = _SolverResult(
+        probability=state_probability,
+        cashflow_streams=None,
+        cashflow_terminal=None,
+    )
+    probability: Any = solver_result.probability
+    streams = solver_result.cashflow_streams
+    terminal = solver_result.cashflow_terminal
+    _ = (
+        canonical,
+        mass_value,
+        duration_value,
+        density,
+        point_mass,
+        full,
+        probability,
+        streams,
+        terminal,
+    )
 
 
 def _consumer_type_check(
