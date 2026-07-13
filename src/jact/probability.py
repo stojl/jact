@@ -1,4 +1,4 @@
-# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportUntypedClassDecorator=false, reportUntypedFunctionDecorator=false
+# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportUntypedClassDecorator=false, reportUntypedFunctionDecorator=false
 """Probability output types and dispatch.
 
 The public surface is six frozen-dataclass output types

@@ -1,4 +1,4 @@
-# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportPrivateUsage=false
+# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportPrivateUsage=false
 """Cashflow declarations and solve-time views."""
 
 from __future__ import annotations
@@ -9,10 +9,9 @@ from numbers import Number
 from typing import NamedTuple, TypeAlias, cast
 
 import jax.numpy as jnp
-from jax.typing import ArrayLike
 
 from .state_space import StateSpace
-from .typing import DurationAt, Payment, Weight, When
+from .typing import ArrayLike, DurationAt, Payment, Weight, When
 
 Scalar = bool | int | float | complex
 
@@ -147,11 +146,12 @@ def _validate_payment_mapping(
 ) -> dict[object, Payment]:
     if not isinstance(payments, Mapping) or not payments:
         raise ValueError(f"{field} must be a non-empty mapping.")
-    for fn in payments.values():
+    values = cast(Mapping[object, object], payments)
+    for fn in values.values():
         _check_callable(fn, f"{field} values")
     return {
         key: cast(Payment, fn)
-        for key, fn in cast(Mapping[object, object], payments).items()
+        for key, fn in values.items()
     }
 
 
@@ -232,11 +232,20 @@ def validate_cashflow_components(
                 f"TransitionLump('{name}').payments",
             )
             for transition in payments:
-                if (
-                    not isinstance(transition, tuple)
-                    or len(transition) != 2
-                    or not state_space.has_transition(*transition)
-                ):
+                parts = (
+                    cast(tuple[object, ...], transition)
+                    if isinstance(transition, tuple)
+                    else ()
+                )
+                valid = len(parts) == 2
+                if valid:
+                    source, target = cast(tuple[object, object], parts)
+                    valid = (
+                        isinstance(source, str)
+                        and isinstance(target, str)
+                        and state_space.has_transition(source, target)
+                    )
+                if not valid:
                     raise ValueError(
                         f"TransitionLump('{name}') references unknown "
                         f"transition {transition!r}."

@@ -1,14 +1,15 @@
-# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportUntypedClassDecorator=false
+# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportUntypedClassDecorator=false
 """Initial state-and-duration distribution for solver entry."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Mapping, Sequence, cast
+from typing import Any, Iterable, Mapping, Sequence, cast
 
 import jax
 import jax.numpy as jnp
-from jax.typing import ArrayLike
+
+from .typing import ArrayLike
 
 __all__ = ["InitialDistribution"]
 
@@ -73,7 +74,7 @@ def _component_payload(
 
 def _validate_integer_indices_if_concrete(states: ArrayLike) -> None:
     try:
-        dtype = jnp.asarray(states).dtype
+        dtype = cast(Any, jnp.asarray(states).dtype)
     except Exception as exc:  # pragma: no cover - tracer path
         if not _is_tracer_or_concretization_error(exc):
             raise
@@ -311,7 +312,7 @@ class InitialDistribution:
         return self
 
     def _batch_size(self) -> int | None:
-        arrays: Iterable[ArrayLike]
+        arrays: Iterable[ArrayLike | None]
         if self._kind == "components":
             arrays = (*self._masses, *self._durations)
         else:
@@ -365,8 +366,12 @@ class InitialDistribution:
                 "per_individual requires a rank-1 states array to define batch size."
             )
 
-        duration = self._broadcast_value(self._per_individual_duration, batch_size)
-        indices = jnp.asarray(self._state_indices)
+        per_individual_duration = self._per_individual_duration
+        state_indices = self._state_indices
+        if per_individual_duration is None or state_indices is None:
+            raise ValueError("per_individual distribution has incomplete values.")
+        duration = self._broadcast_value(per_individual_duration, batch_size)
+        indices = jnp.asarray(state_indices)
         one_hot = jax.nn.one_hot(indices, len(states), dtype=duration.dtype)
         masses = tuple(one_hot[:, i] for i in range(len(states)))
         durations = tuple(duration for _ in states)

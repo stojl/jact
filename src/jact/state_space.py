@@ -1,4 +1,4 @@
-# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false
+# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false
 """State space definition for multi-state models."""
 
 from __future__ import annotations
@@ -8,10 +8,9 @@ from collections import deque
 from typing import TYPE_CHECKING, Hashable, Iterable, Mapping, Sequence, TypeVar, cast
 
 import jax.numpy as jnp
-from jax.typing import ArrayLike
 
 from .initial_distribution import InitialDistribution
-from .typing import GroupedIntensity, Intensity
+from .typing import ArrayLike, GroupedIntensity, Intensity
 
 if TYPE_CHECKING:
     from .cashflows import CashflowComponent, CashflowDeclaration
@@ -389,6 +388,9 @@ class StateSpace:
                     )
                 indices.append(lookup[state])
             state_indices = jnp.asarray(indices, dtype=jnp.int32)
+
+        if state_indices is None:
+            raise ValueError("state_indices could not be derived.")
 
         return InitialDistribution.per_individual(
             states=state_indices,

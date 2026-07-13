@@ -1,4 +1,4 @@
-# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportPrivateUsage=false
+# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportPrivateUsage=false
 """Model definition: a StateSpace bound to intensity callables."""
 
 from __future__ import annotations
@@ -9,7 +9,6 @@ from typing import Any, Literal, TypeAlias
 
 import jax
 import jax.numpy as jnp
-from jax.typing import ArrayLike
 
 from .cashflows import (
     CashflowDeclaration,
@@ -19,7 +18,7 @@ from .initial_distribution import InitialDistribution
 from .probability import CallbackFn, ProbabilityOutput, StateProbability
 from .result import ModelResult
 from .state_space import StateSpace
-from .typing import GroupedIntensity, Intensity
+from .typing import ArrayLike, GroupedIntensity, Intensity
 
 __all__ = ["Model", "ReducedModel", "TransitionInfo"]
 
