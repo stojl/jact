@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import inspect
 import math
-from typing import Any
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
@@ -41,6 +41,13 @@ from jact.solver import (
 # JAX's JitWrapped exposes .clear_cache()/._cache_size() at runtime but they
 # aren't in pyright's stubs — alias to Any for the cache-management tests.
 _solver_cache: Any = _midpoint_solver
+
+
+def _cashflows(result: jact.ModelResult[Any]) -> dict[str, Any]:
+    """Return cashflows when this test intentionally requested known views."""
+    cashflows = result.cashflows
+    assert cashflows is not None
+    return cast(dict[str, Any], cashflows)
 
 LAMBDA_HD = 0.3
 MU_HM = 0.2
@@ -1453,7 +1460,7 @@ class TestModelResultIsPyTree:
             )
         )()
         assert isinstance(out, jact.ModelResult)
-        assert out.cashflows["annuity"].shape == (8, 2)
+        assert _cashflows(out)["annuity"].shape == (8, 2)
 
     def test_jit_round_trip_with_disabled_probability(
         self, illness_death_model

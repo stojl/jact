@@ -8,6 +8,7 @@ from typing import Literal, NamedTuple, TypeAlias
 import jax.numpy as jnp
 
 from .cashflows import Scalar
+from .result import CashflowResult, CashflowValue
 from .typing import DurationAt, Payment, Weight, When
 
 
@@ -116,8 +117,8 @@ PreparedCashflowViews: TypeAlias = tuple[PreparedCashflowView, ...]
 CashflowLeaves: TypeAlias = tuple[jnp.ndarray, ...]
 CashflowViewValues: TypeAlias = tuple[CashflowLeaves, ...]
 CashflowStreamValues: TypeAlias = tuple[CashflowLeaves | None, ...]
-FormattedCashflowValue: TypeAlias = jnp.ndarray | dict[str, jnp.ndarray]
-FormattedCashflows: TypeAlias = dict[str, FormattedCashflowValue]
+FormattedCashflowValue: TypeAlias = CashflowValue
+FormattedCashflows: TypeAlias = CashflowResult
 
 
 class StepAggregation(NamedTuple):

@@ -124,15 +124,15 @@ class StateCarry(NamedTuple):
 
 
 CallbackFn = Callable[[tuple[StateCarry, ...]], Any]
-PointMassResult = dict[str, jnp.ndarray]
+PointMassResult = dict[str, jax.Array]
 
 
 class ComponentsResult(TypedDict):
-    density: jnp.ndarray
+    density: jax.Array
     point_mass: PointMassResult
 
 
-ArrayCallback = Callable[[tuple[StateCarry, ...]], jnp.ndarray]
+ArrayCallback = Callable[[tuple[StateCarry, ...]], jax.Array]
 PointMassCallback = Callable[[tuple[StateCarry, ...]], PointMassResult]
 ComponentsCallback = Callable[[tuple[StateCarry, ...]], ComponentsResult]
 

@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from numbers import Integral
-from typing import Any, NamedTuple, TypeAlias, TypeVar, cast
+from typing import Any, NamedTuple, TypeAlias, TypeVar, cast, overload
 
 import jax
 import jax.numpy as jnp
@@ -59,6 +59,13 @@ from .initial_distribution import InitialDistribution, _CanonicalDistribution
 from .model import Model
 from .probability import (
     CallbackFn,
+    ComponentsResult,
+    Density,
+    DensityProbability,
+    Full,
+    MarginalComponents,
+    PointMass,
+    PointMassResult,
     ProbabilityOutput,
     StateCarry,
     StateProbability,
@@ -1718,6 +1725,156 @@ def _run_midpoint_solver(
     return _unshard_batch_tree(sharded_result, batch_size)
 
 
+@overload
+def solve(
+    model: Model,
+    initial: str | ArrayLike | InitialDistribution,
+    horizon: int,
+    steps_per_unit: int,
+    initial_duration: ArrayLike = 0.0,
+    probability: (
+        StateProbability | DensityProbability | Density
+    ) = StateProbability(),
+    cashflows: CashflowDeclaration | None = None,
+    cashflow_views: Mapping[str, CashflowView] | None = None,
+    record_every: int = 1,
+    devices: int | Sequence[jax.Device] | None = None,
+    **kwargs: Any,
+) -> ModelResult[jax.Array]: ...
+
+
+@overload
+def solve(
+    model: Model,
+    initial: str | ArrayLike | InitialDistribution,
+    horizon: int,
+    steps_per_unit: int,
+    initial_duration: ArrayLike,
+    probability: PointMass,
+    cashflows: CashflowDeclaration | None = None,
+    cashflow_views: Mapping[str, CashflowView] | None = None,
+    record_every: int = 1,
+    devices: int | Sequence[jax.Device] | None = None,
+    **kwargs: Any,
+) -> ModelResult[PointMassResult]: ...
+
+
+@overload
+def solve(
+    model: Model,
+    initial: str | ArrayLike | InitialDistribution,
+    horizon: int,
+    steps_per_unit: int,
+    initial_duration: ArrayLike,
+    probability: MarginalComponents | Full,
+    cashflows: CashflowDeclaration | None = None,
+    cashflow_views: Mapping[str, CashflowView] | None = None,
+    record_every: int = 1,
+    devices: int | Sequence[jax.Device] | None = None,
+    **kwargs: Any,
+) -> ModelResult[ComponentsResult]: ...
+
+
+@overload
+def solve(
+    model: Model,
+    initial: str | ArrayLike | InitialDistribution,
+    horizon: int,
+    steps_per_unit: int,
+    initial_duration: ArrayLike,
+    probability: None,
+    cashflows: CashflowDeclaration | None = None,
+    cashflow_views: Mapping[str, CashflowView] | None = None,
+    record_every: int = 1,
+    devices: int | Sequence[jax.Device] | None = None,
+    **kwargs: Any,
+) -> ModelResult[None]: ...
+
+
+@overload
+def solve(
+    model: Model,
+    initial: str | ArrayLike | InitialDistribution,
+    horizon: int,
+    steps_per_unit: int,
+    initial_duration: ArrayLike,
+    probability: Callable[..., _PyTreeT],
+    cashflows: CashflowDeclaration | None = None,
+    cashflow_views: Mapping[str, CashflowView] | None = None,
+    record_every: int = 1,
+    devices: int | Sequence[jax.Device] | None = None,
+    **kwargs: Any,
+) -> ModelResult[_PyTreeT]: ...
+
+
+@overload
+def solve(
+    model: Model,
+    initial: str | ArrayLike | InitialDistribution,
+    horizon: int,
+    steps_per_unit: int,
+    initial_duration: ArrayLike = 0.0,
+    *,
+    probability: PointMass,
+    cashflows: CashflowDeclaration | None = None,
+    cashflow_views: Mapping[str, CashflowView] | None = None,
+    record_every: int = 1,
+    devices: int | Sequence[jax.Device] | None = None,
+    **kwargs: Any,
+) -> ModelResult[PointMassResult]: ...
+
+
+@overload
+def solve(
+    model: Model,
+    initial: str | ArrayLike | InitialDistribution,
+    horizon: int,
+    steps_per_unit: int,
+    initial_duration: ArrayLike = 0.0,
+    *,
+    probability: MarginalComponents | Full,
+    cashflows: CashflowDeclaration | None = None,
+    cashflow_views: Mapping[str, CashflowView] | None = None,
+    record_every: int = 1,
+    devices: int | Sequence[jax.Device] | None = None,
+    **kwargs: Any,
+) -> ModelResult[ComponentsResult]: ...
+
+
+@overload
+def solve(
+    model: Model,
+    initial: str | ArrayLike | InitialDistribution,
+    horizon: int,
+    steps_per_unit: int,
+    initial_duration: ArrayLike = 0.0,
+    *,
+    probability: None,
+    cashflows: CashflowDeclaration | None = None,
+    cashflow_views: Mapping[str, CashflowView] | None = None,
+    record_every: int = 1,
+    devices: int | Sequence[jax.Device] | None = None,
+    **kwargs: Any,
+) -> ModelResult[None]: ...
+
+
+@overload
+def solve(
+    model: Model,
+    initial: str | ArrayLike | InitialDistribution,
+    horizon: int,
+    steps_per_unit: int,
+    initial_duration: ArrayLike = 0.0,
+    *,
+    probability: Callable[..., _PyTreeT],
+    cashflows: CashflowDeclaration | None = None,
+    cashflow_views: Mapping[str, CashflowView] | None = None,
+    record_every: int = 1,
+    devices: int | Sequence[jax.Device] | None = None,
+    **kwargs: Any,
+) -> ModelResult[_PyTreeT]: ...
+
+
 def solve(
     model: Model,
     initial: str | ArrayLike | InitialDistribution,
@@ -1730,7 +1887,7 @@ def solve(
     record_every: int = 1,
     devices: int | Sequence[jax.Device] | None = None,
     **kwargs: Any,
-) -> ModelResult:
+) -> ModelResult[Any]:
     """Compute transition probabilities from a documented initial condition."""
     if "freeze_initial" in kwargs:
         raise TypeError(

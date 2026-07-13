@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias, TypeVar, cast, overload
 
 import jax
 import jax.numpy as jnp
@@ -15,7 +15,18 @@ from .cashflows import (
     CashflowView,
 )
 from .initial_distribution import InitialDistribution
-from .probability import CallbackFn, ProbabilityOutput, StateProbability
+from .probability import (
+    CallbackFn,
+    ComponentsResult,
+    Density,
+    DensityProbability,
+    Full,
+    MarginalComponents,
+    PointMass,
+    PointMassResult,
+    ProbabilityOutput,
+    StateProbability,
+)
 from .result import ModelResult
 from .state_space import StateSpace
 from .typing import ArrayLike, GroupedIntensity, Intensity
@@ -27,6 +38,7 @@ Transition: TypeAlias = tuple[str, str]
 Assignment: TypeAlias = Literal["transitions", "exits", "groups"]
 SolverRow: TypeAlias = tuple[Intensity | None, ...]
 SolverMatrix: TypeAlias = tuple[SolverRow, ...]
+ProbabilityT = TypeVar("ProbabilityT")
 
 
 @dataclass(frozen=True)
@@ -315,6 +327,147 @@ class Model:
     # Solver entry point                                                  #
     # ------------------------------------------------------------------ #
 
+    @overload
+    def solve(
+        self,
+        initial: str | ArrayLike | InitialDistribution,
+        horizon: int,
+        steps_per_unit: int,
+        initial_duration: ArrayLike = 0.0,
+        probability: (
+            StateProbability | DensityProbability | Density
+        ) = StateProbability(),
+        cashflows: CashflowDeclaration | None = None,
+        cashflow_views: Mapping[str, CashflowView] | None = None,
+        record_every: int = 1,
+        devices: int | Sequence[jax.Device] | None = None,
+        **kwargs: Any,
+    ) -> ModelResult[jax.Array]: ...
+
+    @overload
+    def solve(
+        self,
+        initial: str | ArrayLike | InitialDistribution,
+        horizon: int,
+        steps_per_unit: int,
+        initial_duration: ArrayLike,
+        probability: PointMass,
+        cashflows: CashflowDeclaration | None = None,
+        cashflow_views: Mapping[str, CashflowView] | None = None,
+        record_every: int = 1,
+        devices: int | Sequence[jax.Device] | None = None,
+        **kwargs: Any,
+    ) -> ModelResult[PointMassResult]: ...
+
+    @overload
+    def solve(
+        self,
+        initial: str | ArrayLike | InitialDistribution,
+        horizon: int,
+        steps_per_unit: int,
+        initial_duration: ArrayLike,
+        probability: MarginalComponents | Full,
+        cashflows: CashflowDeclaration | None = None,
+        cashflow_views: Mapping[str, CashflowView] | None = None,
+        record_every: int = 1,
+        devices: int | Sequence[jax.Device] | None = None,
+        **kwargs: Any,
+    ) -> ModelResult[ComponentsResult]: ...
+
+    @overload
+    def solve(
+        self,
+        initial: str | ArrayLike | InitialDistribution,
+        horizon: int,
+        steps_per_unit: int,
+        initial_duration: ArrayLike,
+        probability: None,
+        cashflows: CashflowDeclaration | None = None,
+        cashflow_views: Mapping[str, CashflowView] | None = None,
+        record_every: int = 1,
+        devices: int | Sequence[jax.Device] | None = None,
+        **kwargs: Any,
+    ) -> ModelResult[None]: ...
+
+    @overload
+    def solve(
+        self,
+        initial: str | ArrayLike | InitialDistribution,
+        horizon: int,
+        steps_per_unit: int,
+        initial_duration: ArrayLike,
+        probability: Callable[..., ProbabilityT],
+        cashflows: CashflowDeclaration | None = None,
+        cashflow_views: Mapping[str, CashflowView] | None = None,
+        record_every: int = 1,
+        devices: int | Sequence[jax.Device] | None = None,
+        **kwargs: Any,
+    ) -> ModelResult[ProbabilityT]: ...
+
+    @overload
+    def solve(
+        self,
+        initial: str | ArrayLike | InitialDistribution,
+        horizon: int,
+        steps_per_unit: int,
+        initial_duration: ArrayLike = 0.0,
+        *,
+        probability: PointMass,
+        cashflows: CashflowDeclaration | None = None,
+        cashflow_views: Mapping[str, CashflowView] | None = None,
+        record_every: int = 1,
+        devices: int | Sequence[jax.Device] | None = None,
+        **kwargs: Any,
+    ) -> ModelResult[PointMassResult]: ...
+
+    @overload
+    def solve(
+        self,
+        initial: str | ArrayLike | InitialDistribution,
+        horizon: int,
+        steps_per_unit: int,
+        initial_duration: ArrayLike = 0.0,
+        *,
+        probability: MarginalComponents | Full,
+        cashflows: CashflowDeclaration | None = None,
+        cashflow_views: Mapping[str, CashflowView] | None = None,
+        record_every: int = 1,
+        devices: int | Sequence[jax.Device] | None = None,
+        **kwargs: Any,
+    ) -> ModelResult[ComponentsResult]: ...
+
+    @overload
+    def solve(
+        self,
+        initial: str | ArrayLike | InitialDistribution,
+        horizon: int,
+        steps_per_unit: int,
+        initial_duration: ArrayLike = 0.0,
+        *,
+        probability: None,
+        cashflows: CashflowDeclaration | None = None,
+        cashflow_views: Mapping[str, CashflowView] | None = None,
+        record_every: int = 1,
+        devices: int | Sequence[jax.Device] | None = None,
+        **kwargs: Any,
+    ) -> ModelResult[None]: ...
+
+    @overload
+    def solve(
+        self,
+        initial: str | ArrayLike | InitialDistribution,
+        horizon: int,
+        steps_per_unit: int,
+        initial_duration: ArrayLike = 0.0,
+        *,
+        probability: Callable[..., ProbabilityT],
+        cashflows: CashflowDeclaration | None = None,
+        cashflow_views: Mapping[str, CashflowView] | None = None,
+        record_every: int = 1,
+        devices: int | Sequence[jax.Device] | None = None,
+        **kwargs: Any,
+    ) -> ModelResult[ProbabilityT]: ...
+
     def solve(
         self,
         initial: str | ArrayLike | InitialDistribution,
@@ -329,7 +482,7 @@ class Model:
         record_every: int = 1,
         devices: int | Sequence[jax.Device] | None = None,
         **kwargs: Any,
-    ) -> ModelResult:
+    ) -> ModelResult[Any]:
         """Compute transition probabilities from a documented initial condition.
 
         Parameters
@@ -389,18 +542,21 @@ class Model:
         """
         from .solver import solve
 
-        return solve(
-            model=self,
-            initial=initial,
-            horizon=horizon,
-            steps_per_unit=steps_per_unit,
-            initial_duration=initial_duration,
-            probability=probability,
-            cashflows=cashflows,
-            cashflow_views=cashflow_views,
-            record_every=record_every,
-            devices=devices,
-            **kwargs,
+        return cast(
+            ModelResult[Any],
+            solve(
+                model=self,
+                initial=initial,
+                horizon=horizon,
+                steps_per_unit=steps_per_unit,
+                initial_duration=initial_duration,
+                probability=cast(Any, probability),
+                cashflows=cashflows,
+                cashflow_views=cashflow_views,
+                record_every=record_every,
+                devices=devices,
+                **kwargs,
+            ),
         )
 
     # ------------------------------------------------------------------ #

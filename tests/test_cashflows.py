@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import jax
 import jax.numpy as jnp
 import pytest
 
 import jact
 from jact.cashflows import validate_cashflow_views
+
+
+def _cashflows(result: jact.ModelResult[Any]) -> dict[str, Any]:
+    """Return cashflows when this test intentionally requested known views."""
+    cashflows = result.cashflows
+    assert cashflows is not None
+    return cast(dict[str, Any], cashflows)
 
 
 def _constant_intensity(rate: float, batch: int = 1):
@@ -273,7 +282,7 @@ def test_rank_zero_array_duration_target_survives_jitted_solve():
         )
     )()
 
-    assert jnp.allclose(result.cashflows["pv"], jnp.array([3.0]))
+    assert jnp.allclose(_cashflows(result)["pv"], jnp.array([3.0]))
 
 
 def test_discount_factor_removed_from_public_api():
@@ -291,7 +300,7 @@ def test_cashflow_views_accept_rank_zero_array_weight():
         "active": _constant_payment(2.0)
     })})
 
-    result = model.solve(
+    result = _cashflows(model.solve(
         initial="active",
         horizon=1,
         steps_per_unit=4,
@@ -300,9 +309,9 @@ def test_cashflow_views_accept_rank_zero_array_weight():
         cashflow_views={
             "pv": jact.cashflows.Total(weight=jnp.array(0.5), terminal=True),
         },
-    )
+    ))
 
-    assert jnp.allclose(result.cashflows["pv"], jnp.array([1.0]))
+    assert jnp.allclose(result["pv"], jnp.array([1.0]))
 
 
 def test_cashflow_views_reject_non_scalar_array_weight():
@@ -341,7 +350,7 @@ def test_empty_cashflow_view_mapping_returns_empty_outputs():
         cashflow_views={},
     )
 
-    assert result.cashflows == {}
+    assert _cashflows(result) == {}
     assert result.probability is None
 
 
@@ -386,9 +395,9 @@ def test_state_rate_no_transition_interval_and_terminal_outputs():
     )
 
     assert result.probability is None
-    assert result.cashflows["premium"].shape == (8, 1)
-    assert jnp.allclose(result.cashflows["premium"], 0.5)
-    assert jnp.allclose(result.cashflows["pv"], jnp.array([2.0]))
+    assert _cashflows(result)["premium"].shape == (8, 1)
+    assert jnp.allclose(_cashflows(result)["premium"], 0.5)
+    assert jnp.allclose(_cashflows(result)["pv"], jnp.array([2.0]))
 
 
 def test_cashflow_only_scalar_payment_defaults_to_one_individual():
@@ -412,8 +421,8 @@ def test_cashflow_only_scalar_payment_defaults_to_one_individual():
         cashflow_views={"premium": jact.cashflows.Raw("premium", terminal=True)},
     )
 
-    assert result.cashflows["premium"].shape == (1,)
-    assert jnp.allclose(result.cashflows["premium"], jnp.array([2.0]))
+    assert _cashflows(result)["premium"].shape == (1,)
+    assert jnp.allclose(_cashflows(result)["premium"], jnp.array([2.0]))
 
 
 def test_duration_event_target_broadcasts_singleton_to_batch():
@@ -443,8 +452,8 @@ def test_duration_event_target_broadcasts_singleton_to_batch():
         cashflow_views={"benefit": jact.cashflows.Raw("benefit", terminal=True)},
     )
 
-    assert result.cashflows["benefit"].shape == (2,)
-    assert jnp.allclose(result.cashflows["benefit"], jnp.array([3.0, 3.0]))
+    assert _cashflows(result)["benefit"].shape == (2,)
+    assert jnp.allclose(_cashflows(result)["benefit"], jnp.array([3.0, 3.0]))
 
 
 def test_transition_lump_matches_integrated_transition_probability():
@@ -465,7 +474,7 @@ def test_transition_lump_matches_integrated_transition_probability():
     )
 
     expected = benefit * (1.0 - jnp.exp(-rate * 3.0))
-    assert jnp.allclose(result.cashflows["death"], expected, atol=2e-4)
+    assert jnp.allclose(_cashflows(result)["death"], expected, atol=2e-4)
 
 
 def test_state_rate_in_survival_model_uses_midpoint_occupancy():
@@ -486,7 +495,7 @@ def test_state_rate_in_survival_model_uses_midpoint_occupancy():
     )
 
     expected = (1.0 - jnp.exp(-rate * 3.0)) / rate
-    assert jnp.allclose(result.cashflows["annuity"], expected, atol=2e-5)
+    assert jnp.allclose(_cashflows(result)["annuity"], expected, atol=2e-5)
 
 
 def test_constant_intensity_time_duration_state_rate_matches_closed_form():
@@ -520,7 +529,7 @@ def test_constant_intensity_time_duration_state_rate_matches_closed_form():
         (base + duration_coef * initial_duration) * integral_0
         + (time_coef + duration_coef) * integral_1
     )
-    assert jnp.allclose(result.cashflows["annuity"], expected, atol=2e-5)
+    assert jnp.allclose(_cashflows(result)["annuity"], expected, atol=2e-5)
 
 
 def test_point_mass_state_rate_remains_accurate_at_high_resolution_float32():
@@ -554,7 +563,7 @@ def test_point_mass_state_rate_remains_accurate_at_high_resolution_float32():
         (base + duration_coef * initial_duration) * integral_0
         + (time_coef + duration_coef) * integral_1
     )
-    assert jnp.allclose(result.cashflows["annuity"], expected, atol=1e-5)
+    assert jnp.allclose(_cashflows(result)["annuity"], expected, atol=1e-5)
 
 
 def test_time_dependent_intensity_transition_lump_matches_closed_form():
@@ -581,7 +590,7 @@ def test_time_dependent_intensity_transition_lump_matches_closed_form():
 
     cumulative_hazard = base * horizon + 0.5 * time_coef * horizon**2
     expected = benefit * (1.0 - jnp.exp(-cumulative_hazard))
-    assert jnp.allclose(result.cashflows["death"], expected, atol=2e-5)
+    assert jnp.allclose(_cashflows(result)["death"], expected, atol=2e-5)
 
 
 def test_duration_dependent_intensity_cashflows_match_closed_form():
@@ -603,7 +612,7 @@ def test_duration_dependent_intensity_cashflows_match_closed_form():
         }),
     })
 
-    result = model.solve(
+    result = _cashflows(model.solve(
         initial="alive",
         initial_duration=initial_duration,
         horizon=horizon,
@@ -615,7 +624,7 @@ def test_duration_dependent_intensity_cashflows_match_closed_form():
             "death": jact.cashflows.Raw("death", terminal=True),
         },
         age=jnp.arange(3.0),
-    ).cashflows
+    ))
 
     cumulative_hazard = _linear_duration_hazard_integral(
         horizon,
@@ -658,7 +667,7 @@ def test_time_duration_dependent_intensity_cashflows_match_closed_form():
         }),
     })
 
-    result = model.solve(
+    result = _cashflows(model.solve(
         initial="alive",
         initial_duration=initial_duration,
         horizon=horizon,
@@ -670,7 +679,7 @@ def test_time_duration_dependent_intensity_cashflows_match_closed_form():
             "death": jact.cashflows.Raw("death", terminal=True),
         },
         age=jnp.arange(2.0),
-    ).cashflows
+    ))
 
     cumulative_hazard = _linear_time_duration_hazard_integral(
         horizon,
@@ -712,7 +721,7 @@ def test_target_state_rate_from_same_step_inflow_converges_at_second_order():
             cashflows=cashflows,
             cashflow_views={"annuity": jact.cashflows.Raw("annuity", terminal=True)},
         )
-        errors.append(float(jnp.abs(result.cashflows["annuity"][0] - expected)))
+        errors.append(float(jnp.abs(_cashflows(result)["annuity"][0] - expected)))
 
     _assert_second_order(*errors)
 
@@ -745,7 +754,7 @@ def test_chained_transition_lump_from_same_step_inflow_converges_at_second_order
             cashflows=cashflows,
             cashflow_views={"death": jact.cashflows.Raw("death", terminal=True)},
         )
-        errors.append(float(jnp.abs(result.cashflows["death"][0] - expected)))
+        errors.append(float(jnp.abs(_cashflows(result)["death"][0] - expected)))
 
     _assert_second_order(*errors)
 
@@ -773,7 +782,7 @@ def test_large_target_exit_same_step_cashflows_use_exponential_settlement():
         }),
     })
 
-    result = model.solve(
+    result = _cashflows(model.solve(
         initial="healthy",
         horizon=horizon,
         steps_per_unit=1,
@@ -783,7 +792,7 @@ def test_large_target_exit_same_step_cashflows_use_exponential_settlement():
             "annuity": jact.cashflows.Raw("annuity", terminal=True),
             "death": jact.cashflows.Raw("death", terminal=True),
         },
-    ).cashflows
+    ))
 
     raw_inflow = 1.0 - jnp.exp(-onset)
     half_exit = 0.5 * exit_rate
@@ -817,7 +826,7 @@ def test_same_step_interval_cashflow_views_preserve_aggregation_identities():
         }),
     })
 
-    result = model.solve(
+    result = _cashflows(model.solve(
         initial="healthy",
         horizon=horizon,
         steps_per_unit=64,
@@ -829,7 +838,7 @@ def test_same_step_interval_cashflow_views_preserve_aggregation_identities():
             "state": jact.cashflows.ByState(terminal=True),
             "kind": jact.cashflows.ByKind(terminal=True),
         },
-    ).cashflows
+    ))
 
     raw_sum = result["raw"]["annuity"] + result["raw"]["death"]
     assert jnp.allclose(result["total"], raw_sum)
@@ -867,7 +876,7 @@ def test_same_step_interval_cashflows_record_every_preserves_totals_and_blocks()
         "terminal": jact.cashflows.Total(terminal=True),
     }
 
-    fine = model.solve(
+    fine = _cashflows(model.solve(
         initial="healthy",
         horizon=horizon,
         steps_per_unit=16,
@@ -875,8 +884,8 @@ def test_same_step_interval_cashflows_record_every_preserves_totals_and_blocks()
         probability=None,
         cashflows=cashflows,
         cashflow_views=views,
-    ).cashflows
-    blocked = model.solve(
+    ))
+    blocked = _cashflows(model.solve(
         initial="healthy",
         horizon=horizon,
         steps_per_unit=16,
@@ -884,7 +893,7 @@ def test_same_step_interval_cashflows_record_every_preserves_totals_and_blocks()
         probability=None,
         cashflows=cashflows,
         cashflow_views=views,
-    ).cashflows
+    ))
 
     assert jnp.allclose(blocked["terminal"], fine["terminal"])
     for name in ("annuity", "death"):
@@ -909,7 +918,7 @@ def test_discounted_constant_state_rate_matches_closed_form_present_value():
     def flat_discount_weight(t, **kwargs):
         return jnp.exp(-discount_rate * t)
 
-    result = model.solve(
+    result = _cashflows(model.solve(
         initial="alive",
         horizon=horizon,
         steps_per_unit=256,
@@ -921,11 +930,11 @@ def test_discounted_constant_state_rate_matches_closed_form_present_value():
                 terminal=True,
             )
         },
-    )
+    ))
 
     combined_rate = rate + discount_rate
     expected = payment * (1.0 - jnp.exp(-combined_rate * horizon)) / combined_rate
-    assert jnp.allclose(result.cashflows["pv"], expected, atol=3e-5)
+    assert jnp.allclose(result["pv"], expected, atol=3e-5)
 
 
 def test_mixed_views_by_state_by_kind_and_weighted_total():
@@ -938,7 +947,7 @@ def test_mixed_views_by_state_by_kind_and_weighted_total():
         }),
     })
 
-    result = model.solve(
+    result = _cashflows(model.solve(
         initial="healthy",
         horizon=1,
         steps_per_unit=8,
@@ -951,7 +960,7 @@ def test_mixed_views_by_state_by_kind_and_weighted_total():
             "state": jact.cashflows.ByState(terminal=True),
             "kind": jact.cashflows.ByKind(terminal=True),
         },
-    ).cashflows
+    ))
 
     raw_sum = result["raw"]["premium"] + result["raw"]["death"]
     assert jnp.allclose(result["total"], raw_sum)
@@ -980,7 +989,7 @@ def test_state_rate_includes_initial_point_mass_duration():
         "active": duration_payment
     })})
 
-    result = model.solve(
+    result = _cashflows(model.solve(
         initial="active",
         initial_duration=jnp.array([2.0, 5.0]),
         horizon=1,
@@ -988,10 +997,10 @@ def test_state_rate_includes_initial_point_mass_duration():
         probability=None,
         cashflows=cashflows,
         cashflow_views={"duration": jact.cashflows.Raw("duration", terminal=True)},
-    )
+    ))
 
     expected = jnp.array([2.5, 5.5])
-    assert jnp.allclose(result.cashflows["duration"], expected, atol=1e-6)
+    assert jnp.allclose(result["duration"], expected, atol=1e-6)
 
 
 def test_scheduled_event_snapping_individual_times_outside_horizon_and_pre_step():
@@ -1006,7 +1015,7 @@ def test_scheduled_event_snapping_individual_times_outside_horizon_and_pre_step(
         payments={"active": _constant_payment(7.0, 4)},
     )})
 
-    result = model.solve(
+    result = _cashflows(model.solve(
         initial="active",
         horizon=1,
         steps_per_unit=4,
@@ -1018,7 +1027,7 @@ def test_scheduled_event_snapping_individual_times_outside_horizon_and_pre_step(
         },
         event_time=jnp.array([0.0, 0.25, 0.49, 2.0]),
         age=jnp.arange(4.0),
-    ).cashflows
+    ))
 
     assert result["bonus"].shape == (4, 4)
     assert jnp.allclose(result["bonus"][0, 0], 7.0)
@@ -1042,7 +1051,7 @@ def test_scheduled_event_on_target_state_keeps_pre_step_snapshot_semantics():
         payments={"disabled": _constant_payment(7.0, 2)},
     )})
 
-    result = model.solve(
+    result = _cashflows(model.solve(
         initial="healthy",
         horizon=1,
         steps_per_unit=4,
@@ -1051,7 +1060,7 @@ def test_scheduled_event_on_target_state_keeps_pre_step_snapshot_semantics():
         cashflow_views={"bonus": jact.cashflows.Raw("bonus")},
         event_time=jnp.array([0.0, 0.25], dtype=jnp.float32),
         age=jnp.arange(2.0, dtype=jnp.float32),
-    ).cashflows["bonus"]
+    ))["bonus"]
 
     assert jnp.allclose(result[0, 0], 0.0)
     assert jnp.allclose(result[1, 0], 0.0)
@@ -1074,17 +1083,17 @@ def test_scheduled_event_matches_closed_form_survival_probability():
         payments={"alive": _constant_payment(benefit)},
     )})
 
-    result = model.solve(
+    result = _cashflows(model.solve(
         initial="alive",
         horizon=4,
         steps_per_unit=4,
         probability=None,
         cashflows=cashflows,
         cashflow_views={"bonus": jact.cashflows.Raw("bonus", terminal=True)},
-    )
+    ))
 
     expected = benefit * jnp.exp(-rate * event_time)
-    assert jnp.allclose(result.cashflows["bonus"], expected, atol=1e-6)
+    assert jnp.allclose(result["bonus"], expected, atol=1e-6)
 
 
 def test_discounted_scheduled_event_matches_closed_form_present_value():
@@ -1118,7 +1127,7 @@ def test_discounted_scheduled_event_matches_closed_form_present_value():
     )
 
     expected = benefit * jnp.exp(-(rate + discount_rate) * event_time)
-    assert jnp.allclose(result.cashflows["pv"], expected, atol=1e-6)
+    assert jnp.allclose(_cashflows(result)["pv"], expected, atol=1e-6)
 
 
 def test_duration_dependent_scheduled_event_payment_matches_closed_form():
@@ -1151,7 +1160,7 @@ def test_duration_dependent_scheduled_event_payment_matches_closed_form():
 
     payment = base + duration_coef * (initial_duration + event_time)
     expected = payment * jnp.exp(-rate * event_time)
-    assert jnp.allclose(result.cashflows["bonus"], expected, atol=1e-6)
+    assert jnp.allclose(_cashflows(result)["bonus"], expected, atol=1e-6)
 
 
 def test_scheduled_event_by_state_and_by_kind_match_closed_form_multi_state():
@@ -1183,7 +1192,7 @@ def test_scheduled_event_by_state_and_by_kind_match_closed_form_multi_state():
         },
     )})
 
-    result = model.solve(
+    result = _cashflows(model.solve(
         initial="active",
         horizon=4,
         steps_per_unit=4,
@@ -1193,7 +1202,7 @@ def test_scheduled_event_by_state_and_by_kind_match_closed_form_multi_state():
             "state": jact.cashflows.ByState(terminal=True),
             "kind": jact.cashflows.ByKind(terminal=True),
         },
-    ).cashflows
+    ))
 
     expected_active = active_benefit * jnp.exp(-total_rate * event_time)
     expected_disabled = (
@@ -1224,7 +1233,7 @@ def test_scheduled_event_snaps_near_grid_before_flooring():
         payments={"active": _constant_payment(7.0, 5)},
     )})
 
-    result = model.solve(
+    result = _cashflows(model.solve(
         initial="active",
         horizon=3,
         steps_per_unit=1,
@@ -1238,7 +1247,7 @@ def test_scheduled_event_snaps_near_grid_before_flooring():
             -1e-4,
             3.0 - 1e-4,
         ], dtype=jnp.float32),
-    ).cashflows["bonus"]
+    ))["bonus"]
 
     expected = jnp.array([
         [0.0, 0.0, 7.0, 0.0, 0.0],
@@ -1256,7 +1265,7 @@ def test_duration_event_no_transition_point_mass_pays_once_at_duration():
         payments={"disabled": _constant_payment(1000.0, 2)},
     )})
 
-    result = model.solve(
+    result = _cashflows(model.solve(
         initial="disabled",
         initial_duration=jnp.array([0.0, 0.25]),
         horizon=1,
@@ -1265,9 +1274,9 @@ def test_duration_event_no_transition_point_mass_pays_once_at_duration():
         cashflows=cashflows,
         cashflow_views={"waiting": jact.cashflows.Raw("waiting", terminal=True)},
         age=jnp.arange(2.0),
-    )
+    ))
 
-    assert jnp.allclose(result.cashflows["waiting"], jnp.array([1000.0, 1000.0]))
+    assert jnp.allclose(result["waiting"], jnp.array([1000.0, 1000.0]))
 
 
 def test_duration_event_target_snaps_like_scheduled_event():
@@ -1282,7 +1291,7 @@ def test_duration_event_target_snaps_like_scheduled_event():
         payments={"disabled": _constant_payment(7.0, 5)},
     )})
 
-    result = model.solve(
+    result = _cashflows(model.solve(
         initial="disabled",
         horizon=3,
         steps_per_unit=1,
@@ -1296,7 +1305,7 @@ def test_duration_event_target_snaps_like_scheduled_event():
             -1e-4,
             3.0 - 1e-4,
         ], dtype=jnp.float32),
-    ).cashflows["waiting"]
+    ))["waiting"]
 
     expected = jnp.array([
         [0.0, 0.0, 7.0, 0.0, 0.0],
@@ -1314,7 +1323,7 @@ def test_duration_event_off_grid_initial_duration_triggers_by_reaching_target():
         payments={"disabled": _constant_payment(11.0, 3)},
     )})
 
-    result = model.solve(
+    result = _cashflows(model.solve(
         initial="disabled",
         initial_duration=jnp.array([0.37, 0.63, 0.5], dtype=jnp.float32),
         horizon=1,
@@ -1323,7 +1332,7 @@ def test_duration_event_off_grid_initial_duration_triggers_by_reaching_target():
         cashflows=cashflows,
         cashflow_views={"waiting": jact.cashflows.Raw("waiting")},
         age=jnp.arange(3.0),
-    ).cashflows["waiting"]
+    ))["waiting"]
 
     expected = jnp.array([
         [11.0, 0.0, 11.0],
@@ -1348,7 +1357,7 @@ def test_duration_event_constant_exit_matches_survival_to_at_duration():
         payments={"disabled": _constant_payment(benefit, 3)},
     )})
 
-    result = model.solve(
+    result = _cashflows(model.solve(
         initial="disabled",
         initial_duration=initial_duration,
         horizon=1,
@@ -1357,12 +1366,12 @@ def test_duration_event_constant_exit_matches_survival_to_at_duration():
         cashflows=cashflows,
         cashflow_views={"waiting": jact.cashflows.Raw("waiting", terminal=True)},
         age=jnp.arange(3.0),
-    )
+    ))
 
     expected = benefit * jnp.exp(
         -mu * jnp.maximum(at_duration - initial_duration, 0.0)
     )
-    assert jnp.allclose(result.cashflows["waiting"], expected, atol=1e-5)
+    assert jnp.allclose(result["waiting"], expected, atol=1e-5)
 
 
 def test_discounted_duration_event_matches_present_value():
@@ -1397,7 +1406,7 @@ def test_discounted_duration_event_matches_present_value():
         * jnp.exp(-mu * at_duration)
         * jnp.exp(-discount_rate * at_duration)
     )
-    assert jnp.allclose(result.cashflows["pv"], expected, atol=1e-5)
+    assert jnp.allclose(_cashflows(result)["pv"], expected, atol=1e-5)
 
 
 def test_duration_event_stochastic_inflow_matches_closed_form():
@@ -1433,7 +1442,7 @@ def test_duration_event_stochastic_inflow_matches_closed_form():
         * jnp.exp(-mu * at_duration)
         * (1.0 - jnp.exp(-onset * (horizon - at_duration)))
     )
-    assert jnp.allclose(result.cashflows["waiting"], expected, atol=5e-1)
+    assert jnp.allclose(_cashflows(result)["waiting"], expected, atol=5e-1)
 
 
 def test_duration_event_views_by_state_by_kind_and_total_agree():
@@ -1444,7 +1453,7 @@ def test_duration_event_views_by_state_by_kind_and_total_agree():
         payments={"disabled": _constant_payment(1000.0)},
     )})
 
-    result = model.solve(
+    result = _cashflows(model.solve(
         initial="disabled",
         horizon=1,
         steps_per_unit=4,
@@ -1456,7 +1465,7 @@ def test_duration_event_views_by_state_by_kind_and_total_agree():
             "kind": jact.cashflows.ByKind(terminal=True),
             "total": jact.cashflows.Total(terminal=True),
         },
-    ).cashflows
+    ))
 
     assert jnp.allclose(result["raw"], 1000.0)
     assert jnp.allclose(result["state"]["disabled"], result["raw"])

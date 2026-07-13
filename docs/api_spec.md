@@ -791,13 +791,43 @@ Initial forms:
 
 Result:
 
-`solve()` returns a `ModelResult` dataclass with attribute-only access:
+`solve()` returns a `ModelResult[ProbabilityT]` dataclass with attribute-only
+access. Editors infer `ProbabilityT` from the selected reducer or callback;
+using the unparameterized `ModelResult` annotation remains supported:
 
 ```python
 result.states         # tuple[str, ...] — always set
 result.probability    # None when probability=None was passed
 result.cashflows      # None when cashflows=None was passed
 ```
+
+For example, the probability attribute is inferred without annotations at the
+call site:
+
+```python
+default_result = model.solve("healthy", 10, 12)
+default_result.probability  # jax.Array
+
+point_result = model.solve(
+    "healthy", 10, 12, probability=jact.probability.PointMass()
+)
+point_result.probability  # dict[str, jax.Array]
+
+disabled_result = model.solve("healthy", 10, 12, probability=None)
+disabled_result.probability  # None
+
+def selected_density(state):
+    return {"first": (state[0].density, [state[1].density])}
+
+custom_result = model.solve(
+    "healthy", 10, 12, probability=selected_density
+)
+custom_result.probability  # dict[str, tuple[jax.Array, list[jax.Array]]]
+```
+
+The cashflow payload is typed independently as a mapping whose values are
+either arrays or grouped array mappings, and remains `None` when cashflows are
+not requested.
 
 `result.states` is the tuple of reachable states in reduced order. Disabled
 outputs are `None` rather than missing attributes. `probability=None`

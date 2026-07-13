@@ -223,6 +223,8 @@ Before cutting a PyPI release:
 rm -rf build dist src/*.egg-info
 python -m build --no-isolation
 python -m twine check dist/*
+python3.10 tools/check_installed_typing.py --python-version 3.10 dist/*.whl
+python3.12 tools/check_installed_typing.py --python-version 3.12 dist/*.whl
 pyright
 ruff check src tests
 pytest -q
