@@ -9,6 +9,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 import jact
@@ -889,6 +890,19 @@ class TestSolverEntry:
         assert jnp.allclose(healthy[0], jnp.array([1.0, 0.0, 0.0]))
         assert jnp.allclose(disabled[0], jnp.array([0.0, 1.0, 0.0]))
         assert jnp.allclose(dead[0], jnp.array([0.0, 0.0, 1.0]))
+
+    def test_numpy_integer_shortcut_is_accepted(self, illness_death_model):
+        result = illness_death_model.solve(
+            initial=np.array([0, 2], dtype=np.int32),
+            horizon=1,
+            steps_per_unit=2,
+            probability=PointMass(),
+            age=jnp.arange(2, dtype=jnp.float32),
+        )
+
+        initial_point = result.probability
+        assert jnp.allclose(initial_point["healthy"][0], jnp.array([1.0, 0.0]))
+        assert jnp.allclose(initial_point["dead"][0], jnp.array([0.0, 1.0]))
 
     def test_per_individual_distribution_reduces_to_declared_subgraph(
         self, illness_death_model

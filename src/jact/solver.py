@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from numbers import Integral
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -1396,7 +1396,6 @@ def _solver_value_dtype(
             *canonical.durations,
             *kwargs.values(),
         )
-        if value is not None
     ]
     float_leaves = [
         leaf for leaf in leaves if jnp.issubdtype(leaf.dtype, jnp.inexact)
@@ -1425,7 +1424,7 @@ def _validate_positive_integer(name: str, value: object) -> int:
 
 
 def _canonicalize_initial(
-    initial: str | jnp.ndarray | InitialDistribution,
+    initial: str | ArrayLike | InitialDistribution,
     initial_duration: ArrayLike,
 ) -> InitialDistribution:
     if isinstance(initial, InitialDistribution):
@@ -1534,6 +1533,9 @@ def _prepare_cashflow_views(
     }
     prepared: list[PreparedCashflowView] = []
     for view_name, view in frozen_views:
+        # validate_cashflow_views normalizes scalar arrays and rejects all
+        # remaining non-callable ArrayLike weights.
+        weight = cast(Weight | Scalar | None, view.weight)
         if isinstance(view, Raw):
             if view.name is None:
                 leaf_names = declaration.names
@@ -1578,7 +1580,7 @@ def _prepare_cashflow_views(
             PreparedCashflowView(
                 name=view_name,
                 terminal=view.terminal,
-                weight=view.weight,
+                weight=weight,
                 sources=sources,
                 leaf_names=tuple(leaf_names),
                 output=output,

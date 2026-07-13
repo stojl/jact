@@ -9,6 +9,8 @@ from typing import Any, get_type_hints
 import jax.numpy as jnp
 
 import jact
+from jact._cashflow_ir import PreparedCashflowView
+from jact.cashflows import Scalar, Total, _normalised_view
 from jact.initial_distribution import _CanonicalDistribution, _component_payload
 from jact.model import ReducedModel, SolverMatrix, _make_slice_wrapper
 from jact.probability import (
@@ -20,7 +22,7 @@ from jact.probability import (
     _point_mass_callback,
     _state_probability_callback,
 )
-from jact.solver import _SolverResult
+from jact.solver import _canonicalize_initial, _SolverResult
 
 
 def _grid_callable(
@@ -52,6 +54,7 @@ weight: jact.typing.Weight = _weight_callable
 
 def _internal_type_check(
     initial: jact.InitialDistribution,
+    initial_value: jact.typing.ArrayLike,
     model: jact.Model,
     state: tuple[StateCarry, ...],
 ) -> None:
@@ -81,6 +84,21 @@ def _internal_type_check(
         jnp.asarray(0.0),
         jnp.zeros((1, 1)),
     )
+    shortcut: jact.InitialDistribution = _canonicalize_initial(
+        initial_value, 0.0
+    )
+    normalised_view = _normalised_view(Total(weight=jnp.asarray(0.5)))
+    normalised_weight: jact.typing.Weight | Scalar | None = (
+        normalised_view.weight
+    )
+    prepared_view = PreparedCashflowView(
+        name="total",
+        terminal=False,
+        weight=normalised_weight,
+        sources=(),
+        leaf_names=("total",),
+        output="single",
+    )
     _ = (
         canonical,
         mass_value,
@@ -93,6 +111,8 @@ def _internal_type_check(
         terminal,
         solver_matrix,
         sliced_output,
+        shortcut,
+        prepared_view,
     )
 
 

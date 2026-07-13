@@ -14,7 +14,7 @@ from jax.typing import ArrayLike
 from .state_space import StateSpace
 from .typing import DurationAt, Payment, Weight, When
 
-Scalar = int | float
+Scalar = bool | int | float | complex
 
 __all__ = [
     "ByKind",
@@ -197,7 +197,7 @@ def _normalise_weight(
     if weight is None:
         return None
     if _is_scalar_array_like(weight):
-        return jnp.asarray(weight).item()
+        return cast(Scalar, jnp.asarray(weight).item())
     return cast(Weight, weight)
 
 
