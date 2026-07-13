@@ -1,4 +1,4 @@
-# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false
+# pyright: strict, reportMissingImports=false
 """Private typed intermediate representation for solver cashflows."""
 
 from __future__ import annotations

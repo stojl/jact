@@ -1,4 +1,4 @@
-# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false
+# pyright: strict, reportMissingImports=false
 
 """Callable protocols used by jact models and cashflows."""
 

@@ -1,4 +1,4 @@
-# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportUntypedClassDecorator=false
+# pyright: strict, reportMissingImports=false, reportUntypedClassDecorator=false
 
 """Typed result of `Model.solve()`."""
 
