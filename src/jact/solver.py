@@ -10,6 +10,7 @@ from typing import Any, NamedTuple, TypeAlias, TypeVar, cast
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from ._cashflow_ir import (
     CashflowComponentSpecs,
@@ -75,6 +76,7 @@ _KIND_SCHEDULED_EVENT = 2
 _KIND_DURATION_EVENT = 3
 
 _ProbabilityTree: TypeAlias = Any
+_DType: TypeAlias = np.dtype[np.generic]
 _PyTreeT = TypeVar("_PyTreeT")
 
 class _RowHazards(NamedTuple):
@@ -352,7 +354,7 @@ def _scheduled_event_index(
     event_time: jnp.ndarray,
     step_size: float,
 ) -> jnp.ndarray:
-    dtype = cast(Any, jnp.result_type(event_time, 1.0))
+    dtype = cast(_DType, jnp.result_type(event_time, 1.0))
     x = jnp.asarray(event_time, dtype=dtype) / jnp.asarray(step_size, dtype=dtype)
     nearest = jnp.round(x)
     tol = jnp.sqrt(jnp.asarray(jnp.finfo(x.dtype).eps, dtype=x.dtype))
@@ -364,7 +366,7 @@ def _duration_event_index(
     at_duration: jnp.ndarray,
     step_size: float,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    dtype = cast(Any, jnp.result_type(at_duration, 1.0))
+    dtype = cast(_DType, jnp.result_type(at_duration, 1.0))
     step = jnp.asarray(step_size, dtype=dtype)
     at_duration_index = _scheduled_event_index(at_duration, step_size)
     effective_at_duration = at_duration_index.astype(dtype) * step
@@ -375,7 +377,7 @@ def _is_near_grid_zero(
     value: jnp.ndarray,
     step_size: float,
 ) -> jnp.ndarray:
-    dtype = cast(Any, jnp.result_type(value, 1.0))
+    dtype = cast(_DType, jnp.result_type(value, 1.0))
     x = jnp.asarray(value, dtype=dtype) / jnp.asarray(step_size, dtype=dtype)
     tol = jnp.sqrt(jnp.asarray(jnp.finfo(x.dtype).eps, dtype=x.dtype))
     return jnp.abs(x) <= tol
@@ -1398,7 +1400,7 @@ def _split_scalar_and_batch_kwargs(
 def _solver_value_dtype(
     canonical: _CanonicalDistribution,
     kwargs: Mapping[str, jnp.ndarray],
-) -> Any:
+) -> _DType:
     leaves = [
         jnp.asarray(value)
         for value in (
@@ -1411,8 +1413,8 @@ def _solver_value_dtype(
         leaf for leaf in leaves if jnp.issubdtype(leaf.dtype, jnp.inexact)
     ]
     if not float_leaves:
-        return cast(Any, jnp.asarray(0.0).dtype)
-    return cast(Any, jnp.result_type(*float_leaves))
+        return cast(_DType, jnp.asarray(0.0).dtype)
+    return cast(_DType, jnp.result_type(*float_leaves))
 
 
 def _broadcast_batch(value: ArrayLike, batch_size: int) -> jnp.ndarray:

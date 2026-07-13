@@ -42,7 +42,7 @@ from . import cashflows, probability, typing, wrappers
 from .initial_distribution import InitialDistribution
 from .model import Model
 from .result import ModelResult
-from .solver import solve  # pyright: ignore[reportUnknownVariableType]
+from .solver import solve
 from .state_space import StateSpace
 
 try:

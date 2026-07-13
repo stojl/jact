@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence, cast
+from typing import Iterable, Mapping, Sequence, TypeAlias, cast
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from .typing import ArrayLike
+
+_DType: TypeAlias = np.dtype[np.generic]
 
 __all__ = ["InitialDistribution"]
 
@@ -74,7 +77,7 @@ def _component_payload(
 
 def _validate_integer_indices_if_concrete(states: ArrayLike) -> None:
     try:
-        dtype = cast(Any, jnp.asarray(states).dtype)
+        dtype = cast(_DType, jnp.asarray(states).dtype)
     except Exception as exc:  # pragma: no cover - tracer path
         if not _is_tracer_or_concretization_error(exc):
             raise
