@@ -38,7 +38,13 @@ def test_bind_intensity_returns_batch_by_duration_output():
         apply_kwargs={"offset": -100.0},
     )
 
-    out = intensity(0.5, jnp.array([[0.0, 1.0]]), age=jnp.array([40.0, 50.0]))
+    out = jnp.asarray(
+        intensity(
+            jnp.asarray(0.5),
+            jnp.array([[0.0, 1.0]]),
+            age=jnp.array([40.0, 50.0]),
+        )
+    )
 
     assert out.shape == (2, 2)
     assert jnp.all(out >= 0.0)
@@ -68,7 +74,13 @@ def test_bind_intensity_accepts_broadcastable_raw_outputs(
 
     intensity = jact.wrappers.bind_intensity(apply_broadcastable, {}, _feature_fn)
 
-    out = intensity(0.0, jnp.array([[1.0, 2.0]]), age=jnp.array([10.0, 20.0]))
+    out = jnp.asarray(
+        intensity(
+            jnp.asarray(0.0),
+            jnp.array([[1.0, 2.0]]),
+            age=jnp.array([10.0, 20.0]),
+        )
+    )
 
     assert out.shape == expected_shape
     assert jnp.all(out >= 0.0)
@@ -83,7 +95,13 @@ def test_bind_grouped_intensity_normalizes_batch_duration_output_axis_last():
         output_axis=-1,
     )
 
-    out = intensity(0.0, jnp.array([[1.0, 2.0]]), age=jnp.array([10.0, 20.0]))
+    out = jnp.asarray(
+        intensity(
+            jnp.asarray(0.0),
+            jnp.array([[1.0, 2.0]]),
+            age=jnp.array([10.0, 20.0]),
+        )
+    )
 
     assert out.shape == (3, 2, 2)
     assert jnp.all(out >= 0.0)
@@ -100,7 +118,13 @@ def test_bind_grouped_intensity_keeps_output_axis_zero():
         output_axis=0,
     )
 
-    out = intensity(0.0, jnp.array([[1.0, 2.0]]), age=jnp.array([10.0, 20.0]))
+    out = jnp.asarray(
+        intensity(
+            jnp.asarray(0.0),
+            jnp.array([[1.0, 2.0]]),
+            age=jnp.array([10.0, 20.0]),
+        )
+    )
 
     assert out.shape == (3, 2, 2)
     assert jnp.allclose(out[1], jnp.array([[11.5, 12.5], [21.5, 22.5]]))
@@ -115,7 +139,7 @@ def test_bind_exit_intensity_rejects_mismatched_output_count():
     )
 
     with pytest.raises(ValueError, match="output_count"):
-        intensity(0.0, jnp.array([[1.0]]), age=jnp.array([10.0]))
+        intensity(jnp.asarray(0.0), jnp.array([[1.0]]), age=jnp.array([10.0]))
 
 
 def test_bind_grouped_intensity_accepts_broadcastable_selected_outputs():
@@ -131,7 +155,13 @@ def test_bind_grouped_intensity_accepts_broadcastable_selected_outputs():
         output_axis=0,
     )
 
-    out = intensity(0.0, jnp.array([[1.0, 2.0]]), age=jnp.array([10.0, 20.0]))
+    out = jnp.asarray(
+        intensity(
+            jnp.asarray(0.0),
+            jnp.array([[1.0, 2.0]]),
+            age=jnp.array([10.0, 20.0]),
+        )
+    )
 
     assert out.shape == (3,)
     assert jnp.allclose(out, jnp.array([0.1, 0.2, 0.3]))
@@ -157,7 +187,11 @@ def test_bind_intensity_rejects_invalid_output_rank():
     intensity = jact.wrappers.bind_intensity(apply_wrong_width, {}, _feature_fn)
 
     with pytest.raises(ValueError, match="broadcast"):
-        intensity(0.0, jnp.array([[1.0, 2.0]]), age=jnp.array([10.0]))
+        intensity(
+            jnp.asarray(0.0),
+            jnp.array([[1.0, 2.0]]),
+            age=jnp.array([10.0]),
+        )
 
 
 def test_wrapped_transition_intensity_solves_through_state_space_build():
@@ -191,11 +225,22 @@ def test_gradients_flow_through_params():
     def loss(scale):
         params: Mapping[str, Any] = {"scale": scale}
         bound = jact.wrappers.bind_intensity(_apply_single, params, _feature_fn)
-        out = bound(0.0, jnp.array([[1.0, 2.0]]), age=jnp.array([10.0, 20.0]))
+        out = bound(
+            jnp.asarray(0.0),
+            jnp.array([[1.0, 2.0]]),
+            age=jnp.array([10.0, 20.0]),
+        )
         return jnp.sum(out)
 
     assert jnp.allclose(jax.grad(loss)(0.1), 66.0)
-    assert intensity(0.0, jnp.array([[1.0]]), age=jnp.array([10.0])).shape == (1, 1)
+    out = jnp.asarray(
+        intensity(
+            jnp.asarray(0.0),
+            jnp.array([[1.0]]),
+            age=jnp.array([10.0]),
+        )
+    )
+    assert out.shape == (1, 1)
 
 
 @pytest.mark.parametrize(
