@@ -1176,7 +1176,7 @@ def _midpoint_solver_pmapped_all_devices(
 
 
 def _midpoint_solver_pmapped_on_devices(
-    devices: tuple[jax.Device, ...],
+    devices: tuple[Any, ...],
 ) -> Callable[..., _SolverResult]:
     return jax.pmap(
         _midpoint_solver_pmapped_wrapper,
@@ -1631,14 +1631,18 @@ def _format_cashflow_view_values(
     return formatted
 
 
+def _local_devices() -> tuple[Any, ...]:
+    return tuple(cast(Sequence[Any], jax.local_devices()))
+
+
 def _resolve_devices(
-    devices: int | Sequence[jax.Device] | None,
-) -> tuple[jax.Device, ...]:
+    devices: int | Sequence[Any] | None,
+) -> tuple[Any, ...]:
     if devices is None:
         return ()
     if isinstance(devices, bool):
         raise ValueError("devices must be an integer or a sequence of jax.Device.")
-    local_devices = tuple(jax.local_devices())
+    local_devices = _local_devices()
     if isinstance(devices, int):
         device_count = int(devices)
         if device_count <= 0:
@@ -1666,7 +1670,7 @@ def _run_midpoint_solver(
     record_every: int,
     cashflow_components: CashflowComponentSpecs,
     cashflow_views: PreparedCashflowViews,
-    devices: tuple[jax.Device, ...],
+    devices: tuple[Any, ...],
 ) -> _SolverResult:
     if len(devices) <= 1:
         return cast(_SolverResult, _midpoint_solver(
@@ -1694,7 +1698,7 @@ def _run_midpoint_solver(
     else:
         sharded_batch_kwargs = {}
 
-    if devices == tuple(jax.local_devices()):
+    if devices == _local_devices():
         sharded_result = _midpoint_solver_pmapped_all_devices(
             sharded_state_0,
             duration_mid,
@@ -1738,7 +1742,7 @@ def solve(
     cashflows: CashflowDeclaration | None = None,
     cashflow_views: Mapping[str, CashflowView] | None = None,
     record_every: int = 1,
-    devices: int | Sequence[jax.Device] | None = None,
+    devices: int | Sequence[Any] | None = None,
     **kwargs: Any,
 ) -> ModelResult[jax.Array]: ...
 
@@ -1754,7 +1758,7 @@ def solve(
     cashflows: CashflowDeclaration | None = None,
     cashflow_views: Mapping[str, CashflowView] | None = None,
     record_every: int = 1,
-    devices: int | Sequence[jax.Device] | None = None,
+    devices: int | Sequence[Any] | None = None,
     **kwargs: Any,
 ) -> ModelResult[PointMassResult]: ...
 
@@ -1770,7 +1774,7 @@ def solve(
     cashflows: CashflowDeclaration | None = None,
     cashflow_views: Mapping[str, CashflowView] | None = None,
     record_every: int = 1,
-    devices: int | Sequence[jax.Device] | None = None,
+    devices: int | Sequence[Any] | None = None,
     **kwargs: Any,
 ) -> ModelResult[ComponentsResult]: ...
 
@@ -1786,7 +1790,7 @@ def solve(
     cashflows: CashflowDeclaration | None = None,
     cashflow_views: Mapping[str, CashflowView] | None = None,
     record_every: int = 1,
-    devices: int | Sequence[jax.Device] | None = None,
+    devices: int | Sequence[Any] | None = None,
     **kwargs: Any,
 ) -> ModelResult[None]: ...
 
@@ -1802,7 +1806,7 @@ def solve(
     cashflows: CashflowDeclaration | None = None,
     cashflow_views: Mapping[str, CashflowView] | None = None,
     record_every: int = 1,
-    devices: int | Sequence[jax.Device] | None = None,
+    devices: int | Sequence[Any] | None = None,
     **kwargs: Any,
 ) -> ModelResult[_PyTreeT]: ...
 
@@ -1819,7 +1823,7 @@ def solve(
     cashflows: CashflowDeclaration | None = None,
     cashflow_views: Mapping[str, CashflowView] | None = None,
     record_every: int = 1,
-    devices: int | Sequence[jax.Device] | None = None,
+    devices: int | Sequence[Any] | None = None,
     **kwargs: Any,
 ) -> ModelResult[PointMassResult]: ...
 
@@ -1836,7 +1840,7 @@ def solve(
     cashflows: CashflowDeclaration | None = None,
     cashflow_views: Mapping[str, CashflowView] | None = None,
     record_every: int = 1,
-    devices: int | Sequence[jax.Device] | None = None,
+    devices: int | Sequence[Any] | None = None,
     **kwargs: Any,
 ) -> ModelResult[ComponentsResult]: ...
 
@@ -1853,7 +1857,7 @@ def solve(
     cashflows: CashflowDeclaration | None = None,
     cashflow_views: Mapping[str, CashflowView] | None = None,
     record_every: int = 1,
-    devices: int | Sequence[jax.Device] | None = None,
+    devices: int | Sequence[Any] | None = None,
     **kwargs: Any,
 ) -> ModelResult[None]: ...
 
@@ -1870,7 +1874,7 @@ def solve(
     cashflows: CashflowDeclaration | None = None,
     cashflow_views: Mapping[str, CashflowView] | None = None,
     record_every: int = 1,
-    devices: int | Sequence[jax.Device] | None = None,
+    devices: int | Sequence[Any] | None = None,
     **kwargs: Any,
 ) -> ModelResult[_PyTreeT]: ...
 
@@ -1885,7 +1889,7 @@ def solve(
     cashflows: CashflowDeclaration | None = None,
     cashflow_views: Mapping[str, CashflowView] | None = None,
     record_every: int = 1,
-    devices: int | Sequence[jax.Device] | None = None,
+    devices: int | Sequence[Any] | None = None,
     **kwargs: Any,
 ) -> ModelResult[Any]:
     """Compute transition probabilities from a documented initial condition."""

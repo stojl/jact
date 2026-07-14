@@ -5,9 +5,13 @@ from __future__ import annotations
 import argparse
 import sys
 from importlib.resources import files
-from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Sequence
+
+if sys.version_info >= (3, 11):
+    from importlib.resources.abc import Traversable
+else:
+    from importlib.abc import Traversable
 
 _SKILL_RELATIVE_PATH = "agents/jact/SKILL.md"
 

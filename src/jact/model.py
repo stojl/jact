@@ -340,7 +340,7 @@ class Model:
         cashflows: CashflowDeclaration | None = None,
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
-        devices: int | Sequence[jax.Device] | None = None,
+        devices: int | Sequence[Any] | None = None,
         **kwargs: Any,
     ) -> ModelResult[jax.Array]: ...
 
@@ -355,7 +355,7 @@ class Model:
         cashflows: CashflowDeclaration | None = None,
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
-        devices: int | Sequence[jax.Device] | None = None,
+        devices: int | Sequence[Any] | None = None,
         **kwargs: Any,
     ) -> ModelResult[PointMassResult]: ...
 
@@ -370,7 +370,7 @@ class Model:
         cashflows: CashflowDeclaration | None = None,
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
-        devices: int | Sequence[jax.Device] | None = None,
+        devices: int | Sequence[Any] | None = None,
         **kwargs: Any,
     ) -> ModelResult[ComponentsResult]: ...
 
@@ -385,7 +385,7 @@ class Model:
         cashflows: CashflowDeclaration | None = None,
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
-        devices: int | Sequence[jax.Device] | None = None,
+        devices: int | Sequence[Any] | None = None,
         **kwargs: Any,
     ) -> ModelResult[None]: ...
 
@@ -400,7 +400,7 @@ class Model:
         cashflows: CashflowDeclaration | None = None,
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
-        devices: int | Sequence[jax.Device] | None = None,
+        devices: int | Sequence[Any] | None = None,
         **kwargs: Any,
     ) -> ModelResult[ProbabilityT]: ...
 
@@ -416,7 +416,7 @@ class Model:
         cashflows: CashflowDeclaration | None = None,
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
-        devices: int | Sequence[jax.Device] | None = None,
+        devices: int | Sequence[Any] | None = None,
         **kwargs: Any,
     ) -> ModelResult[PointMassResult]: ...
 
@@ -432,7 +432,7 @@ class Model:
         cashflows: CashflowDeclaration | None = None,
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
-        devices: int | Sequence[jax.Device] | None = None,
+        devices: int | Sequence[Any] | None = None,
         **kwargs: Any,
     ) -> ModelResult[ComponentsResult]: ...
 
@@ -448,7 +448,7 @@ class Model:
         cashflows: CashflowDeclaration | None = None,
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
-        devices: int | Sequence[jax.Device] | None = None,
+        devices: int | Sequence[Any] | None = None,
         **kwargs: Any,
     ) -> ModelResult[None]: ...
 
@@ -464,7 +464,7 @@ class Model:
         cashflows: CashflowDeclaration | None = None,
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
-        devices: int | Sequence[jax.Device] | None = None,
+        devices: int | Sequence[Any] | None = None,
         **kwargs: Any,
     ) -> ModelResult[ProbabilityT]: ...
 
@@ -480,7 +480,7 @@ class Model:
             Mapping[str, CashflowView] | None
         ) = None,
         record_every: int = 1,
-        devices: int | Sequence[jax.Device] | None = None,
+        devices: int | Sequence[Any] | None = None,
         **kwargs: Any,
     ) -> ModelResult[Any]:
         """Compute transition probabilities from a documented initial condition.
