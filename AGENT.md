@@ -7,7 +7,7 @@ This file provides guidance to coding agents when working with code in this repo
 ```bash
 pip install -e ".[dev]"           # install with dev deps (pyright, ruff, pytest)
 pyright                           # type check (uses pyproject include = src/jact, tests)
-ruff check src/jact               # lint (imports, style, unused code)
+ruff check src tests              # lint (imports, style, unused code)
 pytest                            # run all tests
 pytest tests/test_state_space.py  # run one file
 pytest -k test_reachable_from     # run tests matching a name
@@ -15,9 +15,9 @@ pytest -x                         # stop on first failure
 ```
 
 **Quality checks:**
-- **pyright** (basic mode) catches type mismatches and undefined names
+- **pyright** (standard mode) checks public and internal type consistency
 - **ruff** enforces import order, detects unused code, and flags common errors
-- Run both before committing: `pyright && ruff check src/jact`
+- Before committing, run `pyright`, `ruff check src tests`, and `pytest`
 
 ## Architecture
 
@@ -58,11 +58,11 @@ specification in the repo.
   (`StateProbability`, `DensityProbability`, `Density`, `PointMass`,
   `MarginalComponents`, `Full`), a custom callable
   `(state) -> PyTree`, or `None`. Strings are rejected.
-- Public types live under three submodules: `jact.cashflows` (declarations
-  and views), `jact.probability` (output reducers), and `jact.wrappers`
-  (fitted-model intensity helpers). The top level only
-  exposes `StateSpace`, `Model`, `InitialDistribution`, `ModelResult`,
-  `solve`, and the submodules. There are no flat aliases.
+- Public types live under four submodules: `jact.cashflows` (declarations
+  and views), `jact.probability` (output reducers), `jact.typing` (callable
+  protocols), and `jact.wrappers` (fitted-model intensity helpers). The top
+  level only exposes `StateSpace`, `Model`, `InitialDistribution`,
+  `ModelResult`, `solve`, and the submodules. There are no flat aliases.
 - If `cashflows` is supplied and `cashflow_views` is omitted or `None`, the
   solver defaults to `{"raw": jact.cashflows.Raw()}`. `cashflow_views={}`
   is allowed and returns an empty mapping.

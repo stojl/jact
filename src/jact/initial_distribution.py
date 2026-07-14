@@ -1,14 +1,18 @@
+# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportUntypedClassDecorator=false
 """Initial state-and-duration distribution for solver entry."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, Sequence, TypeAlias, cast
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
-ArrayLike = Any
+from .typing import ArrayLike
+
+_DType: TypeAlias = np.dtype[np.generic]
 
 __all__ = ["InitialDistribution"]
 
@@ -26,7 +30,7 @@ def _as_tuple_of_unique_states(
     if len(states) != len(set(states)):
         raise ValueError("initial_states must contain unique state names.")
     for state in states:
-        if not isinstance(state, str):
+        if not isinstance(state, str):  # pyright: ignore[reportUnnecessaryIsInstance]
             raise TypeError(
                 "initial_states must contain only strings, "
                 f"got {type(state)}"
@@ -56,7 +60,7 @@ def _validate_non_negative_if_concrete(name: str, value: ArrayLike) -> None:
 
 
 def _component_payload(
-    payload: Any,
+    payload: object,
 ) -> tuple[ArrayLike, ArrayLike]:
     if not isinstance(payload, Mapping):
         raise TypeError(
@@ -67,12 +71,13 @@ def _component_payload(
         raise ValueError(
             "Each component must contain both 'mass' and 'duration'."
         )
-    return payload["mass"], payload["duration"]
+    values = cast(Mapping[str, object], payload)
+    return cast(ArrayLike, values["mass"]), cast(ArrayLike, values["duration"])
 
 
 def _validate_integer_indices_if_concrete(states: ArrayLike) -> None:
     try:
-        dtype = jnp.asarray(states).dtype
+        dtype = cast(_DType, jnp.asarray(states).dtype)
     except Exception as exc:  # pragma: no cover - tracer path
         if not _is_tracer_or_concretization_error(exc):
             raise
@@ -134,7 +139,7 @@ class InitialDistribution:
         self,
         components: Mapping[str, Mapping[str, ArrayLike]],
         normalise: bool = True,
-    ):
+    ) -> None:
         if not components:
             raise ValueError("components must be a non-empty mapping.")
 
@@ -144,7 +149,7 @@ class InitialDistribution:
         batch_size: int | None = None
 
         for state, payload in components.items():
-            if not isinstance(state, str):
+            if not isinstance(state, str):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise TypeError(
                     "components keys must be state names (strings), "
                     f"got {type(state)}"
@@ -268,7 +273,12 @@ class InitialDistribution:
     def declared_initial_states(self) -> tuple[str, ...] | None:
         return self._declared_states
 
-    def tree_flatten(self):
+    def tree_flatten(
+        self,
+    ) -> tuple[
+        tuple[ArrayLike | None, ...],
+        tuple[str, tuple[str, ...] | None, bool, int],
+    ]:
         children = (
             *self._masses,
             *self._durations,
@@ -284,7 +294,11 @@ class InitialDistribution:
         return children, aux
 
     @classmethod
-    def tree_unflatten(cls, aux, children):
+    def tree_unflatten(
+        cls,
+        aux: tuple[str, tuple[str, ...] | None, bool, int],
+        children: tuple[ArrayLike | None, ...],
+    ) -> InitialDistribution:
         kind, declared_states, normalise, n_components = aux
         masses = tuple(children[:n_components])
         durations = tuple(children[n_components : 2 * n_components])
@@ -301,7 +315,7 @@ class InitialDistribution:
         return self
 
     def _batch_size(self) -> int | None:
-        arrays: Iterable[ArrayLike]
+        arrays: Iterable[ArrayLike | None]
         if self._kind == "components":
             arrays = (*self._masses, *self._durations)
         else:
@@ -355,8 +369,12 @@ class InitialDistribution:
                 "per_individual requires a rank-1 states array to define batch size."
             )
 
-        duration = self._broadcast_value(self._per_individual_duration, batch_size)
-        indices = jnp.asarray(self._state_indices)
+        per_individual_duration = self._per_individual_duration
+        state_indices = self._state_indices
+        if per_individual_duration is None or state_indices is None:
+            raise ValueError("per_individual distribution has incomplete values.")
+        duration = self._broadcast_value(per_individual_duration, batch_size)
+        indices = jnp.asarray(state_indices)
         one_hot = jax.nn.one_hot(indices, len(states), dtype=duration.dtype)
         masses = tuple(one_hot[:, i] for i in range(len(states)))
         durations = tuple(duration for _ in states)
@@ -379,10 +397,10 @@ class InitialDistribution:
         if self._kind != "per_individual":
             return
 
+        indices = jnp.asarray(self._state_indices)
+        n_states = len(self.active_initial_states(model_states))
+        is_valid = jnp.all((indices >= 0) & (indices < n_states))
         try:
-            indices = jnp.asarray(self._state_indices)
-            n_states = len(self.active_initial_states(model_states))
-            is_valid = jnp.all((indices >= 0) & (indices < n_states))
             if not bool(is_valid):
                 _raise_invalid_per_individual_indices(False)
         except Exception as exc:  # pragma: no cover - tracer path

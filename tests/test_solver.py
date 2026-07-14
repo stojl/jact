@@ -5,13 +5,20 @@ from __future__ import annotations
 
 import inspect
 import math
-from typing import Any
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 import jact
+from jact._cashflow_ir import (
+    ComponentSource,
+    PreparedCashflowView,
+    StatePayment,
+    StateRateSpec,
+)
 from jact.probability import (
     Density,
     DensityProbability,
@@ -23,9 +30,9 @@ from jact.probability import (
     _PointMass,
 )
 from jact.solver import (
-    _KIND_STATE_RATE,
-    _SOURCE_COMPONENT,
     _midpoint_solver,
+    _prepare_cashflow_components,
+    _prepare_cashflow_views,
     _shard_batch_tree,
     _split_scalar_and_batch_kwargs,
     _unshard_batch_tree,
@@ -34,6 +41,13 @@ from jact.solver import (
 # JAX's JitWrapped exposes .clear_cache()/._cache_size() at runtime but they
 # aren't in pyright's stubs — alias to Any for the cache-management tests.
 _solver_cache: Any = _midpoint_solver
+
+
+def _cashflows(result: jact.ModelResult[Any]) -> dict[str, Any]:
+    """Return cashflows when this test intentionally requested known views."""
+    cashflows = result.cashflows
+    assert cashflows is not None
+    return cast(dict[str, Any], cashflows)
 
 LAMBDA_HD = 0.3
 MU_HM = 0.2
@@ -494,20 +508,21 @@ class TestSolverContinuityAndStability:
             {},
             lambda _state: None,
             solver_steps,
-            ((_KIND_STATE_RATE, ((0, unit_payment),)),),
+            (StateRateSpec((StatePayment(0, unit_payment),)),),
             (
-                (
-                    "annuity",
-                    True,
-                    None,
-                    ((_SOURCE_COMPONENT, 0),),
-                    ("annuity",),
-                    "single",
+                PreparedCashflowView(
+                    name="annuity",
+                    terminal=True,
+                    weight=None,
+                    sources=(ComponentSource(0),),
+                    leaf_names=("annuity",),
+                    output="single",
                 ),
             ),
         )
 
-        annuity = result["cashflow_terminal"][0][0]
+        assert result.cashflow_terminal is not None
+        annuity = result.cashflow_terminal[0][0]
         expected = (1.0 - jnp.exp(-rate * horizon)) / rate
 
         assert jnp.allclose(annuity, expected, atol=5e-6, rtol=0.0)
@@ -882,6 +897,19 @@ class TestSolverEntry:
         assert jnp.allclose(healthy[0], jnp.array([1.0, 0.0, 0.0]))
         assert jnp.allclose(disabled[0], jnp.array([0.0, 1.0, 0.0]))
         assert jnp.allclose(dead[0], jnp.array([0.0, 0.0, 1.0]))
+
+    def test_numpy_integer_shortcut_is_accepted(self, illness_death_model):
+        result = illness_death_model.solve(
+            initial=np.array([0, 2], dtype=np.int32),
+            horizon=1,
+            steps_per_unit=2,
+            probability=PointMass(),
+            age=jnp.arange(2, dtype=jnp.float32),
+        )
+
+        initial_point = result.probability
+        assert jnp.allclose(initial_point["healthy"][0], jnp.array([1.0, 0.0]))
+        assert jnp.allclose(initial_point["dead"][0], jnp.array([0.0, 1.0]))
 
     def test_per_individual_distribution_reduces_to_declared_subgraph(
         self, illness_death_model
@@ -1286,6 +1314,47 @@ class TestBuiltInCallbacks:
         assert cache_after_first == cache_before + 1
         assert cache_after_second == cache_after_first
 
+    def test_equivalent_prepared_cashflows_are_hashable_and_reuse_cache(
+        self, illness_death_model
+    ):
+        _solver_cache.clear_cache()
+        payment = _constant_payment(1.0)
+        cashflows = illness_death_model.state_space.cashflows({
+            "annuity": jact.cashflows.StateRate({"healthy": payment})
+        })
+        reduced = illness_death_model.reduce(("healthy",))
+        components = _prepare_cashflow_components(
+            cashflows,
+            reduced.reachable_states,
+            reduced.solver_matrix,
+        )
+        views = _prepare_cashflow_views(
+            cashflows,
+            {"pv": jact.cashflows.Total(terminal=True)},
+            reduced.reachable_states,
+        )
+
+        assert isinstance(hash(components), int)
+        assert isinstance(hash(views), int)
+
+        kwargs = dict(
+            initial="healthy",
+            horizon=1,
+            steps_per_unit=8,
+            probability=None,
+            cashflows=cashflows,
+            cashflow_views={"pv": jact.cashflows.Total(terminal=True)},
+            age=jnp.arange(2, dtype=jnp.float32),
+        )
+        cache_before = _solver_cache._cache_size()
+        illness_death_model.solve(**kwargs)
+        cache_after_first = _solver_cache._cache_size()
+        illness_death_model.solve(**kwargs)
+        cache_after_second = _solver_cache._cache_size()
+
+        assert cache_after_first == cache_before + 1
+        assert cache_after_second == cache_after_first
+
     def test_reusing_same_custom_callback_does_not_recompile(
         self,
         illness_death_model,
@@ -1391,7 +1460,7 @@ class TestModelResultIsPyTree:
             )
         )()
         assert isinstance(out, jact.ModelResult)
-        assert out.cashflows["annuity"].shape == (8, 2)
+        assert _cashflows(out)["annuity"].shape == (8, 2)
 
     def test_jit_round_trip_with_disabled_probability(
         self, illness_death_model

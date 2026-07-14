@@ -1,3 +1,4 @@
+# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportUntypedClassDecorator=false, reportUntypedFunctionDecorator=false
 """Probability output types and dispatch.
 
 The public surface is six frozen-dataclass output types
@@ -10,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Callable, NamedTuple, Union
+from typing import Any, Callable, NamedTuple, TypedDict, Union
 
 import jax
 import jax.numpy as jnp
@@ -76,7 +77,7 @@ class _PointMass:
         value: jnp.ndarray,
         d_0: jnp.ndarray,
         log_value: jnp.ndarray | None = None,
-    ):
+    ) -> None:
         value_shape = jnp.shape(value)
         _validate_shape("d_0", d_0, value_shape)
         if log_value is not None:
@@ -90,11 +91,20 @@ class _PointMass:
             else log_value
         )
 
-    def tree_flatten(self):
+    def tree_flatten(
+        self,
+    ) -> tuple[
+        tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
+        None,
+    ]:
         return (self.value, self.d_0, self.log_value), None
 
     @classmethod
-    def tree_unflatten(cls, _, children):
+    def tree_unflatten(
+        cls,
+        _aux: None,
+        children: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
+    ) -> _PointMass:
         value, d_0, log_value = children
         self = cls.__new__(cls)
         self.value = value
@@ -114,6 +124,17 @@ class StateCarry(NamedTuple):
 
 
 CallbackFn = Callable[[tuple[StateCarry, ...]], Any]
+PointMassResult = dict[str, jax.Array]
+
+
+class ComponentsResult(TypedDict):
+    density: jax.Array
+    point_mass: PointMassResult
+
+
+ArrayCallback = Callable[[tuple[StateCarry, ...]], jax.Array]
+PointMassCallback = Callable[[tuple[StateCarry, ...]], PointMassResult]
+ComponentsCallback = Callable[[tuple[StateCarry, ...]], ComponentsResult]
 
 
 # --------------------------------------------------------------------------- #
@@ -187,13 +208,13 @@ ProbabilityOutput = Union[
 
 
 @jax.jit
-def _none_callback(state: tuple[StateCarry, ...]):
+def _none_callback(state: tuple[StateCarry, ...]) -> None:
     del state
     return None
 
 
 @jax.jit
-def _state_probability_callback(state: tuple[StateCarry, ...]):
+def _state_probability_callback(state: tuple[StateCarry, ...]) -> jnp.ndarray:
     return jnp.stack(
         tuple(
             jnp.sum(carry.density, axis=-1)
@@ -206,12 +227,14 @@ def _state_probability_callback(state: tuple[StateCarry, ...]):
 
 
 @jax.jit
-def _density_callback(state: tuple[StateCarry, ...]):
+def _density_callback(state: tuple[StateCarry, ...]) -> jnp.ndarray:
     return jnp.stack(tuple(carry.density for carry in state), axis=-2)
 
 
 @jax.jit
-def _density_probability_callback(state: tuple[StateCarry, ...]):
+def _density_probability_callback(
+    state: tuple[StateCarry, ...],
+) -> jnp.ndarray:
     return jnp.stack(
         tuple(jnp.sum(carry.density, axis=-1) for carry in state),
         axis=-1,
@@ -221,7 +244,7 @@ def _density_probability_callback(state: tuple[StateCarry, ...]):
 def _point_mass_dict(
     state: tuple[StateCarry, ...],
     state_names: tuple[str, ...],
-) -> dict[str, jnp.ndarray]:
+) -> PointMassResult:
     return {
         state_names[i]: carry.point_mass.value
         for i, carry in enumerate(state)
@@ -230,8 +253,8 @@ def _point_mass_dict(
 
 
 @lru_cache(maxsize=None)
-def _full_callback(state_names: tuple[str, ...]) -> CallbackFn:
-    def fn(state: tuple[StateCarry, ...]):
+def _full_callback(state_names: tuple[str, ...]) -> ComponentsCallback:
+    def fn(state: tuple[StateCarry, ...]) -> ComponentsResult:
         return {
             "density": jnp.stack(
                 tuple(carry.density for carry in state), axis=-2
@@ -245,8 +268,8 @@ def _full_callback(state_names: tuple[str, ...]) -> CallbackFn:
 @lru_cache(maxsize=None)
 def _marginal_components_callback(
     state_names: tuple[str, ...],
-) -> CallbackFn:
-    def fn(state: tuple[StateCarry, ...]):
+) -> ComponentsCallback:
+    def fn(state: tuple[StateCarry, ...]) -> ComponentsResult:
         return {
             "density": jnp.stack(
                 tuple(jnp.sum(carry.density, axis=-1) for carry in state),
@@ -259,8 +282,8 @@ def _marginal_components_callback(
 
 
 @lru_cache(maxsize=None)
-def _point_mass_callback(state_names: tuple[str, ...]) -> CallbackFn:
-    def fn(state: tuple[StateCarry, ...]):
+def _point_mass_callback(state_names: tuple[str, ...]) -> PointMassCallback:
+    def fn(state: tuple[StateCarry, ...]) -> PointMassResult:
         return _point_mass_dict(state, state_names)
 
     return fn

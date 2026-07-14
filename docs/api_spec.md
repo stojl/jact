@@ -23,10 +23,13 @@ helpers live under public submodules:
 
 - `jact.cashflows` — declarations (`StateRate`, `TransitionLump`,
   `ScheduledEvent`, `DurationEvent`, `CashflowDeclaration`) and views (`Raw`,
-  `Group`, `Total`, `ByState`, `ByKind`).
+  `Group`, `Total`, `ByState`, `ByKind`), plus the `CashflowComponent` and
+  `CashflowView` unions.
 - `jact.probability` — output reducers (`StateProbability`,
   `DensityProbability`, `Density`, `PointMass`, `MarginalComponents`,
   `Full`) and the `ProbabilityOutput` union.
+- `jact.typing` — callable protocols (`Intensity`, `GroupedIntensity`,
+  `Payment`, `When`, `DurationAt`, `Weight`) and JAX's `ArrayLike` type.
 - `jact.wrappers` — fitted-model intensity helpers (`bind_intensity`,
   `bind_grouped_intensity`, `bind_exit_intensity`).
 
@@ -37,6 +40,9 @@ debugging hooks, but they are not part of the main top-level `jact` surface:
 
 Files under `archive/original_prototype/` and `notes/` are background material
 only. They are not part of the public contract.
+
+The installed package includes a PEP 561 `py.typed` marker, so type checkers
+use these inline annotations without separate stub packages.
 
 ## StateSpace
 
@@ -302,10 +308,15 @@ otherwise into the model's full state list.
 
 ## Intensity protocol
 
-Every intensity callable has this interface:
+`jact.typing.Intensity` describes every single-transition intensity callable:
 
 ```python
-def intensity(t, d, **kwargs) -> jnp.ndarray: ...
+def intensity(
+    t: jnp.ndarray,
+    d: jnp.ndarray,
+    /,
+    **kwargs: Any,
+) -> jact.typing.ArrayLike: ...
 ```
 
 Arguments:
@@ -339,6 +350,10 @@ Return shapes:
 | `transitions` | broadcastable to `(batch, D)` |
 | `exits` | leading target axis; each selected output broadcastable to `(batch, D)` |
 | `groups` | leading transition axis; each selected output broadcastable to `(batch, D)` |
+
+The multi-output `exits` and `groups` forms implement
+`jact.typing.GroupedIntensity`. The two protocols have the same Python call
+signature; separate names document their different output-shape semantics.
 
 Useful single-transition return shapes include scalar `()`, `(D,)`, `(1, D)`,
 `(batch, 1)`, and `(batch, D)`.
@@ -488,29 +503,29 @@ Validation is structural:
 
 ### Callable protocols
 
-Payment callables for all component kinds share one interface:
+Payment callables for all component kinds implement `jact.typing.Payment`:
 
 ```python
-def payment(t, d, **kwargs) -> jnp.ndarray: ...
+def payment(t, d, **kwargs) -> jact.typing.ArrayLike: ...
 ```
 
 The `**kwargs` argument follows the same batch-axis rule as intensity
 callables. The return value must be broadcastable to `(batch, D)`.
 
-Scheduled-event timing uses a separate rule:
+Scheduled-event timing implements `jact.typing.When`:
 
 ```python
-def when(**kwargs) -> jnp.ndarray: ...
+def when(**kwargs) -> jact.typing.ArrayLike: ...
 ```
 
 The `**kwargs` argument follows the same batch-axis rule as intensity
 callables. The return value must be scalar or broadcastable to `(batch,)`: one
 event time per individual.
 
-Duration-event target durations use:
+Duration-event target duration callables implement `jact.typing.DurationAt`:
 
 ```python
-def at_duration(**kwargs) -> jnp.ndarray: ...
+def at_duration(**kwargs) -> jact.typing.ArrayLike: ...
 ```
 
 `at_durations` values are target state durations. They may be Python scalars,
@@ -612,7 +627,8 @@ View types:
 
 Shared view fields:
 
-- `weight`: `None`, a Python scalar, a rank-0 array, or a callable
+- `weight`: `None`, a Python scalar, a rank-0 array, or a
+  `jact.typing.Weight` callable
   `(t, **kwargs)` returning a scalar or value broadcastable to `(batch,)`. It is evaluated
   once per inner solver step at that step's midpoint and multiplies the
   contribution attributed to that step. Callable weights receive the same
@@ -775,13 +791,43 @@ Initial forms:
 
 Result:
 
-`solve()` returns a `ModelResult` dataclass with attribute-only access:
+`solve()` returns a `ModelResult[ProbabilityT]` dataclass with attribute-only
+access. Editors infer `ProbabilityT` from the selected reducer or callback;
+using the unparameterized `ModelResult` annotation remains supported:
 
 ```python
 result.states         # tuple[str, ...] — always set
 result.probability    # None when probability=None was passed
 result.cashflows      # None when cashflows=None was passed
 ```
+
+For example, the probability attribute is inferred without annotations at the
+call site:
+
+```python
+default_result = model.solve("healthy", 10, 12)
+default_result.probability  # jax.Array
+
+point_result = model.solve(
+    "healthy", 10, 12, probability=jact.probability.PointMass()
+)
+point_result.probability  # dict[str, jax.Array]
+
+disabled_result = model.solve("healthy", 10, 12, probability=None)
+disabled_result.probability  # None
+
+def selected_density(state):
+    return {"first": (state[0].density, [state[1].density])}
+
+custom_result = model.solve(
+    "healthy", 10, 12, probability=selected_density
+)
+custom_result.probability  # dict[str, tuple[jax.Array, list[jax.Array]]]
+```
+
+The cashflow payload is typed independently as a mapping whose values are
+either arrays or grouped array mappings, and remains `None` when cashflows are
+not requested.
 
 `result.states` is the tuple of reachable states in reduced order. Disabled
 outputs are `None` rather than missing attributes. `probability=None`

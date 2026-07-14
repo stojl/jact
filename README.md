@@ -177,10 +177,13 @@ The top-level `jact` namespace exposes the core types: `jact.StateSpace`,
 
 - `jact.cashflows` for declarations and views (`StateRate`,
   `TransitionLump`, `ScheduledEvent`, `DurationEvent`, `Raw`, `Group`,
-  `Total`, `ByState`, `ByKind`).
+  `Total`, `ByState`, `ByKind`) and their `CashflowComponent` and
+  `CashflowView` unions.
 - `jact.probability` for output reducers (`StateProbability`,
   `DensityProbability`, `Density`, `PointMass`, `MarginalComponents`,
   `Full`).
+- `jact.typing` for callable protocols (`Intensity`, `GroupedIntensity`,
+  `Payment`, `When`, `DurationAt`, `Weight`).
 - `jact.wrappers` for fitted-model intensity helpers (`bind_intensity`,
   `bind_grouped_intensity`, `bind_exit_intensity`).
 
@@ -198,6 +201,8 @@ For local development from this repository:
 
 ```bash
 pip install -e '.[dev]'
+pyright
+ruff check src tests
 pytest
 ```
 
@@ -218,6 +223,10 @@ Before cutting a PyPI release:
 rm -rf build dist src/*.egg-info
 python -m build --no-isolation
 python -m twine check dist/*
+python3.10 tools/check_installed_typing.py --python-version 3.10 dist/*.whl
+python3.12 tools/check_installed_typing.py --python-version 3.12 dist/*.whl
+pyright
+ruff check src tests
 pytest -q
 ```
 

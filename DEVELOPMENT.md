@@ -3,6 +3,17 @@
 The repository is organized so that public package documentation is separated
 from maintainer-only material.
 
+## Local checks
+
+Install the development dependencies with `pip install -e '.[dev]'`, then run
+the same checks required by continuous integration:
+
+```bash
+pyright
+ruff check src tests
+pytest
+```
+
 ## Primary directories
 
 - `src/jact/`: installable package code
@@ -15,7 +26,7 @@ from maintainer-only material.
 
 ## Packaging intent
 
-PyPI artifacts should contain the package from `src/` plus core metadata such
-as `README.md` and `LICENSE`. Internal notes, archive material, tools, tests,
-and benchmarks are repository assets and are excluded from distribution
-artifacts.
+PyPI artifacts should contain the package from `src/`, its PEP 561 `py.typed`
+marker, and core metadata such as `README.md` and `LICENSE`. Internal notes,
+archive material, tools, tests, and benchmarks are repository assets and are
+excluded from distribution artifacts.

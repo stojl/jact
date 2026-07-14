@@ -1,3 +1,4 @@
+# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportUntypedFunctionDecorator=false, reportPrivateUsage=false
 """Semi-Markov solver with midpoint quadrature."""
 
 from __future__ import annotations
@@ -5,15 +6,45 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from numbers import Integral
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, TypeAlias, TypeVar, cast, overload
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
+from ._cashflow_ir import (
+    CashflowComponentSpecs,
+    CashflowStreamValues,
+    CashflowViewSource,
+    CashflowViewValues,
+    ComponentSource,
+    ComponentSumSource,
+    DurationEventSpec,
+    DurationTargetPayment,
+    FormattedCashflows,
+    FormattedCashflowValue,
+    KindSource,
+    PreparedCashflowView,
+    PreparedCashflowViews,
+    ResolvedDurationEvent,
+    ResolvedDurationEvents,
+    ResolvedDurationTarget,
+    ResolvedScheduledEvent,
+    ResolvedScheduledEvents,
+    ScheduledEventSpec,
+    StatePayment,
+    StateRateSpec,
+    StateSource,
+    StepAggregation,
+    TotalSource,
+    TransitionLumpSpec,
+    TransitionPayment,
+)
 from .cashflows import (
     ByKind,
     ByState,
     CashflowDeclaration,
+    CashflowView,
     DurationEvent,
     Group,
     Raw,
@@ -24,8 +55,17 @@ from .cashflows import (
     TransitionLump,
     validate_cashflow_views,
 )
-from .initial_distribution import InitialDistribution
+from .initial_distribution import InitialDistribution, _CanonicalDistribution
+from .model import Model
 from .probability import (
+    CallbackFn,
+    ComponentsResult,
+    Density,
+    DensityProbability,
+    Full,
+    MarginalComponents,
+    PointMass,
+    PointMassResult,
     ProbabilityOutput,
     StateCarry,
     StateProbability,
@@ -33,6 +73,7 @@ from .probability import (
     resolve_callback,
 )
 from .result import ModelResult
+from .typing import ArrayLike, Intensity, Payment, Weight
 
 __all__ = ["solve"]
 
@@ -41,12 +82,9 @@ _KIND_TRANSITION_LUMP = 1
 _KIND_SCHEDULED_EVENT = 2
 _KIND_DURATION_EVENT = 3
 
-_SOURCE_COMPONENT = 0
-_SOURCE_COMPONENT_SUM = 1
-_SOURCE_STATE = 2
-_SOURCE_KIND = 3
-_SOURCE_TOTAL = 4
-
+_ProbabilityTree: TypeAlias = Any
+_DType: TypeAlias = np.dtype[np.generic]
+_PyTreeT = TypeVar("_PyTreeT")
 
 class _RowHazards(NamedTuple):
     """Per-source-state hazards shared between the advance and cashflow steps."""
@@ -70,6 +108,14 @@ class _SameStepTransfers(NamedTuple):
     next_inflow_one: jnp.ndarray
 
 
+class _SolverResult(NamedTuple):
+    """Fixed internal solver output; callback leaves remain deliberately dynamic."""
+
+    probability: _ProbabilityTree
+    cashflow_streams: CashflowStreamValues | None
+    cashflow_terminal: CashflowViewValues | None
+
+
 def _stack_state_densities(state: tuple[StateCarry, ...]) -> jnp.ndarray:
     return jnp.stack(tuple(carry.density for carry in state), axis=0)
 
@@ -78,10 +124,10 @@ def _stack_point_masses(
     state: tuple[StateCarry, ...],
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, tuple[bool, ...]]:
     value_template = state[0].density[:, 0]
-    values = []
-    d_0 = []
-    log_values = []
-    mask = []
+    values: list[jnp.ndarray] = []
+    d_0: list[jnp.ndarray] = []
+    log_values: list[jnp.ndarray] = []
+    mask: list[bool] = []
     for carry in state:
         if carry.point_mass is None:
             values.append(jnp.zeros_like(value_template))
@@ -108,7 +154,7 @@ def _dense_state_to_tuple(
     point_log_values: jnp.ndarray,
     point_mask: tuple[bool, ...],
 ) -> tuple[StateCarry, ...]:
-    state = []
+    state: list[StateCarry] = []
     for i, has_point_mass in enumerate(point_mask):
         point_mass = None
         if has_point_mass:
@@ -122,7 +168,7 @@ def _dense_state_to_tuple(
 
 
 def _broadcast_grid_output(
-    value: Any,
+    value: ArrayLike,
     target_shape: tuple[int, int],
     label: str,
 ) -> jnp.ndarray:
@@ -137,7 +183,7 @@ def _broadcast_grid_output(
 
 
 def _broadcast_vector_output(
-    value: Any,
+    value: ArrayLike,
     target_shape: tuple[int, ...],
     label: str,
 ) -> jnp.ndarray:
@@ -152,7 +198,7 @@ def _broadcast_vector_output(
 
 
 def _broadcast_point_output(
-    value: Any,
+    value: ArrayLike,
     batch_size: int,
     label: str,
 ) -> jnp.ndarray:
@@ -166,7 +212,7 @@ def _broadcast_point_output(
 
 
 def _evaluate_intensity_at_point(
-    fn: Callable[..., jnp.ndarray],
+    fn: Intensity,
     t: jnp.ndarray,
     d_per_individual: jnp.ndarray,
     intensity_kwargs: dict[str, jnp.ndarray],
@@ -182,7 +228,7 @@ def _evaluate_intensity_at_point(
 
 
 def _integrated_density_hazard(
-    fn: Callable[..., jnp.ndarray],
+    fn: Intensity,
     t: jnp.ndarray,
     duration_mid: jnp.ndarray,
     step_size: float,
@@ -198,7 +244,7 @@ def _integrated_density_hazard(
 
 
 def _integrated_point_hazard(
-    fn: Callable[..., jnp.ndarray],
+    fn: Intensity,
     t: jnp.ndarray,
     point_d_0: jnp.ndarray,
     step_size: float,
@@ -298,7 +344,7 @@ def _sum_leaves(values: tuple[jnp.ndarray, ...]) -> jnp.ndarray:
 
 
 def _call_payment(
-    fn: Callable[..., jnp.ndarray],
+    fn: Payment,
     t: jnp.ndarray,
     d: jnp.ndarray,
     intensity_kwargs: dict[str, jnp.ndarray],
@@ -315,7 +361,7 @@ def _scheduled_event_index(
     event_time: jnp.ndarray,
     step_size: float,
 ) -> jnp.ndarray:
-    dtype = jnp.result_type(event_time, 1.0)
+    dtype = cast(_DType, jnp.result_type(event_time, 1.0))
     x = jnp.asarray(event_time, dtype=dtype) / jnp.asarray(step_size, dtype=dtype)
     nearest = jnp.round(x)
     tol = jnp.sqrt(jnp.asarray(jnp.finfo(x.dtype).eps, dtype=x.dtype))
@@ -327,7 +373,7 @@ def _duration_event_index(
     at_duration: jnp.ndarray,
     step_size: float,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    dtype = jnp.result_type(at_duration, 1.0)
+    dtype = cast(_DType, jnp.result_type(at_duration, 1.0))
     step = jnp.asarray(step_size, dtype=dtype)
     at_duration_index = _scheduled_event_index(at_duration, step_size)
     effective_at_duration = at_duration_index.astype(dtype) * step
@@ -338,7 +384,7 @@ def _is_near_grid_zero(
     value: jnp.ndarray,
     step_size: float,
 ) -> jnp.ndarray:
-    dtype = jnp.result_type(value, 1.0)
+    dtype = cast(_DType, jnp.result_type(value, 1.0))
     x = jnp.asarray(value, dtype=dtype) / jnp.asarray(step_size, dtype=dtype)
     tol = jnp.sqrt(jnp.asarray(jnp.finfo(x.dtype).eps, dtype=x.dtype))
     return jnp.abs(x) <= tol
@@ -349,7 +395,7 @@ def _solver_step_dynamics(
     t: jnp.ndarray,
     duration_mid: jnp.ndarray,
     step_size: float,
-    solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
+    solver_matrix: Sequence[Sequence[Intensity | None]],
     intensity_kwargs: dict[str, jnp.ndarray],
 ) -> tuple[
     jnp.ndarray,
@@ -362,13 +408,13 @@ def _solver_step_dynamics(
 ]:
     densities = _stack_state_densities(state)
     point_values, point_d_0, point_log_values, point_mask = _stack_point_masses(state)
-    row_hazards = []
+    row_hazards_list: list[_RowHazards] = []
 
     for source_index, row in enumerate(solver_matrix):
         density_total = jnp.zeros_like(densities[source_index])
         point_total = jnp.zeros_like(point_values[source_index])
-        density_hazards = []
-        point_hazards = []
+        density_hazards: list[tuple[int, jnp.ndarray]] = []
+        point_hazards: list[tuple[int, jnp.ndarray]] = []
 
         for target_index, fn in enumerate(row):
             if fn is None:
@@ -396,7 +442,7 @@ def _solver_step_dynamics(
                 point_total = point_total + point_hazard
                 point_hazards.append((target_index, point_hazard))
 
-        row_hazards.append(
+        row_hazards_list.append(
             _RowHazards(
                 density_hazards=tuple(density_hazards),
                 point_hazards=tuple(point_hazards),
@@ -408,7 +454,7 @@ def _solver_step_dynamics(
             )
         )
 
-    row_hazards = tuple(row_hazards)
+    row_hazards = tuple(row_hazards_list)
     transfers = _compute_same_step_transfers(
         densities,
         point_values,
@@ -451,10 +497,10 @@ def _compute_same_step_transfers(
     survived_inflow = jnp.zeros_like(raw_inflow)
     next_inflow_zero = jnp.zeros_like(raw_inflow)
     next_inflow_one = jnp.zeros_like(raw_inflow)
-    chained_by_source = []
+    chained_by_source: list[tuple[jnp.ndarray, ...]] = []
     incoming_state_indices = _incoming_state_indices(row_hazards)
     for i, hz in enumerate(row_hazards):
-        chained_from_source = []
+        chained_from_source: list[jnp.ndarray] = []
         inflow = raw_inflow[i]
         if i in incoming_state_indices:
             if hz.density_hazards:
@@ -515,7 +561,7 @@ def _advance_solver_step_from_dynamics(
                 jnp.exp(next_log_value)
             )
 
-    next_densities = []
+    next_densities: list[jnp.ndarray] = []
     for i, hz in enumerate(row_hazards):
         next_densities.append(
             _advance_density(
@@ -548,16 +594,10 @@ def _compute_cashflow_step(
     duration_left: jnp.ndarray,
     step_size: float,
     intensity_kwargs: dict[str, jnp.ndarray],
-    cashflow_components: tuple[Any, ...],
-    scheduled_events: tuple[Any, ...],
-) -> tuple[
-    tuple[jnp.ndarray, ...],
-    tuple[jnp.ndarray, ...],
-    tuple[jnp.ndarray, ...],
-    tuple[jnp.ndarray, ...],
-    tuple[jnp.ndarray, ...],
-    tuple[jnp.ndarray, ...],
-]:
+    cashflow_components: CashflowComponentSpecs,
+    scheduled_events: ResolvedScheduledEvents,
+    duration_events: ResolvedDurationEvents,
+) -> StepAggregation:
     template = densities[0, :, 0]
     by_component = _zero_leaves(len(cashflow_components), template)
     by_state = _zero_leaves(densities.shape[0], template)
@@ -570,12 +610,13 @@ def _compute_cashflow_step(
     incoming_state_indices = _incoming_state_indices(row_hazards)
 
     for component_index, component in enumerate(cashflow_components):
-        kind = component[0]
         component_total = jnp.zeros_like(template)
         event_component_total = jnp.zeros_like(template)
 
-        if kind == _KIND_STATE_RATE:
-            for state_index, payment_fn in component[1]:
+        if isinstance(component, StateRateSpec):
+            for attachment in component.payments:
+                state_index = attachment.state_index
+                payment_fn = attachment.payment
                 hz = row_hazards[state_index]
                 density_midpoint = densities[state_index] * hz.density_midpoint_factor
                 payment = _call_payment(
@@ -622,8 +663,11 @@ def _compute_cashflow_step(
                     contribution=contribution,
                 )
 
-        elif kind == _KIND_TRANSITION_LUMP:
-            for source_index, hazard_slot, payment_fn in component[1]:
+        elif isinstance(component, TransitionLumpSpec):
+            for attachment in component.payments:
+                source_index = attachment.source_index
+                hazard_slot = attachment.hazard_slot
+                payment_fn = attachment.payment
                 hz = row_hazards[source_index]
                 _, density_hazard = hz.density_hazards[hazard_slot]
                 payment = _call_payment(
@@ -674,8 +718,11 @@ def _compute_cashflow_step(
                     contribution=contribution,
                 )
 
-        elif kind == _KIND_SCHEDULED_EVENT:
-            event_time, event_index = scheduled_events[component_index]
+        elif isinstance(component, ScheduledEventSpec):
+            scheduled_event = scheduled_events[component_index]
+            assert scheduled_event is not None
+            event_time = scheduled_event.event_time
+            event_index = scheduled_event.event_index
             event_time = _broadcast_vector_output(
                 event_time,
                 template.shape,
@@ -693,7 +740,9 @@ def _compute_cashflow_step(
                 & (event_index < n_steps)
             )
             active = active.astype(template.dtype)
-            for state_index, payment_fn in component[2]:
+            for attachment in component.payments:
+                state_index = attachment.state_index
+                payment_fn = attachment.payment
                 payment = _call_payment(
                     payment_fn,
                     t,
@@ -736,14 +785,15 @@ def _compute_cashflow_step(
                     contribution=contribution,
                 )
 
-        elif kind == _KIND_DURATION_EVENT:
-            for (
-                state_index,
-                at_duration,
-                at_duration_index,
-                effective_at_duration,
-                payment_fn,
-            ) in component[1]:
+        elif isinstance(component, DurationEventSpec):  # pyright: ignore[reportUnnecessaryIsInstance]
+            duration_event = duration_events[component_index]
+            assert duration_event is not None
+            for target in duration_event.targets:
+                state_index = target.state_index
+                at_duration = target.at_duration
+                at_duration_index = target.at_duration_index
+                effective_at_duration = target.effective_at_duration
+                payment_fn = target.payment
                 at_duration = _broadcast_vector_output(
                     at_duration,
                     template.shape,
@@ -829,27 +879,30 @@ def _compute_cashflow_step(
             event_component_total,
         )
 
-    return (
-        by_component,
-        by_state,
-        by_kind,
-        event_by_component,
-        event_by_state,
-        event_by_kind,
+    return StepAggregation(
+        by_component=by_component,
+        by_state=by_state,
+        by_kind=by_kind,
+        event_by_component=event_by_component,
+        event_by_state=event_by_state,
+        event_by_kind=event_by_kind,
     )
 
 
 def _compute_scheduled_events(
-    cashflow_components: tuple[Any, ...],
+    cashflow_components: CashflowComponentSpecs,
     step_size: float,
     intensity_kwargs: dict[str, jnp.ndarray],
-) -> tuple[Any, ...]:
-    scheduled_events = []
+) -> ResolvedScheduledEvents:
+    scheduled_events: list[ResolvedScheduledEvent | None] = []
     for component in cashflow_components:
-        if component[0] == _KIND_SCHEDULED_EVENT:
-            event_time = jnp.asarray(component[1](**intensity_kwargs))
+        if isinstance(component, ScheduledEventSpec):
+            event_time = jnp.asarray(component.when(**intensity_kwargs))
             scheduled_events.append(
-                (event_time, _scheduled_event_index(event_time, step_size))
+                ResolvedScheduledEvent(
+                    event_time=event_time,
+                    event_index=_scheduled_event_index(event_time, step_size),
+                )
             )
         else:
             scheduled_events.append(None)
@@ -857,15 +910,16 @@ def _compute_scheduled_events(
 
 
 def _compute_duration_events(
-    cashflow_components: tuple[Any, ...],
+    cashflow_components: CashflowComponentSpecs,
     step_size: float,
     intensity_kwargs: dict[str, jnp.ndarray],
-) -> tuple[Any, ...]:
-    duration_events = []
+) -> ResolvedDurationEvents:
+    duration_events: list[ResolvedDurationEvent | None] = []
     for component in cashflow_components:
-        if component[0] == _KIND_DURATION_EVENT:
-            attachments = []
-            for state_index, at_duration_source, payment_fn in component[1]:
+        if isinstance(component, DurationEventSpec):
+            targets: list[ResolvedDurationTarget] = []
+            for attachment in component.targets:
+                at_duration_source = attachment.at_duration
                 at_duration = (
                     jnp.asarray(at_duration_source(**intensity_kwargs))
                     if callable(at_duration_source)
@@ -875,41 +929,42 @@ def _compute_duration_events(
                     at_duration,
                     step_size,
                 )
-                attachments.append(
-                    (
-                        state_index,
-                        at_duration,
-                        at_duration_index,
-                        effective_at_duration,
-                        payment_fn,
+                targets.append(
+                    ResolvedDurationTarget(
+                        state_index=attachment.state_index,
+                        at_duration=at_duration,
+                        at_duration_index=at_duration_index,
+                        effective_at_duration=effective_at_duration,
+                        payment=attachment.payment,
                     )
                 )
-            duration_events.append((_KIND_DURATION_EVENT, tuple(attachments)))
+            duration_events.append(ResolvedDurationEvent(targets=tuple(targets)))
         else:
-            duration_events.append(component)
+            duration_events.append(None)
     return tuple(duration_events)
 
 
 def _source_value(
-    source: tuple[Any, ...],
+    source: CashflowViewSource,
     by_component: tuple[jnp.ndarray, ...],
     by_state: tuple[jnp.ndarray, ...],
     by_kind: tuple[jnp.ndarray, ...],
 ) -> jnp.ndarray:
-    source_kind = source[0]
-    if source_kind == _SOURCE_COMPONENT:
-        return by_component[source[1]]
-    if source_kind == _SOURCE_COMPONENT_SUM:
-        return _sum_leaves(tuple(by_component[index] for index in source[1]))
-    if source_kind == _SOURCE_STATE:
-        return by_state[source[1]]
-    if source_kind == _SOURCE_KIND:
-        return by_kind[source[1]]
+    if isinstance(source, ComponentSource):
+        return by_component[source.component_index]
+    if isinstance(source, ComponentSumSource):
+        return _sum_leaves(
+            tuple(by_component[index] for index in source.component_indices)
+        )
+    if isinstance(source, StateSource):
+        return by_state[source.state_index]
+    if isinstance(source, KindSource):
+        return by_kind[source.kind_index]
     return _sum_leaves(by_component)
 
 
 def _evaluate_weight(
-    weight: Callable[..., jnp.ndarray] | Scalar | None,
+    weight: Weight | Scalar | None,
     t: jnp.ndarray,
     intensity_kwargs: dict[str, jnp.ndarray],
     template: jnp.ndarray,
@@ -931,9 +986,9 @@ def _compute_cashflow_views(
     t: jnp.ndarray,
     step_size: float,
     intensity_kwargs: dict[str, jnp.ndarray],
-    cashflow_views: tuple[Any, ...],
+    cashflow_views: PreparedCashflowViews,
     template: jnp.ndarray,
-) -> tuple[tuple[jnp.ndarray, ...], ...]:
+) -> CashflowViewValues:
     midpoint_by_component = tuple(
         total - event for total, event in zip(by_component, event_by_component)
     )
@@ -943,23 +998,16 @@ def _compute_cashflow_views(
     midpoint_by_kind = tuple(
         total - event for total, event in zip(by_kind, event_by_kind)
     )
-    view_values = []
-    for (
-        _view_name,
-        _terminal,
-        weight,
-        leaf_sources,
-        _leaf_names,
-        _view_kind,
-    ) in cashflow_views:
+    view_values: list[tuple[jnp.ndarray, ...]] = []
+    for view in cashflow_views:
         factor = _evaluate_weight(
-            weight,
+            view.weight,
             t + 0.5 * step_size,
             intensity_kwargs,
             template,
         )
         event_factor = _evaluate_weight(
-            weight,
+            view.weight,
             t,
             intensity_kwargs,
             template,
@@ -980,26 +1028,19 @@ def _compute_cashflow_views(
                     event_by_kind,
                 )
                 * event_factor
-                for source in leaf_sources
+                for source in view.sources
             )
         )
     return tuple(view_values)
 
 
 def _zero_view_values(
-    cashflow_views: tuple[Any, ...],
+    cashflow_views: PreparedCashflowViews,
     template: jnp.ndarray,
-) -> tuple[tuple[jnp.ndarray, ...], ...]:
+) -> CashflowViewValues:
     return tuple(
-        tuple(jnp.zeros_like(template) for _source in leaf_sources)
-        for (
-            _view_name,
-            _terminal,
-            _weight,
-            leaf_sources,
-            _leaf_names,
-            _view_kind,
-        ) in cashflow_views
+        tuple(jnp.zeros_like(template) for _source in view.sources)
+        for view in cashflow_views
     )
 
 
@@ -1020,11 +1061,14 @@ def _shard_batch_array(
     return value.reshape((device_count, per_device) + value.shape[1:]), batch_size
 
 
-def _shard_batch_tree(tree: Any, device_count: int) -> tuple[Any, int]:
+def _shard_batch_tree(
+    tree: _PyTreeT,
+    device_count: int,
+) -> tuple[_PyTreeT, int]:
     """Pad and shard a batch-major PyTree over a leading device axis."""
     batch_sizes: list[int] = []
 
-    def shard(value):
+    def shard(value: Any) -> Any:
         if value is None:
             return None
         arr = jnp.asarray(value)
@@ -1034,7 +1078,7 @@ def _shard_batch_tree(tree: Any, device_count: int) -> tuple[Any, int]:
         batch_sizes.append(batch_size)
         return sharded
 
-    sharded = jax.tree_util.tree_map(shard, tree)
+    sharded = cast(_PyTreeT, jax.tree_util.tree_map(shard, tree))
     if not batch_sizes:
         raise ValueError("Cannot shard an empty tree.")
     batch_size = batch_sizes[0]
@@ -1058,37 +1102,38 @@ def _unshard_batch_array(value: jnp.ndarray, original_batch_size: int) -> jnp.nd
     return merged[:, :original_batch_size, ...]
 
 
-def _unshard_batch_tree(tree: Any, original_batch_size: int) -> Any:
+def _unshard_batch_tree(
+    tree: _PyTreeT,
+    original_batch_size: int,
+) -> _PyTreeT:
     """Merge a pmapped solver output tree back onto the public batch axis."""
 
-    def unshard(value):
+    def unshard(value: Any) -> Any:
         if value is None:
             return None
         return _unshard_batch_array(jnp.asarray(value), original_batch_size)
 
-    return jax.tree_util.tree_map(unshard, tree)
+    return cast(_PyTreeT, jax.tree_util.tree_map(unshard, tree))
 
 
 def _add_selected_view_values(
-    left: tuple[tuple[jnp.ndarray, ...], ...],
-    right: tuple[tuple[jnp.ndarray, ...], ...],
-    cashflow_views: tuple[Any, ...],
+    left: CashflowViewValues,
+    right: CashflowViewValues,
+    cashflow_views: PreparedCashflowViews,
     *,
     terminal: bool,
-) -> tuple[tuple[jnp.ndarray, ...], ...]:
+) -> CashflowViewValues:
     return tuple(
         tuple(
-            left_leaf + right_leaf if view_terminal is terminal else left_leaf
+            left_leaf + right_leaf if view.terminal is terminal else left_leaf
             for left_leaf, right_leaf in zip(left_values, right_values)
         )
-        for (
-            (_view_name, view_terminal, *_),
-            left_values,
-            right_values,
-        ) in zip(cashflow_views, left, right)
+        for view, left_values, right_values in zip(cashflow_views, left, right)
     )
 
 
+# JAX accepts arbitrary PyTree axis specifications here, but its public typing
+# does not currently expose a corresponding recursive alias.
 _PMAP_IN_AXES: Any = (0, None, None, None, None, 0, None, None, None, None, None)
 _PMAP_STATIC_ARGNUMS = (3, 4, 7, 8, 9, 10)
 _jax_checkpoint: Callable[[Callable[..., Any]], Callable[..., Any]] = getattr(
@@ -1107,16 +1152,16 @@ def _midpoint_solver_pmapped_all_devices(
     duration_mid: jnp.ndarray,
     duration_left: jnp.ndarray,
     step_size: float,
-    solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
+    solver_matrix: Sequence[Sequence[Intensity | None]],
     batch_kwargs: dict[str, jnp.ndarray],
     scalar_kwargs: dict[str, jnp.ndarray],
-    prob_callback: Callable[..., Any],
+    prob_callback: CallbackFn,
     record_every: int,
-    cashflow_components: tuple[Any, ...] = (),
-    cashflow_views: tuple[Any, ...] = (),
-):
+    cashflow_components: CashflowComponentSpecs = (),
+    cashflow_views: PreparedCashflowViews = (),
+) -> _SolverResult:
     intensity_kwargs = {**scalar_kwargs, **batch_kwargs}
-    return _midpoint_solver(
+    return cast(_SolverResult, _midpoint_solver(
         state_0,
         duration_mid,
         duration_left,
@@ -1127,10 +1172,12 @@ def _midpoint_solver_pmapped_all_devices(
         record_every,
         cashflow_components,
         cashflow_views,
-    )
+    ))
 
 
-def _midpoint_solver_pmapped_on_devices(devices: tuple[jax.Device, ...]):
+def _midpoint_solver_pmapped_on_devices(
+    devices: tuple[Any, ...],
+) -> Callable[..., _SolverResult]:
     return jax.pmap(
         _midpoint_solver_pmapped_wrapper,
         in_axes=_PMAP_IN_AXES,
@@ -1144,15 +1191,15 @@ def _midpoint_solver_pmapped_wrapper(
     duration_mid: jnp.ndarray,
     duration_left: jnp.ndarray,
     step_size: float,
-    solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
+    solver_matrix: Sequence[Sequence[Intensity | None]],
     batch_kwargs: dict[str, jnp.ndarray],
     scalar_kwargs: dict[str, jnp.ndarray],
-    prob_callback: Callable[..., Any],
+    prob_callback: CallbackFn,
     record_every: int,
-    cashflow_components: tuple[Any, ...] = (),
-    cashflow_views: tuple[Any, ...] = (),
-):
-    return _midpoint_solver(
+    cashflow_components: CashflowComponentSpecs = (),
+    cashflow_views: PreparedCashflowViews = (),
+) -> _SolverResult:
+    return cast(_SolverResult, _midpoint_solver(
         state_0,
         duration_mid,
         duration_left,
@@ -1163,7 +1210,7 @@ def _midpoint_solver_pmapped_wrapper(
         record_every,
         cashflow_components,
         cashflow_views,
-    )
+    ))
 
 
 @partial(
@@ -1182,13 +1229,13 @@ def _midpoint_solver(
     duration_mid: jnp.ndarray,
     duration_left: jnp.ndarray,
     step_size: float,
-    solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
+    solver_matrix: Sequence[Sequence[Intensity | None]],
     intensity_kwargs: dict[str, jnp.ndarray],
-    prob_callback: Callable[..., Any],
+    prob_callback: CallbackFn,
     record_every: int,
-    cashflow_components: tuple[Any, ...] = (),
-    cashflow_views: tuple[Any, ...] = (),
-):
+    cashflow_components: CashflowComponentSpecs = (),
+    cashflow_views: PreparedCashflowViews = (),
+) -> _SolverResult:
     """Run the midpoint solver and record probability outputs."""
     n_steps = duration_mid.shape[-1]
     n_records = n_steps // record_every
@@ -1207,11 +1254,31 @@ def _midpoint_solver(
         intensity_kwargs,
     )
 
-    def block_scan(carry, block_start):
+    def block_scan(
+        carry: tuple[tuple[StateCarry, ...], CashflowViewValues],
+        block_start: jnp.ndarray,
+    ) -> tuple[
+        tuple[tuple[StateCarry, ...], CashflowViewValues],
+        tuple[Any, CashflowStreamValues],
+    ]:
         state_carry, terminal_carry = carry
         offsets = jnp.arange(record_every, dtype=duration_mid.dtype)
 
-        def step_scan(inner_carry, offset):
+        def step_scan(
+            inner_carry: tuple[
+                tuple[StateCarry, ...],
+                CashflowViewValues,
+                CashflowViewValues,
+            ],
+            offset: jnp.ndarray,
+        ) -> tuple[
+            tuple[
+                tuple[StateCarry, ...],
+                CashflowViewValues,
+                CashflowViewValues,
+            ],
+            None,
+        ]:
             inner_state, block_cashflows, terminal_cashflows = inner_carry
             current_t = block_start + offset * step_size
 
@@ -1223,30 +1290,24 @@ def _midpoint_solver(
                 solver_matrix,
                 intensity_kwargs,
             )
-            (
-                raw_component,
-                raw_state,
-                raw_kind,
-                event_component,
-                event_state,
-                event_kind,
-            ) = _compute_cashflow_step(
+            aggregation = _compute_cashflow_step(
                 *dynamics,
                 current_t,
                 duration_mid,
                 duration_left,
                 step_size,
                 intensity_kwargs,
-                duration_components,
+                cashflow_components,
                 scheduled_events,
+                duration_components,
             )
             step_cashflows = _compute_cashflow_views(
-                raw_component,
-                raw_state,
-                raw_kind,
-                event_component,
-                event_state,
-                event_kind,
+                aggregation.by_component,
+                aggregation.by_state,
+                aggregation.by_kind,
+                aggregation.event_by_component,
+                aggregation.event_by_state,
+                aggregation.event_by_kind,
                 current_t,
                 step_size,
                 intensity_kwargs,
@@ -1274,11 +1335,8 @@ def _midpoint_solver(
             offsets,
         )
         stream_output = tuple(
-            None if terminal else values
-            for (_view_name, terminal, *_), values in zip(
-                cashflow_views,
-                block_cashflows,
-            )
+            None if view.terminal else values
+            for view, values in zip(cashflow_views, block_cashflows)
         )
         return (state_carry, terminal_carry), (
             prob_callback(state_carry),
@@ -1292,42 +1350,36 @@ def _midpoint_solver(
     block_starts = jnp.arange(n_records, dtype=duration_mid.dtype) * (
         record_every * step_size
     )
-    (final_state, final_terminal), scan_output = jax.lax.scan(
+    (_final_state, final_terminal), scan_output = jax.lax.scan(
         block_scan,
         (state_0, terminal_0),
         block_starts,
     )
     probability, cashflow_streams = scan_output
 
+    def prepend_initial(arr: Any, init: Any) -> Any:
+        if init is None:
+            return None
+        return jnp.concatenate([jnp.expand_dims(init, axis=0), arr], axis=0)
+
     probability = jax.tree_util.tree_map(
-        lambda arr, init: (
-            None
-            if init is None
-            else jnp.concatenate([jnp.expand_dims(init, axis=0), arr], axis=0)
-        ),
+        prepend_initial,
         probability,
         initial_probability,
     )
 
-    result = {"probability": probability}
-    if has_cashflows:
-        result["cashflow_streams"] = cashflow_streams
-        result["cashflow_terminal"] = final_terminal
-    return result
+    return _SolverResult(
+        probability=probability,
+        cashflow_streams=cashflow_streams if has_cashflows else None,
+        cashflow_terminal=final_terminal if has_cashflows else None,
+    )
 
 
-def _get_reference_function(solver_matrix):
-    """Find the first non-None callable in the solver matrix."""
-    for row in solver_matrix:
-        for fn in row:
-            if fn is not None:
-                return fn
-    return None
-
-
-def _get_covariate_batch_size(kwargs: dict[str, Any]) -> int | None:
+def _get_covariate_batch_size(
+    kwargs: Mapping[str, jnp.ndarray],
+) -> int | None:
     batch_size = None
-    for name, value in kwargs.items():
+    for value in kwargs.values():
         shape = jnp.shape(value)
         if len(shape) == 0:
             continue
@@ -1339,7 +1391,7 @@ def _get_covariate_batch_size(kwargs: dict[str, Any]) -> int | None:
 
 
 def _split_scalar_and_batch_kwargs(
-    kwargs: dict[str, Any],
+    kwargs: Mapping[str, jnp.ndarray],
 ) -> tuple[dict[str, jnp.ndarray], dict[str, jnp.ndarray]]:
     scalar_kwargs: dict[str, jnp.ndarray] = {}
     batch_kwargs: dict[str, jnp.ndarray] = {}
@@ -1353,9 +1405,9 @@ def _split_scalar_and_batch_kwargs(
 
 
 def _solver_value_dtype(
-    canonical: Any,
-    kwargs: dict[str, Any],
-) -> jnp.dtype:
+    canonical: _CanonicalDistribution,
+    kwargs: Mapping[str, jnp.ndarray],
+) -> _DType:
     leaves = [
         jnp.asarray(value)
         for value in (
@@ -1363,17 +1415,16 @@ def _solver_value_dtype(
             *canonical.durations,
             *kwargs.values(),
         )
-        if value is not None
     ]
     float_leaves = [
         leaf for leaf in leaves if jnp.issubdtype(leaf.dtype, jnp.inexact)
     ]
     if not float_leaves:
-        return jnp.asarray(0.0).dtype
-    return jnp.result_type(*float_leaves)
+        return cast(_DType, jnp.asarray(0.0).dtype)
+    return cast(_DType, jnp.result_type(*float_leaves))
 
 
-def _broadcast_batch(value: Any, batch_size: int) -> jnp.ndarray:
+def _broadcast_batch(value: ArrayLike, batch_size: int) -> jnp.ndarray:
     arr = jnp.asarray(value)
     if arr.ndim == 0:
         return jnp.broadcast_to(arr, (batch_size,))
@@ -1382,7 +1433,7 @@ def _broadcast_batch(value: Any, batch_size: int) -> jnp.ndarray:
     raise ValueError("Expected a scalar or (batch,) array.")
 
 
-def _validate_positive_integer(name: str, value: Any) -> int:
+def _validate_positive_integer(name: str, value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, Integral):
         raise ValueError(f"{name} must be a positive integer.")
     value = int(value)
@@ -1392,8 +1443,8 @@ def _validate_positive_integer(name: str, value: Any) -> int:
 
 
 def _canonicalize_initial(
-    initial: str | jnp.ndarray | InitialDistribution,
-    initial_duration: Any,
+    initial: str | ArrayLike | InitialDistribution,
+    initial_duration: ArrayLike,
 ) -> InitialDistribution:
     if isinstance(initial, InitialDistribution):
         try:
@@ -1416,8 +1467,8 @@ def _canonicalize_initial(
 
 
 def _seed_point_mass(
-    mass: Any,
-    duration: Any,
+    mass: ArrayLike,
+    duration: ArrayLike,
     batch_size: int,
 ) -> _PointMass:
     return _PointMass(
@@ -1429,8 +1480,8 @@ def _seed_point_mass(
 def _prepare_cashflow_components(
     declaration: CashflowDeclaration | None,
     reachable_states: tuple[str, ...],
-    solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
-) -> tuple[tuple[Any, ...], ...]:
+    solver_matrix: Sequence[Sequence[Intensity | None]],
+) -> CashflowComponentSpecs:
     if declaration is None:
         return ()
 
@@ -1443,150 +1494,155 @@ def _prepare_cashflow_components(
                 transition_slot[(source_index, target_index)] = slot
                 slot += 1
 
-    prepared = []
+    prepared: list[
+        StateRateSpec | TransitionLumpSpec | ScheduledEventSpec | DurationEventSpec
+    ] = []
     for _name, component in declaration.components:
         if isinstance(component, StateRate):
-            attachments = tuple(
-                (state_index[state], fn)
+            payments = tuple(
+                StatePayment(state_index=state_index[state], payment=fn)
                 for state, fn in component.payments.items()
                 if state in state_index
             )
-            prepared.append((_KIND_STATE_RATE, attachments))
+            prepared.append(StateRateSpec(payments=payments))
         elif isinstance(component, TransitionLump):
-            attachments = tuple(
-                (
-                    state_index[source],
-                    transition_slot[(state_index[source], state_index[target])],
-                    fn,
+            payments = tuple(
+                TransitionPayment(
+                    source_index=state_index[source],
+                    hazard_slot=transition_slot[
+                        (state_index[source], state_index[target])
+                    ],
+                    payment=fn,
                 )
                 for (source, target), fn in component.payments.items()
                 if source in state_index and target in state_index
             )
-            prepared.append((_KIND_TRANSITION_LUMP, attachments))
+            prepared.append(TransitionLumpSpec(payments=payments))
         elif isinstance(component, ScheduledEvent):
-            attachments = tuple(
-                (state_index[state], fn)
+            payments = tuple(
+                StatePayment(state_index=state_index[state], payment=fn)
                 for state, fn in component.payments.items()
                 if state in state_index
             )
-            prepared.append((_KIND_SCHEDULED_EVENT, component.when, attachments))
-        elif isinstance(component, DurationEvent):
-            attachments = tuple(
-                (state_index[state], component.at_durations[state], fn)
+            prepared.append(
+                ScheduledEventSpec(when=component.when, payments=payments)
+            )
+        elif isinstance(component, DurationEvent):  # pyright: ignore[reportUnnecessaryIsInstance]
+            targets = tuple(
+                DurationTargetPayment(
+                    state_index=state_index[state],
+                    at_duration=component.at_durations[state],
+                    payment=fn,
+                )
                 for state, fn in component.payments.items()
                 if state in state_index
             )
-            prepared.append((_KIND_DURATION_EVENT, attachments))
+            prepared.append(DurationEventSpec(targets=targets))
     return tuple(prepared)
 
 
 def _prepare_cashflow_views(
     declaration: CashflowDeclaration,
-    views: Mapping[str, Raw | Group | Total | ByState | ByKind] | None,
+    views: Mapping[str, CashflowView] | None,
     reachable_states: tuple[str, ...],
-) -> tuple[tuple[Any, ...], ...]:
+) -> PreparedCashflowViews:
     frozen_views = validate_cashflow_views(declaration, views)
     component_index = {
         name: i for i, (name, _component) in enumerate(declaration.components)
     }
-    prepared = []
+    prepared: list[PreparedCashflowView] = []
     for view_name, view in frozen_views:
+        # validate_cashflow_views normalizes scalar arrays and rejects all
+        # remaining non-callable ArrayLike weights.
+        weight = cast(Weight | Scalar | None, view.weight)
         if isinstance(view, Raw):
             if view.name is None:
                 leaf_names = declaration.names
                 sources = tuple(
-                    (_SOURCE_COMPONENT, component_index[name]) for name in leaf_names
+                    ComponentSource(component_index[name]) for name in leaf_names
                 )
-                view_kind = "mapping"
+                output = "mapping"
             else:
                 leaf_names = (view.name,)
-                sources = ((_SOURCE_COMPONENT, component_index[view.name]),)
-                view_kind = "single"
+                sources = (ComponentSource(component_index[view.name]),)
+                output = "single"
         elif isinstance(view, Group):
             leaf_names = (view_name,)
             sources = (
-                (
-                    _SOURCE_COMPONENT_SUM,
-                    tuple(component_index[member] for member in view.members),
+                ComponentSumSource(
+                    tuple(component_index[member] for member in view.members)
                 ),
             )
-            view_kind = "single"
+            output = "single"
         elif isinstance(view, Total):
             leaf_names = (view_name,)
-            sources = ((_SOURCE_TOTAL,),)
-            view_kind = "single"
+            sources = (TotalSource(),)
+            output = "single"
         elif isinstance(view, ByState):
             leaf_names = reachable_states
             sources = tuple(
-                (_SOURCE_STATE, index) for index, _state in enumerate(reachable_states)
+                StateSource(index) for index, _state in enumerate(reachable_states)
             )
-            view_kind = "mapping"
-        elif isinstance(view, ByKind):
+            output = "mapping"
+        elif isinstance(view, ByKind):  # pyright: ignore[reportUnnecessaryIsInstance]
             leaf_names = (
                 "state_rate",
                 "transition_lump",
                 "scheduled_event",
                 "duration_event",
             )
-            sources = tuple((_SOURCE_KIND, index) for index in range(4))
-            view_kind = "mapping"
+            sources = tuple(KindSource(index) for index in range(4))
+            output = "mapping"
+        else:  # pragma: no cover - validated by validate_cashflow_views
+            raise TypeError(f"Unsupported cashflow view: {type(view)}.")
         prepared.append(
-            (
-                view_name,
-                view.terminal,
-                view.weight,
-                sources,
-                tuple(leaf_names),
-                view_kind,
+            PreparedCashflowView(
+                name=view_name,
+                terminal=view.terminal,
+                weight=weight,
+                sources=sources,
+                leaf_names=tuple(leaf_names),
+                output=output,
             )
         )
     return tuple(prepared)
 
 
 def _format_cashflow_view_values(
-    raw_result: dict[str, Any],
-    prepared_views: tuple[tuple[Any, ...], ...],
-) -> dict[str, Any]:
-    streams = raw_result["cashflow_streams"]
-    terminals = raw_result["cashflow_terminal"]
-    formatted = {}
-    for index, (
-        view_name,
-        terminal,
-        _weight,
-        _sources,
-        leaf_names,
-        view_kind,
-    ) in enumerate(prepared_views):
-        view_values = terminals[index] if terminal else streams[index]
-        if view_kind == "single":
-            formatted[view_name] = view_values[0]
+    raw_result: _SolverResult,
+    prepared_views: PreparedCashflowViews,
+) -> FormattedCashflows:
+    streams = raw_result.cashflow_streams
+    terminals = raw_result.cashflow_terminal
+    if streams is None or terminals is None:
+        raise ValueError("Solver result does not contain cashflows.")
+    formatted: FormattedCashflows = {}
+    for index, view in enumerate(prepared_views):
+        view_values = terminals[index] if view.terminal else streams[index]
+        if view_values is None:
+            raise ValueError("Solver result is missing a cashflow view.")
+        if view.output == "single":
+            formatted[view.name] = view_values[0]
         else:
-            formatted[view_name] = {
-                leaf_name: value for leaf_name, value in zip(leaf_names, view_values)
-            }
+            formatted[view.name] = cast(FormattedCashflowValue, {
+                leaf_name: value
+                for leaf_name, value in zip(view.leaf_names, view_values)
+            })
     return formatted
 
 
-def _cashflow_reference_function(
-    declaration: CashflowDeclaration | None,
-) -> Callable[..., jnp.ndarray] | None:
-    if declaration is None:
-        return None
-    for _name, component in declaration.components:
-        for fn in component.payments.values():
-            return fn
-    return None
+def _local_devices() -> tuple[Any, ...]:
+    return tuple(cast(Sequence[Any], jax.local_devices()))
 
 
 def _resolve_devices(
-    devices: int | Sequence[jax.Device] | None,
-) -> tuple[jax.Device, ...]:
+    devices: int | Sequence[Any] | None,
+) -> tuple[Any, ...]:
     if devices is None:
         return ()
     if isinstance(devices, bool):
         raise ValueError("devices must be an integer or a sequence of jax.Device.")
-    local_devices = tuple(jax.local_devices())
+    local_devices = _local_devices()
     if isinstance(devices, int):
         device_count = int(devices)
         if device_count <= 0:
@@ -1608,16 +1664,16 @@ def _run_midpoint_solver(
     duration_mid: jnp.ndarray,
     duration_left: jnp.ndarray,
     step_size: float,
-    solver_matrix: Sequence[Sequence[Callable[..., jnp.ndarray] | None]],
+    solver_matrix: Sequence[Sequence[Intensity | None]],
     intensity_kwargs: dict[str, jnp.ndarray],
-    prob_callback: Callable[..., Any],
+    prob_callback: CallbackFn,
     record_every: int,
-    cashflow_components: tuple[Any, ...],
-    cashflow_views: tuple[Any, ...],
-    devices: tuple[jax.Device, ...],
-) -> dict[str, Any]:
+    cashflow_components: CashflowComponentSpecs,
+    cashflow_views: PreparedCashflowViews,
+    devices: tuple[Any, ...],
+) -> _SolverResult:
     if len(devices) <= 1:
-        return _midpoint_solver(
+        return cast(_SolverResult, _midpoint_solver(
             state_0,
             duration_mid,
             duration_left,
@@ -1628,7 +1684,7 @@ def _run_midpoint_solver(
             record_every,
             cashflow_components,
             cashflow_views,
-        )
+        ))
 
     sharded_state_0, batch_size = _shard_batch_tree(state_0, len(devices))
     scalar_kwargs, batch_kwargs = _split_scalar_and_batch_kwargs(intensity_kwargs)
@@ -1642,7 +1698,7 @@ def _run_midpoint_solver(
     else:
         sharded_batch_kwargs = {}
 
-    if devices == tuple(jax.local_devices()):
+    if devices == _local_devices():
         sharded_result = _midpoint_solver_pmapped_all_devices(
             sharded_state_0,
             duration_mid,
@@ -1673,19 +1729,169 @@ def _run_midpoint_solver(
     return _unshard_batch_tree(sharded_result, batch_size)
 
 
+@overload
 def solve(
-    model: Any,
-    initial: str | jnp.ndarray | InitialDistribution,
+    model: Model,
+    initial: str | ArrayLike | InitialDistribution,
     horizon: int,
     steps_per_unit: int,
-    initial_duration: Any = 0.0,
-    probability: None | ProbabilityOutput | Callable = StateProbability(),
+    initial_duration: ArrayLike = 0.0,
+    probability: (
+        StateProbability | DensityProbability | Density
+    ) = StateProbability(),
     cashflows: CashflowDeclaration | None = None,
-    cashflow_views: Mapping[str, Raw | Group | Total | ByState | ByKind] | None = None,
+    cashflow_views: Mapping[str, CashflowView] | None = None,
     record_every: int = 1,
-    devices: int | Sequence[jax.Device] | None = None,
+    devices: int | Sequence[Any] | None = None,
     **kwargs: Any,
-) -> ModelResult:
+) -> ModelResult[jax.Array]: ...
+
+
+@overload
+def solve(
+    model: Model,
+    initial: str | ArrayLike | InitialDistribution,
+    horizon: int,
+    steps_per_unit: int,
+    initial_duration: ArrayLike,
+    probability: PointMass,
+    cashflows: CashflowDeclaration | None = None,
+    cashflow_views: Mapping[str, CashflowView] | None = None,
+    record_every: int = 1,
+    devices: int | Sequence[Any] | None = None,
+    **kwargs: Any,
+) -> ModelResult[PointMassResult]: ...
+
+
+@overload
+def solve(
+    model: Model,
+    initial: str | ArrayLike | InitialDistribution,
+    horizon: int,
+    steps_per_unit: int,
+    initial_duration: ArrayLike,
+    probability: MarginalComponents | Full,
+    cashflows: CashflowDeclaration | None = None,
+    cashflow_views: Mapping[str, CashflowView] | None = None,
+    record_every: int = 1,
+    devices: int | Sequence[Any] | None = None,
+    **kwargs: Any,
+) -> ModelResult[ComponentsResult]: ...
+
+
+@overload
+def solve(
+    model: Model,
+    initial: str | ArrayLike | InitialDistribution,
+    horizon: int,
+    steps_per_unit: int,
+    initial_duration: ArrayLike,
+    probability: None,
+    cashflows: CashflowDeclaration | None = None,
+    cashflow_views: Mapping[str, CashflowView] | None = None,
+    record_every: int = 1,
+    devices: int | Sequence[Any] | None = None,
+    **kwargs: Any,
+) -> ModelResult[None]: ...
+
+
+@overload
+def solve(
+    model: Model,
+    initial: str | ArrayLike | InitialDistribution,
+    horizon: int,
+    steps_per_unit: int,
+    initial_duration: ArrayLike,
+    probability: Callable[..., _PyTreeT],
+    cashflows: CashflowDeclaration | None = None,
+    cashflow_views: Mapping[str, CashflowView] | None = None,
+    record_every: int = 1,
+    devices: int | Sequence[Any] | None = None,
+    **kwargs: Any,
+) -> ModelResult[_PyTreeT]: ...
+
+
+@overload
+def solve(
+    model: Model,
+    initial: str | ArrayLike | InitialDistribution,
+    horizon: int,
+    steps_per_unit: int,
+    initial_duration: ArrayLike = 0.0,
+    *,
+    probability: PointMass,
+    cashflows: CashflowDeclaration | None = None,
+    cashflow_views: Mapping[str, CashflowView] | None = None,
+    record_every: int = 1,
+    devices: int | Sequence[Any] | None = None,
+    **kwargs: Any,
+) -> ModelResult[PointMassResult]: ...
+
+
+@overload
+def solve(
+    model: Model,
+    initial: str | ArrayLike | InitialDistribution,
+    horizon: int,
+    steps_per_unit: int,
+    initial_duration: ArrayLike = 0.0,
+    *,
+    probability: MarginalComponents | Full,
+    cashflows: CashflowDeclaration | None = None,
+    cashflow_views: Mapping[str, CashflowView] | None = None,
+    record_every: int = 1,
+    devices: int | Sequence[Any] | None = None,
+    **kwargs: Any,
+) -> ModelResult[ComponentsResult]: ...
+
+
+@overload
+def solve(
+    model: Model,
+    initial: str | ArrayLike | InitialDistribution,
+    horizon: int,
+    steps_per_unit: int,
+    initial_duration: ArrayLike = 0.0,
+    *,
+    probability: None,
+    cashflows: CashflowDeclaration | None = None,
+    cashflow_views: Mapping[str, CashflowView] | None = None,
+    record_every: int = 1,
+    devices: int | Sequence[Any] | None = None,
+    **kwargs: Any,
+) -> ModelResult[None]: ...
+
+
+@overload
+def solve(
+    model: Model,
+    initial: str | ArrayLike | InitialDistribution,
+    horizon: int,
+    steps_per_unit: int,
+    initial_duration: ArrayLike = 0.0,
+    *,
+    probability: Callable[..., _PyTreeT],
+    cashflows: CashflowDeclaration | None = None,
+    cashflow_views: Mapping[str, CashflowView] | None = None,
+    record_every: int = 1,
+    devices: int | Sequence[Any] | None = None,
+    **kwargs: Any,
+) -> ModelResult[_PyTreeT]: ...
+
+
+def solve(
+    model: Model,
+    initial: str | ArrayLike | InitialDistribution,
+    horizon: int,
+    steps_per_unit: int,
+    initial_duration: ArrayLike = 0.0,
+    probability: None | ProbabilityOutput | CallbackFn = StateProbability(),
+    cashflows: CashflowDeclaration | None = None,
+    cashflow_views: Mapping[str, CashflowView] | None = None,
+    record_every: int = 1,
+    devices: int | Sequence[Any] | None = None,
+    **kwargs: Any,
+) -> ModelResult[Any]:
     """Compute transition probabilities from a documented initial condition."""
     if "freeze_initial" in kwargs:
         raise TypeError(
@@ -1712,7 +1918,9 @@ def solve(
     probability_disabled = probability is None
     if cashflow_views is not None and cashflows is None:
         raise ValueError("cashflow_views requires cashflows.")
-    if cashflows is not None and not isinstance(cashflows, CashflowDeclaration):
+    if cashflows is not None and not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+        cashflows, CashflowDeclaration
+    ):
         raise TypeError("cashflows must be a CashflowDeclaration or None.")
     if cashflows is not None and cashflows.state_space is not model.state_space:
         raise ValueError("cashflows must be declared from model.state_space.")
@@ -1743,7 +1951,8 @@ def solve(
     )
 
     distribution_batch = canonical.batch_size
-    covariate_batch = _get_covariate_batch_size(kwargs)
+    intensity_kwargs = {name: jnp.asarray(value) for name, value in kwargs.items()}
+    covariate_batch = _get_covariate_batch_size(intensity_kwargs)
     if (
         distribution_batch is not None
         and covariate_batch is not None
@@ -1758,12 +1967,12 @@ def solve(
         batch_size = covariate_batch
     if batch_size is None:
         batch_size = 1
-    value_dtype = _solver_value_dtype(canonical, kwargs)
+    value_dtype = _solver_value_dtype(canonical, intensity_kwargs)
 
     declared_index = {
         state: i for i, state in enumerate(canonical.states)
     }
-    state_0 = []
+    state_0: list[StateCarry] = []
     for state_name in reduced.reachable_states:
         density = jnp.zeros((batch_size, solver_steps), dtype=value_dtype)
         point_mass = None
@@ -1782,14 +1991,14 @@ def solve(
         duration_left,
         step_size,
         solver_matrix,
-        kwargs,
+        intensity_kwargs,
         prob_callback,
         record_every,
         prepared_cashflow_components,
         prepared_cashflow_views,
         selected_devices,
     )
-    probability_out = None if probability_disabled else result["probability"]
+    probability_out = None if probability_disabled else result.probability
     cashflows_out = None
     if cashflows is not None:
         cashflows_out = _format_cashflow_view_values(

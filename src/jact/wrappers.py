@@ -1,3 +1,5 @@
+# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false
+
 """Convenience wrappers for fitted model intensity functions."""
 
 from __future__ import annotations
@@ -6,6 +8,9 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import jax.numpy as jnp
+from jax import Array
+
+from .typing import GroupedIntensity, Intensity
 
 __all__ = [
     "bind_intensity",
@@ -13,20 +18,28 @@ __all__ = [
     "bind_exit_intensity",
 ]
 
+_ModelApply = Callable[..., Any]
+_FeatureFn = Callable[..., Any]
+
 
 def bind_intensity(
-    apply_fn: Callable,
+    apply_fn: _ModelApply,
     params: Any,
-    feature_fn: Callable,
+    feature_fn: _FeatureFn,
     *,
     model_state: Mapping[str, Any] | None = None,
     apply_kwargs: Mapping[str, Any] | None = None,
-) -> Callable:
+) -> Intensity:
     """Bind a fitted model apply function as a single-transition intensity."""
     _validate_common(apply_fn, feature_fn, model_state, apply_kwargs)
     bound_apply_kwargs = {} if apply_kwargs is None else dict(apply_kwargs)
 
-    def intensity(t, d, **kwargs):
+    def intensity(
+        t: jnp.ndarray,
+        d: jnp.ndarray,
+        /,
+        **kwargs: Any,
+    ) -> Array:
         features = feature_fn(t, d, **kwargs)
         raw = _apply_model(apply_fn, params, model_state, features, bound_apply_kwargs)
         output = jnp.asarray(raw)
@@ -37,15 +50,15 @@ def bind_intensity(
 
 
 def bind_grouped_intensity(
-    apply_fn: Callable,
+    apply_fn: _ModelApply,
     params: Any,
-    feature_fn: Callable,
+    feature_fn: _FeatureFn,
     *,
     output_count: int,
     output_axis: int = -1,
     model_state: Mapping[str, Any] | None = None,
     apply_kwargs: Mapping[str, Any] | None = None,
-) -> Callable:
+) -> GroupedIntensity:
     """Bind a fitted model apply function as a grouped intensity callable."""
     _validate_grouped(
         apply_fn,
@@ -57,7 +70,12 @@ def bind_grouped_intensity(
     )
     bound_apply_kwargs = {} if apply_kwargs is None else dict(apply_kwargs)
 
-    def intensity(t, d, **kwargs):
+    def intensity(
+        t: jnp.ndarray,
+        d: jnp.ndarray,
+        /,
+        **kwargs: Any,
+    ) -> Array:
         features = feature_fn(t, d, **kwargs)
         raw = _apply_model(apply_fn, params, model_state, features, bound_apply_kwargs)
         output = jnp.asarray(raw)
@@ -70,15 +88,15 @@ def bind_grouped_intensity(
 
 
 def bind_exit_intensity(
-    apply_fn: Callable,
+    apply_fn: _ModelApply,
     params: Any,
-    feature_fn: Callable,
+    feature_fn: _FeatureFn,
     *,
     output_count: int,
     output_axis: int = -1,
     model_state: Mapping[str, Any] | None = None,
     apply_kwargs: Mapping[str, Any] | None = None,
-) -> Callable:
+) -> GroupedIntensity:
     """Bind a fitted model apply function for an ``exits={...}`` assignment."""
     return bind_grouped_intensity(
         apply_fn,
@@ -92,8 +110,8 @@ def bind_exit_intensity(
 
 
 def _validate_common(
-    apply_fn: Callable,
-    feature_fn: Callable,
+    apply_fn: _ModelApply,
+    feature_fn: _FeatureFn,
     model_state: Mapping[str, Any] | None,
     apply_kwargs: Mapping[str, Any] | None,
 ) -> None:
@@ -101,31 +119,45 @@ def _validate_common(
         raise TypeError("apply_fn must be callable.")
     if not callable(feature_fn):
         raise TypeError("feature_fn must be callable.")
-    if model_state is not None and not isinstance(model_state, Mapping):
+    if model_state is not None and not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+        model_state, Mapping
+    ):
         raise TypeError("model_state must be a mapping or None.")
-    if apply_kwargs is not None and not isinstance(apply_kwargs, Mapping):
+    if apply_kwargs is not None and not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+        apply_kwargs, Mapping
+    ):
         raise TypeError("apply_kwargs must be a mapping or None.")
 
 
 def _validate_grouped(
-    apply_fn: Callable,
-    feature_fn: Callable,
+    apply_fn: _ModelApply,
+    feature_fn: _FeatureFn,
     output_count: int,
     output_axis: int,
     model_state: Mapping[str, Any] | None,
     apply_kwargs: Mapping[str, Any] | None,
 ) -> None:
     _validate_common(apply_fn, feature_fn, model_state, apply_kwargs)
-    if not isinstance(output_count, int) or isinstance(output_count, bool):
+    if (
+        not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+            output_count, int
+        )
+        or isinstance(output_count, bool)
+    ):
         raise TypeError("output_count must be a positive integer.")
     if output_count <= 0:
         raise ValueError("output_count must be a positive integer.")
-    if not isinstance(output_axis, int) or isinstance(output_axis, bool):
+    if (
+        not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+            output_axis, int
+        )
+        or isinstance(output_axis, bool)
+    ):
         raise TypeError("output_axis must be an integer.")
 
 
 def _apply_model(
-    apply_fn: Callable,
+    apply_fn: _ModelApply,
     params: Any,
     model_state: Mapping[str, Any] | None,
     features: Any,
@@ -136,7 +168,7 @@ def _apply_model(
     return apply_fn({"params": params, **model_state}, features, **apply_kwargs)
 
 
-def _check_single_shape(output: Any, d: Any) -> None:
+def _check_single_shape(output: Array, d: Array) -> None:
     expected = (1, jnp.shape(d)[-1])
     if not _can_broadcast_to(output.shape, expected):
         raise ValueError(
@@ -145,7 +177,7 @@ def _check_single_shape(output: Any, d: Any) -> None:
         )
 
 
-def _check_grouped_rank(output: Any) -> None:
+def _check_grouped_rank(output: Array) -> None:
     if output.ndim == 0:
         raise ValueError(
             "Grouped intensity output must include an output axis; "
@@ -153,7 +185,7 @@ def _check_grouped_rank(output: Any) -> None:
         )
 
 
-def _check_grouped_shape(output: Any, d: Any, output_count: int) -> None:
+def _check_grouped_shape(output: Array, d: Array, output_count: int) -> None:
     expected_width = jnp.shape(d)[-1]
     if output.shape[0] != output_count:
         raise ValueError(

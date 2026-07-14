@@ -1,24 +1,30 @@
+# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false
 """State space definition for multi-state models."""
 
 from __future__ import annotations
 
 import json
 from collections import deque
-from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Hashable, Iterable, Mapping, Sequence, TypeVar, cast
 
 import jax.numpy as jnp
 
 from .initial_distribution import InitialDistribution
+from .typing import ArrayLike, GroupedIntensity, Intensity
 
 if TYPE_CHECKING:
+    from .cashflows import CashflowComponent, CashflowDeclaration
     from .model import Model
 
 __all__ = ["StateSpace"]
 
 
-def _duplicates(values: Sequence[Any]) -> set[Any]:
-    seen = set()
-    repeated = set()
+_HashableT = TypeVar("_HashableT", bound=Hashable)
+
+
+def _duplicates(values: Sequence[_HashableT]) -> set[_HashableT]:
+    seen: set[_HashableT] = set()
+    repeated: set[_HashableT] = set()
     for value in values:
         if value in seen:
             repeated.add(value)
@@ -59,7 +65,7 @@ class StateSpace:
         self,
         states: Iterable[str],
         transitions: Iterable[tuple[str, str]],
-    ):
+    ) -> None:
         states = tuple(states)
         transitions = tuple(transitions)
         self._validate_inputs(states, transitions)
@@ -78,7 +84,7 @@ class StateSpace:
         transitions: Sequence[tuple[str, str]],
     ) -> None:
         for state in states:
-            if not isinstance(state, str):
+            if not isinstance(state, str):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise TypeError(
                     "State names must be strings, "
                     f"got {type(state)}."
@@ -271,9 +277,9 @@ class StateSpace:
 
     def build(
         self,
-        transitions: Mapping[tuple[str, str], Any] | None = None,
-        exits: Mapping[str, Any] | None = None,
-        groups: Mapping[Any, Sequence[tuple[str, str]]] | None = None,
+        transitions: Mapping[tuple[str, str], Intensity] | None = None,
+        exits: Mapping[str, GroupedIntensity] | None = None,
+        groups: Mapping[GroupedIntensity, Sequence[tuple[str, str]]] | None = None,
     ) -> Model:
         """Create a Model by assigning intensity callables to transitions.
 
@@ -302,7 +308,10 @@ class StateSpace:
             groups=groups,
         )
 
-    def cashflows(self, components: Mapping[str, Any]):
+    def cashflows(
+        self,
+        components: Mapping[str, CashflowComponent],
+    ) -> CashflowDeclaration:
         """Create a validated cashflow declaration for this state space."""
         from .cashflows import validate_cashflow_components
 
@@ -315,7 +324,7 @@ class StateSpace:
     def initial_at(
         self,
         state: str,
-        duration: Any = 0.0,
+        duration: ArrayLike = 0.0,
     ) -> InitialDistribution:
         """Create an explicit one-state `InitialDistribution`.
 
@@ -328,7 +337,7 @@ class StateSpace:
 
     def initial_distribution(
         self,
-        components: Mapping[str, Mapping[str, Any]],
+        components: Mapping[str, Mapping[str, ArrayLike]],
         normalise: bool = True,
     ) -> InitialDistribution:
         """Create a validated multi-state `InitialDistribution`.
@@ -345,8 +354,8 @@ class StateSpace:
         self,
         *,
         state_names: Sequence[str] | None = None,
-        state_indices: Any = None,
-        duration: Any = 0.0,
+        state_indices: ArrayLike | None = None,
+        duration: ArrayLike = 0.0,
         initial_states: Sequence[str] | None = None,
     ) -> InitialDistribution:
         """Create a per-individual `InitialDistribution` with eager validation.
@@ -379,6 +388,9 @@ class StateSpace:
                     )
                 indices.append(lookup[state])
             state_indices = jnp.asarray(indices, dtype=jnp.int32)
+
+        if state_indices is None:
+            raise ValueError("state_indices could not be derived.")
 
         return InitialDistribution.per_individual(
             states=state_indices,
@@ -428,10 +440,15 @@ class StateSpace:
         StateSpace
         """
         with open(path) as f:
-            data = json.load(f)
+            data = cast(dict[str, object], json.load(f))
+        states = cast(Iterable[str], data["states"])
+        raw_transitions = cast(Iterable[Sequence[str]], data["transitions"])
         return cls(
-            states=data["states"],
-            transitions=[tuple(t) for t in data["transitions"]],
+            states=states,
+            transitions=[
+                cast(tuple[str, str], tuple(transition))
+                for transition in raw_transitions
+            ],
         )
 
     # ------------------------------------------------------------------ #
