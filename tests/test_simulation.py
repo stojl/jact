@@ -14,6 +14,7 @@ import jact
 from jact.simulation import (
     _compile_simulation_plan,
     _evaluate_intensity_slab,
+    _get_simulation_plan,
 )
 
 
@@ -358,6 +359,136 @@ def test_reproducibility_result_helpers_and_pytree():
     )
 
 
+@pytest.mark.parametrize(
+    "key",
+    [jax.random.key(17), jax.random.PRNGKey(17)],
+    ids=["typed", "legacy"],
+)
+def test_pre_optimization_golden_event_history(key):
+    state_space = jact.StateSpace(
+        states=("a", "b"),
+        transitions=(("a", "b"), ("b", "a")),
+    )
+    model = state_space.build(
+        transitions={
+            ("a", "b"): lambda t, d, **kwargs: 2.0,
+            ("b", "a"): lambda t, d, **kwargs: 2.0,
+        }
+    )
+    result = model.simulate(
+        initial="a",
+        horizon=1,
+        steps_per_unit=2,
+        max_jumps=2,
+        replicates=2,
+        key=key,
+    )
+
+    np.testing.assert_array_equal(
+        result.jump_times,
+        np.asarray(
+            [
+                [
+                    [0.20682930946350098, 0.3084150552749634],
+                    [0.5238321423530579, 0.6609033346176147],
+                ]
+            ],
+            dtype=np.float32,
+        ),
+    )
+    np.testing.assert_array_equal(
+        result.jump_durations,
+        np.asarray(
+            [
+                [
+                    [0.20682930946350098, 0.1015857458114624],
+                    [0.5238321423530579, 0.1370711624622345],
+                ]
+            ],
+            dtype=np.float32,
+        ),
+    )
+    np.testing.assert_array_equal(
+        result.state_path,
+        np.asarray([[[0, 1, 0], [0, 1, 0]]], dtype=np.int32),
+    )
+    np.testing.assert_array_equal(
+        result.jump_count,
+        np.asarray([[2, 2]], dtype=np.int32),
+    )
+    np.testing.assert_array_equal(
+        result.overflow,
+        np.asarray([[True, False]]),
+    )
+    np.testing.assert_array_equal(
+        result.truncated_at_time,
+        np.asarray([[0.5, np.nan]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        result.final_state,
+        np.asarray([[0, 0]], dtype=np.int32),
+    )
+    np.testing.assert_array_equal(
+        result.final_duration,
+        np.asarray(
+            [[0.19158494472503662, 0.33909666538238525]],
+            dtype=np.float32,
+        ),
+    )
+
+
+def test_jump_buffer_boundaries_preserve_history_prefixes_and_overflow():
+    state_space = jact.StateSpace(
+        states=("a", "b", "c"),
+        transitions=(
+            ("a", "b"),
+            ("a", "c"),
+            ("b", "a"),
+            ("c", "a"),
+        ),
+    )
+    model = state_space.build(
+        transitions={
+            ("a", "b"): lambda t, d, **kwargs: 20.0,
+            ("a", "c"): lambda t, d, **kwargs: 10.0,
+            ("b", "a"): lambda t, d, **kwargs: 30.0,
+            ("c", "a"): lambda t, d, **kwargs: 30.0,
+        }
+    )
+
+    reference = model.simulate(
+        initial="a",
+        horizon=1,
+        steps_per_unit=2,
+        max_jumps=32,
+        replicates=3,
+        key=jax.random.key(314),
+    )
+    for max_jumps in (0, 1, 7, 8, 9, 16):
+        result = model.simulate(
+            initial="a",
+            horizon=1,
+            steps_per_unit=2,
+            max_jumps=max_jumps,
+            replicates=3,
+            key=jax.random.key(314),
+        )
+        np.testing.assert_array_equal(result.jump_count, max_jumps)
+        np.testing.assert_array_equal(result.overflow, True)
+        np.testing.assert_array_equal(
+            result.jump_times,
+            reference.jump_times[..., :max_jumps],
+        )
+        np.testing.assert_array_equal(
+            result.jump_durations,
+            reference.jump_durations[..., :max_jumps],
+        )
+        np.testing.assert_array_equal(
+            result.state_path,
+            reference.state_path[..., : max_jumps + 1],
+        )
+
+
 def test_module_level_simulate_and_single_device_option():
     model = _two_state_model(lambda t, d, **kwargs: 0.0)
     result = jact.simulate(
@@ -481,6 +612,26 @@ def test_sparse_plan_edge_order_adjacency_and_group_preservation():
     assert plan.intensity_blocks[0].output_indices == (0, 1)
 
 
+def test_simulation_plan_cache_is_scoped_by_model_identity_and_initial_states():
+    def first_rate(t, d, **kwargs):
+        return 1.0
+
+    def second_rate(t, d, **kwargs):
+        return 2.0
+
+    first_model = _two_state_model(first_rate)
+    second_model = _two_state_model(second_rate)
+
+    first_plan = _get_simulation_plan(first_model, ("active",))
+    assert _get_simulation_plan(first_model, ("active",)) is first_plan
+    assert _get_simulation_plan(first_model, ("absorbed",)) is not first_plan
+
+    second_plan = _get_simulation_plan(second_model, ("active",))
+    assert second_plan is not first_plan
+    assert first_plan.intensity_blocks[0].fn is first_rate
+    assert second_plan.intensity_blocks[0].fn is second_rate
+
+
 def test_absorbing_only_reduced_model_advances_duration():
     state_space = jact.StateSpace(
         states=("unused", "absorbed"),
@@ -500,3 +651,51 @@ def test_absorbing_only_reduced_model_advances_duration():
     assert result.states == ("absorbed",)
     assert int(result.final_state[0, 0]) == 0
     assert float(result.final_duration[0, 0]) == pytest.approx(5.0)
+
+
+def test_structural_no_edge_model_handles_per_individual_initial_states():
+    state_space = jact.StateSpace(states=("a", "b"), transitions=())
+    model = state_space.build()
+    initial = state_space.initial_per_individual(
+        state_names=("a", "b"),
+        duration=jnp.asarray([0.25, 1.5]),
+    )
+
+    result = model.simulate(
+        initial=initial,
+        horizon=3,
+        steps_per_unit=24,
+        max_jumps=0,
+        replicates=2,
+        key=jax.random.key(4),
+    )
+
+    assert result.states == ("a", "b")
+    assert result.jump_times.shape == (2, 2, 0)
+    np.testing.assert_array_equal(
+        result.state_path,
+        np.asarray([[[0], [0]], [[1], [1]]], dtype=np.int32),
+    )
+    np.testing.assert_array_equal(result.jump_count, 0)
+    np.testing.assert_array_equal(result.overflow, False)
+    np.testing.assert_array_equal(
+        result.final_duration,
+        np.asarray([[3.25, 3.25], [4.5, 4.5]], dtype=np.float32),
+    )
+
+
+def test_future_invalid_intensity_is_checked_after_stochastic_absorption():
+    def rate(t, d, **kwargs):
+        del d
+        return jnp.where(t < 1.0, 1e6, jnp.nan)
+
+    model = _two_state_model(rate)
+    with pytest.raises(ValueError, match="finite"):
+        model.simulate(
+            initial="active",
+            horizon=2,
+            steps_per_unit=2,
+            max_jumps=1,
+            replicates=16,
+            key=jax.random.key(9),
+        )

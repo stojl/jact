@@ -962,6 +962,11 @@ one individual. Keys are derived from the global key, individual index, and
 replicate index. Both typed `jax.random.key(...)` keys and legacy
 `jax.random.PRNGKey(...)` keys are accepted.
 
+Larger `replicates` values are an efficient way to supply enough independent
+trajectories to saturate a GPU. Replicate expansion happens inside the
+simulator, while the individual batch and the public
+`(individual, replicate, ...)` result layout remain unchanged.
+
 `max_jumps` is a required non-negative integer that fixes the compiled event
 buffer shape. `SimulationResult` contains:
 

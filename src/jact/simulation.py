@@ -8,7 +8,9 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import lru_cache, partial
 from numbers import Integral
+from threading import Lock
 from typing import Any, Literal, NamedTuple, TypeAlias, cast
+from weakref import WeakKeyDictionary
 
 import jax
 import jax.numpy as jnp
@@ -161,6 +163,12 @@ class _SimulationOutput(NamedTuple):
     invalid_nonfinite: jax.Array
 
 
+_simulation_plan_cache: WeakKeyDictionary[
+    Model, dict[tuple[str, ...], SimulationPlan]
+] = WeakKeyDictionary()
+_simulation_plan_cache_lock = Lock()
+
+
 def _compile_simulation_plan(
     model: Model,
     initial_states: Sequence[str],
@@ -235,6 +243,25 @@ def _compile_simulation_plan(
         n_edges=len(edges),
         max_out_degree=max_out_degree,
     )
+
+
+def _get_simulation_plan(
+    model: Model,
+    initial_states: Sequence[str],
+) -> SimulationPlan:
+    """Return the immutable plan cached for one model and initial-state set."""
+    cache_key = tuple(initial_states)
+    with _simulation_plan_cache_lock:
+        model_plans = _simulation_plan_cache.get(model)
+        if model_plans is not None:
+            cached = model_plans.get(cache_key)
+            if cached is not None:
+                return cached
+
+    plan = _compile_simulation_plan(model, cache_key)
+    with _simulation_plan_cache_lock:
+        model_plans = _simulation_plan_cache.setdefault(model, {})
+        return model_plans.setdefault(cache_key, plan)
 
 
 def _broadcast_grid_output(
@@ -891,6 +918,67 @@ def _trajectory_keys(
     )
 
 
+def _no_edge_kernel_impl(
+    masses: jax.Array,
+    durations: jax.Array,
+    initial_state_options: jax.Array,
+    trajectory_keys: jax.Array,
+    horizon: int,
+    max_jumps: int,
+) -> _SimulationOutput:
+    """Sample initial components and construct histories without calendar work."""
+    batch_size, replicates = trajectory_keys.shape[:2]
+    trajectory_count = batch_size * replicates
+    trajectory_masses = jnp.repeat(masses, replicates, axis=0)
+    trajectory_durations = jnp.repeat(durations, replicates, axis=0)
+    flattened_keys = trajectory_keys.reshape(
+        (trajectory_count,) + trajectory_keys.shape[2:]
+    )
+    initial_keys = _split_keys(flattened_keys, 3)
+    totals = jnp.sum(trajectory_masses, axis=-1)
+    draw = jax.vmap(jax.random.uniform)(initial_keys[:, 0])
+    thresholds = draw * totals
+    cumulative = jnp.cumsum(trajectory_masses, axis=-1)
+    component = jnp.argmax(cumulative > thresholds[:, None], axis=-1)
+    component = component.astype(jnp.int32)
+    rows = jnp.arange(trajectory_count, dtype=jnp.int32)
+    initial_state = initial_state_options[component]
+    initial_duration = trajectory_durations[rows, component]
+    value_dtype = durations.dtype
+    shape = (batch_size, replicates)
+    jump_times = jnp.full(
+        (*shape, max_jumps),
+        jnp.nan,
+        dtype=value_dtype,
+    )
+    state_path = jnp.full(
+        (*shape, max_jumps + 1),
+        -1,
+        dtype=jnp.int32,
+    )
+    state_path = state_path.at[..., 0].set(initial_state.reshape(shape))
+    return _SimulationOutput(
+        jump_times=jump_times,
+        jump_durations=jnp.full_like(jump_times, jnp.nan),
+        state_path=state_path,
+        jump_count=jnp.zeros(shape, dtype=jnp.int32),
+        overflow=jnp.zeros(shape, dtype=jnp.bool_),
+        truncated_at_time=jnp.full(shape, jnp.nan, dtype=value_dtype),
+        final_state=initial_state.reshape(shape),
+        final_duration=(
+            initial_duration.astype(value_dtype) + jnp.asarray(horizon)
+        ).reshape(shape),
+        invalid_negative=jnp.asarray(False),
+        invalid_nonfinite=jnp.asarray(False),
+    )
+
+
+_no_edge_kernel = partial(
+    jax.jit,
+    static_argnames=("horizon", "max_jumps"),
+)(_no_edge_kernel_impl)
+
+
 def _run_event_kernel(
     plan: SimulationPlan,
     masses: jax.Array,
@@ -903,6 +991,7 @@ def _run_event_kernel(
     intensity_kwargs: dict[str, jax.Array],
     devices: tuple[Any, ...],
     *,
+    horizon: int,
     replicates: int,
     max_jumps: int,
     negative_tolerance: float,
@@ -910,6 +999,23 @@ def _run_event_kernel(
     batch_size = masses.shape[0]
     if batch_size == 0:
         raise ValueError("Cannot simulate an empty portfolio.")
+
+    if plan.n_edges == 0:
+        selected_device = devices[0] if devices else None
+        context = (
+            jax.default_device(selected_device)
+            if selected_device is not None
+            else nullcontext()
+        )
+        with context:
+            return _no_edge_kernel(
+                masses,
+                durations,
+                initial_state_options,
+                trajectory_keys[:batch_size],
+                horizon=horizon,
+                max_jumps=max_jumps,
+            )
 
     if len(devices) <= 1:
         individual_indices = jnp.repeat(
@@ -1085,6 +1191,44 @@ def _validate_integer(name: str, value: object, *, allow_zero: bool) -> int:
     return integer
 
 
+@jax.jit
+def _initial_validation_summary(
+    masses: jax.Array,
+    durations: jax.Array,
+) -> jax.Array:
+    return jnp.stack(
+        (
+            jnp.all(jnp.isfinite(masses)),
+            jnp.all(masses >= 0),
+            jnp.all(jnp.sum(masses, axis=-1) > 0),
+            jnp.all(jnp.isfinite(durations)),
+            jnp.all(durations >= 0),
+            jnp.max(durations),
+        )
+    )
+
+
+def _validate_initial_values(
+    masses: jax.Array,
+    durations: jax.Array,
+) -> float:
+    """Validate initial arrays with one synchronized device-to-host summary."""
+    summary = np.asarray(_initial_validation_summary(masses, durations))
+    if not bool(summary[0]):
+        raise ValueError("Initial masses must be finite.")
+    if not bool(summary[1]):
+        raise ValueError("Initial masses must be non-negative.")
+    if not bool(summary[2]):
+        raise ValueError(
+            "Initial component masses must have a positive total per individual."
+        )
+    if not bool(summary[3]):
+        raise ValueError("Initial durations must be finite.")
+    if not bool(summary[4]):
+        raise ValueError("Initial durations must be non-negative.")
+    return float(summary[5])
+
+
 def simulate(
     model: Model,
     initial: str | ArrayLike | InitialDistribution,
@@ -1124,7 +1268,7 @@ def simulate(
     model_states = model.state_space.states
     initial_distribution.validate_for_model(model_states)
     canonical = initial_distribution.canonicalize(model_states)
-    plan = _compile_simulation_plan(model, canonical.states)
+    plan = _get_simulation_plan(model, canonical.states)
 
     intensity_kwargs = {
         name: jnp.asarray(value) for name, value in kwargs.items()
@@ -1159,21 +1303,7 @@ def simulate(
         ),
         axis=-1,
     ).astype(value_dtype)
-    concrete_masses = np.asarray(masses)
-    concrete_durations = np.asarray(durations)
-    if not np.all(np.isfinite(concrete_masses)):
-        raise ValueError("Initial masses must be finite.")
-    if np.any(concrete_masses < 0):
-        raise ValueError("Initial masses must be non-negative.")
-    mass_totals = concrete_masses.sum(axis=-1)
-    if np.any(mass_totals <= 0):
-        raise ValueError(
-            "Initial component masses must have a positive total per individual."
-        )
-    if not np.all(np.isfinite(concrete_durations)):
-        raise ValueError("Initial durations must be finite.")
-    if np.any(concrete_durations < 0):
-        raise ValueError("Initial durations must be non-negative.")
+    max_initial_duration = _validate_initial_values(masses, durations)
 
     reduced_index = {state: index for index, state in enumerate(plan.states)}
     initial_state_options = jnp.asarray(
@@ -1189,7 +1319,6 @@ def simulate(
         solver_steps + 1,
         dtype=value_dtype,
     )
-    max_initial_duration = float(np.max(concrete_durations))
     duration_cells = max(
         1,
         int(np.ceil((max_initial_duration + horizon) * steps_per_unit)),
@@ -1221,14 +1350,18 @@ def simulate(
         duration_mid,
         intensity_kwargs,
         selected_devices,
+        horizon=horizon,
         replicates=replicates,
         max_jumps=max_jumps,
         negative_tolerance=1e-12,
     )
 
-    if bool(np.asarray(output.invalid_nonfinite)):
+    invalid_summary = np.asarray(
+        jnp.stack((output.invalid_nonfinite, output.invalid_negative))
+    )
+    if bool(invalid_summary[0]):
         raise ValueError("Intensity values must be finite.")
-    if bool(np.asarray(output.invalid_negative)):
+    if bool(invalid_summary[1]):
         raise ValueError(
             "Intensity values must be non-negative "
             "(apart from values within 1e-12 of zero)."

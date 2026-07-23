@@ -65,6 +65,10 @@ multi_device_paths = model.simulate(
 )
 ```
 
+Increasing `replicates` efficiently supplies more independent trajectories to
+the GPU without changing the individual batch or the public
+`(individual, replicate, ...)` result layout.
+
 ## Fitted-model intensity wrappers
 
 Use `jact.wrappers.bind_intensity()` when a fitted model has a separate feature
