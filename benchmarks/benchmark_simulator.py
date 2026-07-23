@@ -64,6 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--horizon", type=int, default=30)
     parser.add_argument("--steps-per-unit", type=int, default=12)
     parser.add_argument("--max-jumps", type=int, default=64)
+    parser.add_argument("--devices", type=int)
     parser.add_argument("--runs", type=int, default=5)
     return parser.parse_args()
 
@@ -81,6 +82,7 @@ def main() -> None:
             max_jumps=args.max_jumps,
             replicates=args.replicates,
             key=key,
+            devices=args.devices,
             age=ages,
         )
 
@@ -98,11 +100,21 @@ def main() -> None:
 
     trajectories = args.individuals * args.replicates
     best = min(timings)
+    device_count = 1 if args.devices is None else args.devices
+    local_batch_size = (
+        args.individuals + device_count - 1
+    ) // device_count
+    padding_count = local_batch_size * device_count - args.individuals
+    recorded_jumps = int(jnp.sum(result.jump_count))
     print(f"backend: {jax.default_backend()}")
+    print(f"devices: {device_count}")
+    print(f"per-device local batch: {local_batch_size:,}")
+    print(f"padding rows: {padding_count:,}")
     print(f"compile + first run: {compile_and_first:.3f} s")
-    print(f"best execution: {best:.3f} s")
-    print(f"throughput: {trajectories / best:,.0f} trajectories/s")
-    print(f"recorded jumps: {int(jnp.sum(result.jump_count)):,}")
+    print(f"best steady-state execution: {best:.3f} s")
+    print(f"trajectory throughput: {trajectories / best:,.0f}/s")
+    print(f"jump throughput: {recorded_jumps / best:,.0f}/s")
+    print(f"recorded jumps: {recorded_jumps:,}")
     print(f"overflowed trajectories: {int(jnp.sum(result.overflow)):,}")
 
 

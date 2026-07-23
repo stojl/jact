@@ -586,7 +586,13 @@ class Model:
         devices: int | Sequence[Any] | None = None,
         **kwargs: Any,
     ) -> SimulationResult:
-        """Sample continuous event histories from the discretized model."""
+        """Sample continuous event histories from the discretized model.
+
+        ``devices=None`` uses the default single-device JIT path. An integer
+        selects that many local devices, and a device sequence selects those
+        local devices in order. Multi-device execution shards individuals and
+        preserves the public ``(individual, replicate, ...)`` layout.
+        """
         from .simulation import simulate
 
         return simulate(

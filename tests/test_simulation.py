@@ -373,6 +373,65 @@ def test_module_level_simulate_and_single_device_option():
     assert result.jump_times.shape == (1, 1, 1)
 
 
+@pytest.mark.parametrize("devices", [False, 0, -1, ()])
+def test_invalid_device_selections_are_rejected(devices):
+    model = _two_state_model(lambda t, d, **kwargs: 0.0)
+    with pytest.raises(ValueError, match="devices must"):
+        model.simulate(
+            initial="active",
+            horizon=1,
+            steps_per_unit=1,
+            max_jumps=1,
+            key=jax.random.key(0),
+            devices=devices,
+        )
+
+
+def test_unavailable_and_duplicate_device_selections_are_rejected():
+    model = _two_state_model(lambda t, d, **kwargs: 0.0)
+    local_devices = jax.local_devices()
+    with pytest.raises(ValueError, match="only .* local devices"):
+        model.simulate(
+            initial="active",
+            horizon=1,
+            steps_per_unit=1,
+            max_jumps=1,
+            key=jax.random.key(0),
+            devices=len(local_devices) + 1,
+        )
+    with pytest.raises(ValueError, match="duplicates"):
+        model.simulate(
+            initial="active",
+            horizon=1,
+            steps_per_unit=1,
+            max_jumps=1,
+            key=jax.random.key(0),
+            devices=(local_devices[0], local_devices[0]),
+        )
+    with pytest.raises(ValueError, match="local JAX devices"):
+        model.simulate(
+            initial="active",
+            horizon=1,
+            steps_per_unit=1,
+            max_jumps=1,
+            key=jax.random.key(0),
+            devices=(object(),),
+        )
+
+
+def test_empty_portfolio_is_rejected_before_simulation():
+    model = _two_state_model(lambda t, d, **kwargs: kwargs["rate"][:, None])
+    with pytest.raises(ValueError, match="empty portfolio"):
+        model.simulate(
+            initial="active",
+            horizon=1,
+            steps_per_unit=1,
+            max_jumps=1,
+            key=jax.random.key(0),
+            rate=jnp.asarray([]),
+        )
+
+
 @pytest.mark.parametrize(
     ("rate", "message"),
     [

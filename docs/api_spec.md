@@ -988,9 +988,39 @@ With `overflow="raise"`, the compiled simulation completes and then raises a
 host-side `RuntimeError` if any trajectory overflowed.
 
 The simulator rejects non-finite or materially negative intensities. Values in
-`[-1e-12, 0)` are clamped to zero. It currently executes on one device;
-`devices=None`, `devices=1`, or a one-device sequence is accepted.
-Multi-device simulation is reserved for a later implementation phase.
+`[-1e-12, 0)` are clamped to zero.
+
+`devices` selects deterministic local execution:
+
+- `devices=None` uses the ordinary single-device JIT path,
+- `devices=1` explicitly selects the first local device and uses the
+  single-device path,
+- `devices=N`, for `N > 1`, selects the first `N` local devices,
+- `devices=(device0, device1, ...)` uses the supplied local devices in the
+  supplied order.
+
+Boolean and non-positive selections, unavailable device counts, empty
+sequences, duplicate devices, and non-local devices are rejected. Multi-host
+simulation is not supported.
+
+Multi-device execution shards the canonical individual batch before replicate
+expansion. Scalar covariates are replicated, while every non-scalar covariate
+is sharded on its leading individual axis. Intensity callables therefore keep
+their existing local `(batch, ...)` covariate contract. The device axis is
+removed before constructing `SimulationResult`; all public shapes remain
+`(individual, replicate, ...)`.
+
+When the individual count is not divisible by the device count, the final real
+individual is repeated until the batch divides evenly. This applies to
+component masses, initial durations, and every batch covariate, avoiding
+padding-only invalid model inputs. Padded histories are removed before result
+construction, validation summaries, and overflow accounting.
+
+Trajectory keys always follow
+`fold_in(fold_in(key, global_individual_index), replicate_index)`. Consequently,
+results on one backend are bitwise identical for the same inputs and key across
+`devices=None`, one device, and any supported local device count. Both typed
+and legacy JAX keys retain this property.
 
 ## Numerical and JIT contract
 

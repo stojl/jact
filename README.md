@@ -51,6 +51,18 @@ paths = model.simulate(
     key=jax.random.key(42),
     age=ages,
 )
+
+# Shard individuals over the first two local JAX devices
+multi_device_paths = model.simulate(
+    initial="healthy",
+    horizon=30,
+    steps_per_unit=12,
+    max_jumps=64,
+    replicates=10,
+    key=jax.random.key(42),
+    devices=2,
+    age=ages,
+)
 ```
 
 ## Fitted-model intensity wrappers

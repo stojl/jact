@@ -1,4 +1,4 @@
-# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportPrivateUsage=false
+# pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportUntypedFunctionDecorator=false, reportPrivateUsage=false
 """JAX-native event simulation for discretized semi-Markov models."""
 
 from __future__ import annotations
@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
-from functools import partial
+from functools import lru_cache, partial
 from numbers import Integral
 from typing import Any, Literal, NamedTuple, TypeAlias, cast
 
@@ -142,6 +142,21 @@ class _SimulationCarry(NamedTuple):
     jump_durations: jax.Array
     state_path: jax.Array
     truncated_at_time: jax.Array
+    invalid_negative: jax.Array
+    invalid_nonfinite: jax.Array
+
+
+class _SimulationOutput(NamedTuple):
+    """Public event fields plus host-reduced validation flags."""
+
+    jump_times: jax.Array
+    jump_durations: jax.Array
+    state_path: jax.Array
+    jump_count: jax.Array
+    overflow: jax.Array
+    truncated_at_time: jax.Array
+    final_state: jax.Array
+    final_duration: jax.Array
     invalid_negative: jax.Array
     invalid_nonfinite: jax.Array
 
@@ -289,11 +304,7 @@ def _split_keys(keys: jax.Array, count: int) -> jax.Array:
     return jax.vmap(lambda key: jax.random.split(key, count))(keys)
 
 
-@partial(
-    jax.jit,
-    static_argnames=("batch_size", "max_jumps", "negative_tolerance"),
-)
-def _event_kernel(
+def _event_kernel_impl(
     plan: SimulationPlan,
     trajectory_masses: jax.Array,
     trajectory_durations: jax.Array,
@@ -578,6 +589,422 @@ def _event_kernel(
     return carry
 
 
+_event_kernel = partial(
+    jax.jit,
+    static_argnames=("batch_size", "max_jumps", "negative_tolerance"),
+)(_event_kernel_impl)
+
+
+def _format_simulation_output(
+    carry: _SimulationCarry,
+    batch_size: int,
+    replicates: int,
+) -> _SimulationOutput:
+    shape = (batch_size, replicates)
+    return _SimulationOutput(
+        jump_times=carry.jump_times.reshape((*shape, carry.jump_times.shape[-1])),
+        jump_durations=carry.jump_durations.reshape(
+            (*shape, carry.jump_durations.shape[-1])
+        ),
+        state_path=carry.state_path.reshape(
+            (*shape, carry.state_path.shape[-1])
+        ),
+        jump_count=carry.jump_count.reshape(shape),
+        overflow=carry.overflow.reshape(shape),
+        truncated_at_time=carry.truncated_at_time.reshape(shape),
+        final_state=carry.current_state.reshape(shape),
+        final_duration=carry.current_duration.reshape(shape),
+        invalid_negative=carry.invalid_negative,
+        invalid_nonfinite=carry.invalid_nonfinite,
+    )
+
+
+def _event_kernel_pmapped_wrapper(
+    plan: SimulationPlan,
+    local_masses: jax.Array,
+    local_durations: jax.Array,
+    initial_state_options: jax.Array,
+    local_trajectory_keys: jax.Array,
+    calendar_left: jax.Array,
+    calendar_right: jax.Array,
+    duration_mid: jax.Array,
+    batch_kwargs: dict[str, jax.Array],
+    scalar_kwargs: dict[str, jax.Array],
+    replicates: int,
+    max_jumps: int,
+    negative_tolerance: float,
+) -> _SimulationOutput:
+    local_batch_size = local_masses.shape[0]
+    trajectory_masses = jnp.repeat(local_masses, replicates, axis=0)
+    trajectory_durations = jnp.repeat(local_durations, replicates, axis=0)
+    trajectory_keys = local_trajectory_keys.reshape(
+        (local_batch_size * replicates,) + local_trajectory_keys.shape[2:]
+    )
+    individual_indices = jnp.repeat(
+        jnp.arange(local_batch_size, dtype=jnp.int32),
+        replicates,
+    )
+    carry = _event_kernel_impl(
+        plan,
+        trajectory_masses,
+        trajectory_durations,
+        initial_state_options,
+        trajectory_keys,
+        individual_indices,
+        calendar_left,
+        calendar_right,
+        duration_mid,
+        {**scalar_kwargs, **batch_kwargs},
+        batch_size=local_batch_size,
+        max_jumps=max_jumps,
+        negative_tolerance=negative_tolerance,
+    )
+    return _format_simulation_output(carry, local_batch_size, replicates)
+
+
+# JAX accepts recursive PyTree axis specifications, but does not expose a
+# corresponding public type alias.
+_SIMULATION_PMAP_IN_AXES: Any = (
+    None,
+    0,
+    0,
+    None,
+    0,
+    None,
+    None,
+    None,
+    0,
+    None,
+    None,
+    None,
+    None,
+)
+_SIMULATION_PMAP_STATIC_ARGNUMS = (10, 11, 12)
+
+
+@partial(
+    jax.pmap,
+    in_axes=_SIMULATION_PMAP_IN_AXES,
+    static_broadcasted_argnums=_SIMULATION_PMAP_STATIC_ARGNUMS,
+)
+def _event_kernel_pmapped_all_devices(
+    plan: SimulationPlan,
+    local_masses: jax.Array,
+    local_durations: jax.Array,
+    initial_state_options: jax.Array,
+    local_trajectory_keys: jax.Array,
+    calendar_left: jax.Array,
+    calendar_right: jax.Array,
+    duration_mid: jax.Array,
+    batch_kwargs: dict[str, jax.Array],
+    scalar_kwargs: dict[str, jax.Array],
+    replicates: int,
+    max_jumps: int,
+    negative_tolerance: float,
+) -> _SimulationOutput:
+    return _event_kernel_pmapped_wrapper(
+        plan,
+        local_masses,
+        local_durations,
+        initial_state_options,
+        local_trajectory_keys,
+        calendar_left,
+        calendar_right,
+        duration_mid,
+        batch_kwargs,
+        scalar_kwargs,
+        replicates,
+        max_jumps,
+        negative_tolerance,
+    )
+
+
+@lru_cache(maxsize=None)
+def _event_kernel_pmapped_on_devices(
+    devices: tuple[Any, ...],
+) -> Any:
+    return jax.pmap(
+        _event_kernel_pmapped_wrapper,
+        in_axes=_SIMULATION_PMAP_IN_AXES,
+        static_broadcasted_argnums=_SIMULATION_PMAP_STATIC_ARGNUMS,
+        devices=devices,
+    )
+
+
+def _split_scalar_and_batch_kwargs(
+    kwargs: Mapping[str, jax.Array],
+) -> tuple[dict[str, jax.Array], dict[str, jax.Array]]:
+    scalar_kwargs: dict[str, jax.Array] = {}
+    batch_kwargs: dict[str, jax.Array] = {}
+    for name, value in kwargs.items():
+        arr = jnp.asarray(value)
+        if arr.ndim == 0:
+            scalar_kwargs[name] = arr
+        else:
+            batch_kwargs[name] = arr
+    return scalar_kwargs, batch_kwargs
+
+
+def _pad_batch_array_by_repetition(
+    value: jax.Array,
+    padded_batch_size: int,
+) -> jax.Array:
+    batch_size = value.shape[0]
+    if batch_size == 0:
+        raise ValueError("Cannot simulate an empty portfolio.")
+    if padded_batch_size < batch_size:
+        raise ValueError("Padded batch size cannot be smaller than batch size.")
+    padding = padded_batch_size - batch_size
+    if padding == 0:
+        return value
+    repeated_last = jnp.repeat(value[-1:], padding, axis=0)
+    return jnp.concatenate((value, repeated_last), axis=0)
+
+
+def _shard_simulation_batch_array(
+    value: jax.Array,
+    device_count: int,
+) -> tuple[jax.Array, int, int, int]:
+    if value.ndim == 0:
+        raise ValueError("Cannot shard scalar values over devices.")
+    batch_size = value.shape[0]
+    if batch_size == 0:
+        raise ValueError("Cannot simulate an empty portfolio.")
+    padded_batch_size = (
+        (batch_size + device_count - 1) // device_count
+    ) * device_count
+    padded = _pad_batch_array_by_repetition(value, padded_batch_size)
+    local_batch_size = padded_batch_size // device_count
+    sharded = padded.reshape(
+        (device_count, local_batch_size) + padded.shape[1:]
+    )
+    return sharded, batch_size, padded_batch_size, local_batch_size
+
+
+def _shard_simulation_batch_tree(
+    tree: Any,
+    device_count: int,
+) -> tuple[Any, int, int, int]:
+    batch_sizes: list[int] = []
+    padded_sizes: list[int] = []
+    local_sizes: list[int] = []
+
+    def shard(value: Any) -> jax.Array:
+        sharded, batch_size, padded_size, local_size = (
+            _shard_simulation_batch_array(jnp.asarray(value), device_count)
+        )
+        batch_sizes.append(batch_size)
+        padded_sizes.append(padded_size)
+        local_sizes.append(local_size)
+        return sharded
+
+    sharded_tree = jax.tree_util.tree_map(shard, tree)
+    if not batch_sizes:
+        raise ValueError("Cannot shard an empty tree.")
+    if any(size != batch_sizes[0] for size in batch_sizes):
+        raise ValueError("All sharded leaves must have the same batch size.")
+    return (
+        sharded_tree,
+        batch_sizes[0],
+        padded_sizes[0],
+        local_sizes[0],
+    )
+
+
+def _unshard_simulation_result(
+    result: _SimulationOutput,
+    original_batch_size: int,
+) -> _SimulationOutput:
+    def unshard(value: jax.Array) -> jax.Array:
+        merged = value.reshape(
+            (value.shape[0] * value.shape[1],) + value.shape[2:]
+        )
+        return merged[:original_batch_size]
+
+    return _SimulationOutput(
+        jump_times=unshard(result.jump_times),
+        jump_durations=unshard(result.jump_durations),
+        state_path=unshard(result.state_path),
+        jump_count=unshard(result.jump_count),
+        overflow=unshard(result.overflow),
+        truncated_at_time=unshard(result.truncated_at_time),
+        final_state=unshard(result.final_state),
+        final_duration=unshard(result.final_duration),
+        invalid_negative=jnp.any(result.invalid_negative),
+        invalid_nonfinite=jnp.any(result.invalid_nonfinite),
+    )
+
+
+def _local_devices() -> tuple[Any, ...]:
+    return tuple(cast(Sequence[Any], jax.local_devices()))
+
+
+def _resolve_devices(
+    devices: int | Sequence[Any] | None,
+) -> tuple[Any, ...]:
+    if devices is None:
+        return ()
+    if isinstance(devices, bool):
+        raise ValueError("devices must be an integer or a sequence of jax.Device.")
+    local_devices = _local_devices()
+    if isinstance(devices, Integral):
+        device_count = int(devices)
+        if device_count <= 0:
+            raise ValueError("devices must select at least one device.")
+        if device_count > len(local_devices):
+            raise ValueError(
+                f"devices={device_count} requested, but only "
+                f"{len(local_devices)} local devices are available."
+            )
+        return local_devices[:device_count]
+    selected = tuple(cast(Sequence[Any], devices))
+    if not selected:
+        raise ValueError("devices must select at least one device.")
+    if any(device not in local_devices for device in selected):
+        raise ValueError("All selected devices must be local JAX devices.")
+    if len(set(selected)) != len(selected):
+        raise ValueError("Selected devices must not contain duplicates.")
+    return selected
+
+
+def _trajectory_keys(
+    key: jax.Array,
+    batch_size: int,
+    replicates: int,
+) -> jax.Array:
+    individual_indices = jnp.repeat(
+        jnp.arange(batch_size, dtype=jnp.int32),
+        replicates,
+    )
+    replicate_indices = jnp.tile(
+        jnp.arange(replicates, dtype=jnp.int32),
+        batch_size,
+    )
+    keys = jax.vmap(
+        lambda individual, replicate: jax.random.fold_in(
+            jax.random.fold_in(key, individual),
+            replicate,
+        )
+    )(individual_indices, replicate_indices)
+    return keys.reshape(
+        (batch_size, replicates) + keys.shape[1:]
+    )
+
+
+def _run_event_kernel(
+    plan: SimulationPlan,
+    masses: jax.Array,
+    durations: jax.Array,
+    initial_state_options: jax.Array,
+    trajectory_keys: jax.Array,
+    calendar_left: jax.Array,
+    calendar_right: jax.Array,
+    duration_mid: jax.Array,
+    intensity_kwargs: dict[str, jax.Array],
+    devices: tuple[Any, ...],
+    *,
+    replicates: int,
+    max_jumps: int,
+    negative_tolerance: float,
+) -> _SimulationOutput:
+    batch_size = masses.shape[0]
+    if batch_size == 0:
+        raise ValueError("Cannot simulate an empty portfolio.")
+
+    if len(devices) <= 1:
+        individual_indices = jnp.repeat(
+            jnp.arange(batch_size, dtype=jnp.int32),
+            replicates,
+        )
+        trajectory_masses = jnp.repeat(masses, replicates, axis=0)
+        trajectory_durations = jnp.repeat(durations, replicates, axis=0)
+        flattened_keys = trajectory_keys.reshape(
+            (batch_size * replicates,) + trajectory_keys.shape[2:]
+        )
+        selected_device = devices[0] if devices else None
+        context = (
+            jax.default_device(selected_device)
+            if selected_device is not None
+            else nullcontext()
+        )
+        with context:
+            carry = _event_kernel(
+                plan,
+                trajectory_masses,
+                trajectory_durations,
+                initial_state_options,
+                flattened_keys,
+                individual_indices,
+                calendar_left,
+                calendar_right,
+                duration_mid,
+                intensity_kwargs,
+                batch_size=batch_size,
+                max_jumps=max_jumps,
+                negative_tolerance=negative_tolerance,
+            )
+        return _format_simulation_output(carry, batch_size, replicates)
+
+    device_count = len(devices)
+    (
+        sharded_masses,
+        original_batch_size,
+        padded_batch_size,
+        local_batch_size,
+    ) = _shard_simulation_batch_array(masses, device_count)
+    (
+        sharded_durations,
+        durations_batch_size,
+        _durations_padded_size,
+        _durations_local_size,
+    ) = _shard_simulation_batch_array(durations, device_count)
+    if durations_batch_size != original_batch_size:
+        raise ValueError("Initial masses and durations must share a batch size.")
+
+    scalar_kwargs, batch_kwargs = _split_scalar_and_batch_kwargs(
+        intensity_kwargs
+    )
+    if batch_kwargs:
+        (
+            sharded_batch_kwargs,
+            kwargs_batch_size,
+            _kwargs_padded_size,
+            _kwargs_local_size,
+        ) = _shard_simulation_batch_tree(batch_kwargs, device_count)
+        if kwargs_batch_size != original_batch_size:
+            raise ValueError(
+                "Covariate batch dimensions must match simulation batch size."
+            )
+    else:
+        sharded_batch_kwargs = {}
+
+    if trajectory_keys.shape[0] != padded_batch_size:
+        raise ValueError("Trajectory keys must include every padded individual.")
+    sharded_trajectory_keys = trajectory_keys.reshape(
+        (device_count, local_batch_size) + trajectory_keys.shape[1:]
+    )
+    arguments = (
+        plan,
+        sharded_masses,
+        sharded_durations,
+        initial_state_options,
+        sharded_trajectory_keys,
+        calendar_left,
+        calendar_right,
+        duration_mid,
+        sharded_batch_kwargs,
+        scalar_kwargs,
+        replicates,
+        max_jumps,
+        negative_tolerance,
+    )
+    if devices == _local_devices():
+        sharded_result = _event_kernel_pmapped_all_devices(*arguments)
+    else:
+        sharded_result = _event_kernel_pmapped_on_devices(devices)(*arguments)
+    return _unshard_simulation_result(sharded_result, original_batch_size)
+
+
 def _get_covariate_batch_size(
     kwargs: Mapping[str, jax.Array],
 ) -> int | None:
@@ -658,31 +1085,6 @@ def _validate_integer(name: str, value: object, *, allow_zero: bool) -> int:
     return integer
 
 
-def _resolve_single_device(
-    devices: int | Sequence[Any] | None,
-) -> Any | None:
-    if devices is None:
-        return None
-    if isinstance(devices, bool):
-        raise ValueError("devices must be an integer or a sequence of jax.Device.")
-    if isinstance(devices, int):
-        if devices <= 0:
-            raise ValueError("devices must select at least one device.")
-        if devices > 1:
-            raise NotImplementedError(
-                "Multi-device simulation is not implemented yet; use devices=1."
-            )
-        return jax.local_devices()[0]
-    selected = tuple(devices)
-    if not selected:
-        raise ValueError("devices must select at least one device.")
-    if len(selected) > 1:
-        raise NotImplementedError(
-            "Multi-device simulation is not implemented yet; select one device."
-        )
-    return selected[0]
-
-
 def simulate(
     model: Model,
     initial: str | ArrayLike | InitialDistribution,
@@ -742,6 +1144,8 @@ def simulate(
         batch_size = covariate_batch
     if batch_size is None:
         batch_size = 1
+    if batch_size == 0:
+        raise ValueError("Cannot simulate an empty portfolio.")
     value_dtype = _simulation_value_dtype(canonical, intensity_kwargs)
 
     masses = jnp.stack(
@@ -771,27 +1175,11 @@ def simulate(
     if np.any(concrete_durations < 0):
         raise ValueError("Initial durations must be non-negative.")
 
-    individual_indices = jnp.repeat(
-        jnp.arange(batch_size, dtype=jnp.int32),
-        replicates,
-    )
-    replicate_indices = jnp.tile(
-        jnp.arange(replicates, dtype=jnp.int32),
-        batch_size,
-    )
-    trajectory_masses = masses[individual_indices]
-    trajectory_durations = durations[individual_indices]
     reduced_index = {state: index for index, state in enumerate(plan.states)}
     initial_state_options = jnp.asarray(
         [reduced_index[state] for state in canonical.states],
         dtype=jnp.int32,
     )
-    trajectory_keys = jax.vmap(
-        lambda individual, replicate: jax.random.fold_in(
-            jax.random.fold_in(key, individual),
-            replicate,
-        )
-    )(individual_indices, replicate_indices)
 
     step_size = 1.0 / steps_per_unit
     solver_steps = horizon * steps_per_unit
@@ -810,48 +1198,52 @@ def simulate(
         jnp.arange(duration_cells, dtype=value_dtype) + 0.5
     ) * jnp.asarray(step_size, dtype=value_dtype)
 
-    selected_device = _resolve_single_device(devices)
-    context = (
-        jax.default_device(selected_device)
-        if selected_device is not None
-        else nullcontext()
+    selected_devices = _resolve_devices(devices)
+    key_batch_size = batch_size
+    if len(selected_devices) > 1:
+        key_batch_size = (
+            (batch_size + len(selected_devices) - 1)
+            // len(selected_devices)
+        ) * len(selected_devices)
+    trajectory_keys = _trajectory_keys(
+        key,
+        key_batch_size,
+        replicates,
     )
-    with context:
-        carry = _event_kernel(
-            plan,
-            trajectory_masses,
-            trajectory_durations,
-            initial_state_options,
-            trajectory_keys,
-            individual_indices,
-            calendar_grid[:-1],
-            calendar_grid[1:],
-            duration_mid,
-            intensity_kwargs,
-            batch_size=batch_size,
-            max_jumps=max_jumps,
-            negative_tolerance=1e-12,
-        )
+    output = _run_event_kernel(
+        plan,
+        masses,
+        durations,
+        initial_state_options,
+        trajectory_keys,
+        calendar_grid[:-1],
+        calendar_grid[1:],
+        duration_mid,
+        intensity_kwargs,
+        selected_devices,
+        replicates=replicates,
+        max_jumps=max_jumps,
+        negative_tolerance=1e-12,
+    )
 
-    if bool(np.asarray(carry.invalid_nonfinite)):
+    if bool(np.asarray(output.invalid_nonfinite)):
         raise ValueError("Intensity values must be finite.")
-    if bool(np.asarray(carry.invalid_negative)):
+    if bool(np.asarray(output.invalid_negative)):
         raise ValueError(
             "Intensity values must be non-negative "
             "(apart from values within 1e-12 of zero)."
         )
 
-    shape = (batch_size, replicates)
     result = SimulationResult(
         states=plan.states,
-        jump_times=carry.jump_times.reshape((*shape, max_jumps)),
-        jump_durations=carry.jump_durations.reshape((*shape, max_jumps)),
-        state_path=carry.state_path.reshape((*shape, max_jumps + 1)),
-        jump_count=carry.jump_count.reshape(shape),
-        overflow=carry.overflow.reshape(shape),
-        truncated_at_time=carry.truncated_at_time.reshape(shape),
-        final_state=carry.current_state.reshape(shape),
-        final_duration=carry.current_duration.reshape(shape),
+        jump_times=output.jump_times,
+        jump_durations=output.jump_durations,
+        state_path=output.state_path,
+        jump_count=output.jump_count,
+        overflow=output.overflow,
+        truncated_at_time=output.truncated_at_time,
+        final_state=output.final_state,
+        final_duration=output.final_duration,
     )
     if overflow == "raise":
         overflow_count = int(np.asarray(jnp.sum(result.overflow)))
