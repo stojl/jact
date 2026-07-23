@@ -34,6 +34,11 @@ def test_skill_text_reads_application_guidance():
     assert "same leading batch dimension" in text
     assert "Pad the final partial batch" in text
     assert "trim result arrays" in text
+    assert "## Event Simulation" in text
+    assert "model.simulate(" in text
+    assert "devices=2" in text
+    assert "bitwise identical across device counts" in text
+    assert "Intensity and payment outputs only need to be broadcastable" in text
     assert "Release checks" not in text
 
 

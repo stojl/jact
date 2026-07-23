@@ -1,13 +1,9 @@
 ---
 name: jact
-description: Use when helping users model transition probabilities, semi-Markov state systems, duration-dependent hazards, fitted intensity models, expected cashflows, or actuarial state occupancy with jact.
+description: Use when helping users model transition probabilities, semi-Markov state systems, duration-dependent hazards, fitted intensity models, expected cashflows, actuarial state occupancy, sampled event histories, or local multi-device simulation with jact.
 ---
 
 # jact Modeling Skill
-
-Use this skill when helping users model transition probabilities, semi-Markov
-state systems, duration-dependent hazards, fitted intensity models, or expected
-cashflows with `jact`.
 
 This is application guidance for using the installed package. Do not rely on
 repository-only files such as `notes/` or `archive/`, and do not include
@@ -24,14 +20,14 @@ When helping a user, first identify:
 - the initial condition and any starting durations,
 - whether the user needs one solve or repeated fixed-shape batch processing,
 - whether the desired output is state occupancy, duration diagnostics,
-  component cashflows, grouped cashflows, or a terminal value.
+  component cashflows, grouped cashflows, a terminal value, or sampled paths.
 
 1. Define the state topology with `jact.StateSpace`.
 2. Bind transition intensities with `state_space.build(...)`.
 3. Choose an initial state, per-individual initial states, or an
    `InitialDistribution`.
-4. Call `model.solve(...)` with horizon, grid resolution, output reducers, and
-   user covariates.
+4. Call `model.solve(...)` for expectations or `model.simulate(...)` for
+   sampled event histories.
 5. Select probability reducers and cashflow views that match the user's
    question.
 
@@ -40,6 +36,8 @@ Before choosing an output form, classify the requested quantity by intent:
 - Use probability reducers for snapshot state occupancy or duration diagnostics.
 - Use cashflows for expected path integrals, event values, scheduled values, and
   accumulated terminal values.
+- Use event simulation for individual sampled paths, event-time distributions,
+  or Monte Carlo quantities not available as solver expectations.
 - If the next step would be "sum over time" or "integrate over duration",
   check whether a cashflow component already expresses that integral.
 
@@ -60,14 +58,11 @@ state_space = jact.StateSpace(
 
 
 def disability_onset(t, d, *, age):
-    return jnp.full((age.shape[0], d.shape[-1]), 0.03)
+    return 0.03
 
 
 def healthy_mortality(t, d, *, age):
-    attained_age = jnp.broadcast_to(
-        age[:, None] + t,
-        (age.shape[0], d.shape[-1]),
-    )
+    attained_age = age[:, None] + t
     return 0.002 * jnp.exp(0.08 * (attained_age - 50.0))
 
 
@@ -99,9 +94,11 @@ reachable_states = result.states
 
 ## Application Contracts
 
-- Single-transition intensity callables use `fn(t, d, **kwargs)` and return
-  non-negative arrays broadcastable to `(batch, D)`. Useful shapes include
-  scalar `()`, `(D,)`, `(1, D)`, `(batch, 1)`, and `(batch, D)`.
+- Intensity and payment callables use `fn(t, d, **kwargs)`. Their outputs only
+  need to be broadcastable to `(batch, D)`; do not materialize that full shape
+  unless downstream feature logic requires it. Useful output shapes include
+  scalar `()`, `(D,)`, `(1, D)`, `(batch, 1)`, and `(batch, D)`. Intensities
+  must be non-negative; payments may be signed.
 - Grouped intensity callables and exit callables keep a leading output axis
   shaped `(K, ...)`, where `K` is the number of covered transitions. Each
   selected output must be broadcastable to `(batch, D)`.
@@ -144,6 +141,50 @@ row count. This avoids compiling a separate solve for the final smaller batch.
 Do not suggest variable-size chunks for large workloads unless compile overhead
 is irrelevant. If batch sizes must vary, explain that shape changes may trigger
 additional JIT compilation.
+
+## Event Simulation
+
+Use `model.simulate(...)` to sample fixed-buffer event histories from the same
+midpoint-discretized intensity model:
+
+```python
+import jax
+
+paths = model.simulate(
+    initial="healthy",
+    horizon=20,
+    steps_per_unit=12,
+    max_jumps=64,
+    replicates=10,
+    key=jax.random.key(42),
+    overflow="return",
+    devices=2,
+    age=ages,
+)
+```
+
+Import `jax` when constructing the key. The result arrays retain public leading
+axes `(individual, replicate, ...)`; important fields include `jump_times`,
+`jump_durations`, `state_path`, `jump_count`, `overflow`, `final_state`, and
+`final_duration`. Use `paths.valid_mask()` for populated jump slots and
+`paths.path(individual, replicate)` for one compact host-side path.
+
+`initial` accepts the same shared, per-individual, and component-mixture forms
+as `solve`. Mixture masses are relative sampling weights and must total to a
+positive value per individual. `replicates` is a positive integer and
+`max_jumps` is a required non-negative fixed buffer size.
+
+Use `devices=None` for the default single-device JIT path, `devices=1` for the
+first local device, `devices=N` for the first `N` local devices, or an explicit
+sequence of distinct local JAX devices. Multi-device simulation shards
+individuals before replicate expansion, repetition-pads non-divisible batches,
+and trims padding from results and overflow counts. For the same backend,
+inputs, and key, paths are bitwise identical across device counts. Multi-host
+simulation is not supported.
+
+With `overflow="return"`, inspect the per-trajectory overflow flags. Use
+`overflow="raise"` when exceeding `max_jumps` should raise after simulation.
+Increase `max_jumps` when valid trajectories overflow.
 
 ## Initial Conditions
 
@@ -294,7 +335,7 @@ follows the transition-list order supplied for that grouped callable.
 Most modeling mistakes are shape mistakes. Check these before changing the
 state-space topology:
 
-- Single-transition intensity outputs must be broadcastable to `(batch, D)`.
+- Intensity and payment outputs only need to be broadcastable to `(batch, D)`.
   Scalars, `(D,)`, `(1, D)`, `(batch, 1)`, and `(batch, D)` are natural choices.
 - Do not return `(batch,)` for a grid intensity unless it is genuinely
   broadcastable to the current `(batch, D)` shape. Use `(batch, 1)` for one
@@ -338,11 +379,11 @@ import jact
 
 
 def annual_premium(t, d, *, age):
-    return jnp.full((age.shape[0], d.shape[-1]), -1_200.0)
+    return -1_200.0
 
 
 def death_benefit(t, d, *, age):
-    return jnp.full((age.shape[0], d.shape[-1]), 100_000.0)
+    return 100_000.0
 
 
 cashflows = state_space.cashflows(
@@ -386,10 +427,7 @@ duration density and manually summing it.
 
 ```python
 def disabled_after_one_year(t, d, *, age):
-    return jnp.broadcast_to(
-        jnp.where(d > 1.0, 1.0, 0.0),
-        (age.shape[0], d.shape[-1]),
-    )
+    return jnp.where(d > 1.0, 1.0, 0.0)
 
 
 cashflows = state_space.cashflows(
