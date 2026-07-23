@@ -28,6 +28,7 @@ from .probability import (
     StateProbability,
 )
 from .result import ModelResult
+from .simulation_result import SimulationResult
 from .state_space import StateSpace
 from .typing import ArrayLike, GroupedIntensity, Intensity
 
@@ -323,6 +324,18 @@ class Model:
             )
         return self._transition_info[key]
 
+    def _simulation_assignments(
+        self,
+        reachable_states: Sequence[str],
+    ) -> tuple[TransitionInfo, ...]:
+        """Return reachable transition assignments in deterministic edge order."""
+        return tuple(
+            self._transition_info[transition]
+            for transition in self._state_space.ordered_transitions(
+                reachable_states
+            )
+        )
+
     # ------------------------------------------------------------------ #
     # Solver entry point                                                  #
     # ------------------------------------------------------------------ #
@@ -557,6 +570,37 @@ class Model:
                 devices=devices,
                 **kwargs,
             ),
+        )
+
+    def simulate(
+        self,
+        initial: str | ArrayLike | InitialDistribution,
+        horizon: int,
+        steps_per_unit: int,
+        initial_duration: ArrayLike = 0.0,
+        *,
+        max_jumps: int,
+        replicates: int = 1,
+        key: jax.Array,
+        overflow: Literal["return", "raise"] = "return",
+        devices: int | Sequence[Any] | None = None,
+        **kwargs: Any,
+    ) -> SimulationResult:
+        """Sample continuous event histories from the discretized model."""
+        from .simulation import simulate
+
+        return simulate(
+            model=self,
+            initial=initial,
+            horizon=horizon,
+            steps_per_unit=steps_per_unit,
+            initial_duration=initial_duration,
+            max_jumps=max_jumps,
+            replicates=replicates,
+            key=key,
+            overflow=overflow,
+            devices=devices,
+            **kwargs,
         )
 
     # ------------------------------------------------------------------ #

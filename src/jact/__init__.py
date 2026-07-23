@@ -1,9 +1,9 @@
 # pyright: strict, reportMissingImports=false
 
-"""jact — JAX-based transition probability computation for multi-state models.
+"""jact — JAX-based analysis and simulation of multi-state models.
 
-A framework for computing transition probabilities in semi-Markov
-multi-state models with duration-dependent transition intensities.
+A framework for solving and simulating semi-Markov multi-state models with
+duration-dependent transition intensities.
 
 Example
 -------
@@ -42,6 +42,8 @@ from . import cashflows, probability, typing, wrappers
 from .initial_distribution import InitialDistribution
 from .model import Model
 from .result import ModelResult
+from .simulation import simulate
+from .simulation_result import SimulationResult
 from .solver import solve
 from .state_space import StateSpace
 
@@ -56,7 +58,9 @@ __all__ = [
     "Model",
     "InitialDistribution",
     "ModelResult",
+    "SimulationResult",
     "solve",
+    "simulate",
     "cashflows",
     "probability",
     "typing",

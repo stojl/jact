@@ -167,6 +167,36 @@ class StateSpace:
         result.sort(key=lambda pair: self._state_to_index[pair[1]])
         return tuple(result)
 
+    def ordered_transitions(
+        self,
+        states: Sequence[str] | None = None,
+    ) -> tuple[tuple[str, str], ...]:
+        """Return transitions in deterministic source/target state order.
+
+        If ``states`` is supplied, only transitions with both endpoints in
+        that state set are returned.
+        """
+        selected = self._states if states is None else tuple(states)
+        for state in selected:
+            self._check_state(state)
+        if len(selected) != len(set(selected)):
+            raise ValueError("states must not contain duplicates.")
+        selected_set = set(selected)
+        selected_index = {state: index for index, state in enumerate(selected)}
+        result = [
+            transition
+            for source in selected
+            for transition in self.exits(source)
+            if transition[1] in selected_set
+        ]
+        result.sort(
+            key=lambda pair: (
+                selected_index[pair[0]],
+                selected_index[pair[1]],
+            )
+        )
+        return tuple(result)
+
     def targets(self, state: str) -> tuple[str, ...]:
         """Target states reachable from a given state, ordered by index.
 

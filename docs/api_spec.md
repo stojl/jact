@@ -2,12 +2,12 @@
 
 ## Overview
 
-`jact` is a JAX framework for transition probabilities in multi-state models
-with duration-dependent intensities. It is designed for the pipeline from
-fitted hazard callables to probabilities and expected cashflow streams for
-large cohorts.
+`jact` is a JAX framework for transition probabilities and event simulation in
+multi-state models with duration-dependent intensities. It is designed for the
+pipeline from fitted hazard callables to probabilities, expected cashflow
+streams, and sampled event histories for large cohorts.
 
-The public API has four layers:
+The public API has five layers:
 
 - `StateSpace`: states and allowed transitions only.
 - `Model`: a `StateSpace` bound to intensity callables.
@@ -15,11 +15,14 @@ The public API has four layers:
   `StateSpace`.
 - `solve()`: a midpoint-quadrature solver over the reachable subgraph that can
   emit both probabilities and cashflows in one fused JAX program.
+- `simulate()`: an event-path simulator for the same midpoint-discretized
+  intensity model.
 
 Use `import jact` for the main surface. The top-level names are
 `jact.StateSpace`, `jact.Model`, `jact.InitialDistribution`,
-`jact.ModelResult`, and `jact.solve`. Domain-specific types and fitted-model
-helpers live under public submodules:
+`jact.ModelResult`, `jact.SimulationResult`, `jact.solve`, and
+`jact.simulate`. Domain-specific types and fitted-model helpers live under
+public submodules:
 
 - `jact.cashflows` — declarations (`StateRate`, `TransitionLump`,
   `ScheduledEvent`, `DurationEvent`, `CashflowDeclaration`) and views (`Raw`,
@@ -76,6 +79,7 @@ Surface:
 | `absorbing` | States with no outgoing transitions |
 | `transient` | States with outgoing transitions |
 | `exits(state)` | Outgoing transitions from `state`, ordered by target-state order |
+| `ordered_transitions(states=None)` | Transitions ordered by selected source and target state order |
 | `targets(state)` | Outgoing target states from `state`, ordered by state order |
 | `sources(state)` | Source states with a transition into `state`, ordered by state order |
 | `has_transition(src, tgt)` | Whether `(src, tgt)` is declared |
@@ -160,6 +164,9 @@ TransitionInfo(source, target, assignment, callable, index)
 
 `index` is `None` for `transitions` assignments and the output slot index for
 `exits` and `groups`.
+
+The same model can call either `model.solve(...)` for probabilities and
+expected values or `model.simulate(...)` for sampled event histories.
 
 ## InitialDistribution
 
@@ -910,6 +917,80 @@ stacked by `jax.lax.scan` along a new leading time axis. `StateCarry` and
 `_PointMass` are advanced/internal solver inspection symbols and live under
 `jact.probability`; they are not part of the main top-level `jact` surface but
 remain importable for advanced use.
+
+## Event simulation
+
+`Model.simulate()` samples continuous event times from the rectangular
+piecewise-constant intensity approximation used by the solver:
+
+```python
+result = model.simulate(
+    initial="healthy",
+    horizon=30,
+    steps_per_unit=12,
+    initial_duration=0.0,
+    max_jumps=64,
+    replicates=10,
+    key=jax.random.key(42),
+    overflow="return",
+    age=ages,
+)
+```
+
+The module-level `jact.simulate(model=..., ...)` function is equivalent.
+`horizon` and `steps_per_unit` have the same positive-integer requirements as
+`solve()`. Calendar-time and duration cells both have width
+`1 / steps_per_unit`; intensity callables are evaluated at rectangular-cell
+midpoints, while sampled event times remain continuous.
+
+`initial` accepts all solver forms:
+
+- one state name,
+- a `(batch,)` integer state-index array,
+- an `InitialDistribution` with per-individual states,
+- an `InitialDistribution` component mixture.
+
+For a component mixture, one component is sampled independently for every
+individual/replicate trajectory. Component masses are treated as relative
+sampling weights and must have a positive total for each individual. Structural
+initial states still control reachable-state reduction, including declared
+zero-mass states.
+
+`replicates` is a positive integer. The public result axes are always
+`(individual, replicate, ...)`; scalar initial data and scalar covariates imply
+one individual. Keys are derived from the global key, individual index, and
+replicate index. Both typed `jax.random.key(...)` keys and legacy
+`jax.random.PRNGKey(...)` keys are accepted.
+
+`max_jumps` is a required non-negative integer that fixes the compiled event
+buffer shape. `SimulationResult` contains:
+
+| Field | Shape | Meaning |
+|---|---|---|
+| `states` | static tuple | Reachable states in reduced order |
+| `jump_times` | `(B, R, J)` | Elapsed calendar time of each jump |
+| `jump_durations` | `(B, R, J)` | Source-state duration immediately before each jump |
+| `state_path` | `(B, R, J + 1)` | Initial state followed by jump destinations |
+| `jump_count` | `(B, R)` | Number of recorded jumps |
+| `overflow` | `(B, R)` | Whether another jump required an unavailable slot |
+| `truncated_at_time` | `(B, R)` | Truncation time, or `NaN` without overflow |
+| `final_state` | `(B, R)` | State at the horizon or truncation point |
+| `final_duration` | `(B, R)` | State duration at the horizon or truncation point |
+
+Unused jump slots are `NaN`; unused `state_path` slots are `-1`.
+`result.valid_mask()` derives the populated jump mask,
+`result.path(individual, replicate)` extracts one compact host-side path, and
+`result.to_pandas()` optionally creates a long-form data frame without making
+pandas a required dependency.
+
+With `overflow="return"` (the default), overflow is represented in the result.
+With `overflow="raise"`, the compiled simulation completes and then raises a
+host-side `RuntimeError` if any trajectory overflowed.
+
+The simulator rejects non-finite or materially negative intensities. Values in
+`[-1e-12, 0)` are clamped to zero. It currently executes on one device;
+`devices=None`, `devices=1`, or a one-device sequence is accepted.
+Multi-device simulation is reserved for a later implementation phase.
 
 ## Numerical and JIT contract
 

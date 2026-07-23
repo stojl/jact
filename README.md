@@ -1,14 +1,20 @@
 # jact
 
-JAX-based transition probability and expected cashflow computation for multi-state models with duration-dependent transition intensities.
+JAX-based transition probability, event simulation, and expected cashflow
+computation for multi-state models with duration-dependent transition
+intensities.
 
 ## What is jact?
 
-`jact` computes transition probabilities and expected cashflows in semi-Markov multi-state models. It takes fitted intensity models — parametric functions, GLMs, neural networks, or any JIT-compatible callable — and produces transition probabilities and cashflow streams for thousands of individuals in a single vectorized pass on GPU. Computations are optimized for JIT-compiled GPU execution.
+`jact` computes transition probabilities, sampled event histories, and expected
+cashflows in semi-Markov multi-state models. It takes fitted intensity models —
+parametric functions, GLMs, neural networks, or any JIT-compatible callable —
+and runs them in vectorized, JIT-compiled JAX programs.
 
 ## Quick example
 
 ```python
+import jax
 import jax.numpy as jnp
 import jact
 
@@ -34,6 +40,17 @@ model = state_space.build(
 # Compute transition probabilities for 1000 individuals
 ages = jnp.linspace(30, 80, 1_000)
 result = model.solve(initial="healthy", horizon=30, steps_per_unit=12, age=ages)
+
+# Or sample continuous event histories from the same discretized model
+paths = model.simulate(
+    initial="healthy",
+    horizon=30,
+    steps_per_unit=12,
+    max_jumps=64,
+    replicates=10,
+    key=jax.random.key(42),
+    age=ages,
+)
 ```
 
 ## Fitted-model intensity wrappers
@@ -121,6 +138,7 @@ present_value = result.cashflows["pv_total"]
 - **Plug in any model**: Gompertz, GLM, neural network — anything that's JIT-compatible.
 - **Swap and compare**: Same `StateSpace`, different intensity models. Experiment easily.
 - **Probabilities and cashflows together**: Emit both in one fused solve, with solve-time cashflow views for grouping and valuation.
+- **Continuous event histories**: Sample jump times, durations, and state paths from the same midpoint-discretized intensity model.
 - **Compute only what's needed**: The solver reduces to states reachable from the initial state.
 - **Exact seeded starts**: Initial point masses preserve per-individual starting duration `d_0` exactly.
 - **Batch-first**: Designed for 100K+ individuals in a single pass.
@@ -172,8 +190,9 @@ python -m jact.agents install --target ~/.config/my-agent/skills/jact
 ## Namespace
 
 The top-level `jact` namespace exposes the core types: `jact.StateSpace`,
-`jact.Model`, `jact.InitialDistribution`, `jact.ModelResult`, and
-`jact.solve`. Domain types and fitted-model helpers live under submodules:
+`jact.Model`, `jact.InitialDistribution`, `jact.ModelResult`,
+`jact.SimulationResult`, `jact.solve`, and `jact.simulate`. Domain types and
+fitted-model helpers live under submodules:
 
 - `jact.cashflows` for declarations and views (`StateRate`,
   `TransitionLump`, `ScheduledEvent`, `DurationEvent`, `Raw`, `Group`,
