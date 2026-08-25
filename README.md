@@ -155,6 +155,8 @@ present_value = result.cashflows["pv_total"]
 - **Swap and compare**: Same `StateSpace`, different intensity models. Experiment easily.
 - **Probabilities and cashflows together**: Emit both in one fused solve, with solve-time cashflow views for grouping and valuation.
 - **Continuous event histories**: Sample jump times, durations, and state paths from the same midpoint-discretized intensity model.
+- **Joint intensity fitting**: Fit all declared edges with a continuous-time
+  competing-risks likelihood and export a portable JACT-native model.
 - **Compute only what's needed**: The solver reduces to states reachable from the initial state.
 - **Exact seeded starts**: Initial point masses preserve per-individual starting duration `d_0` exactly.
 - **Batch-first**: Designed for 100K+ individuals in a single pass.

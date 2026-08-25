@@ -7,7 +7,7 @@ multi-state models with duration-dependent intensities. It is designed for the
 pipeline from fitted hazard callables to probabilities, expected cashflow
 streams, and sampled event histories for large cohorts.
 
-The public API has five layers:
+The public runtime API has five layers, plus an isolated fitting companion:
 
 - `StateSpace`: states and allowed transitions only.
 - `Model`: a `StateSpace` bound to intensity callables.
@@ -17,6 +17,8 @@ The public API has five layers:
   emit both probabilities and cashflows in one fused JAX program.
 - `simulate()`: an event-path simulator for the same midpoint-discretized
   intensity model.
+- `jact.fitting`: canonical event-history batches, joint-edge likelihoods,
+  structured pure-JAX models, training, and portable artifact reconstruction.
 
 Use `import jact` for the main surface. The top-level names are
 `jact.StateSpace`, `jact.Model`, `jact.InitialDistribution`,
@@ -35,6 +37,63 @@ public submodules:
   `Payment`, `When`, `DurationAt`, `Weight`) and JAX's `ArrayLike` type.
 - `jact.wrappers` — fitted-model intensity helpers (`bind_intensity`,
   `bind_grouped_intensity`, `bind_exit_intensity`).
+- `jact.fitting` — an isolated, pure-JAX fitting companion with canonical
+  interval batches, competing-risks likelihoods, a structured joint-edge
+  model, AdamW training, portable artifacts, and model reconstruction.
+
+## Fitting companion
+
+`jact.fitting` implements the fitting boundary described in
+`notes/design/modelling_framework.md`. Its stable data flow is:
+
+```python
+topology = jact.fitting.TopologySpec.from_state_space(state_space)
+batch = jact.fitting.CanonicalBatch.from_arrays(
+    source_state=source_id,
+    event_edge=edge_id,  # -1 means censored
+    t0=t0,
+    t1=t1,
+    d0=d0,
+    d1=d1,
+    covariates=x,
+).validate(topology)
+
+config = jact.fitting.StructuredModelConfig(n_features=x.shape[1])
+hazard_model = jact.fitting.StructuredLogHazardModel(topology, config)
+params = hazard_model.init(
+    key,
+    intercept=jact.fitting.empirical_intercepts(batch, topology),
+)
+loss = jact.fitting.piecewise_exponential_nll(
+    hazard_model, params, batch, topology
+).loss
+```
+
+`fixed_quadrature_nll(..., order=4)` is available when within-row variation
+matters. Both likelihoods predict every declared edge jointly, sum only exits
+from the row's source state, keep event terms in log-hazard space, and honor
+row weights and padding masks.
+
+`FeatureEncoder` owns numeric scaling, categorical vocabularies, and the
+unknown-category column. String categories can be encoded during data
+preparation; solve-time categorical kwargs are integer codes because exported
+feature construction is pure JAX.
+
+`FittedArtifact` stores topology and preprocessing metadata, architecture,
+parameters, units, supported ranges, and fitting metadata in a versioned NPZ
+file without pickle. It reconstructs a complete JACT model with either
+per-source or global-group assignments:
+
+```python
+artifact.save("fitted.jact.npz")
+loaded = jact.fitting.FittedArtifact.load("fitted.jact.npz")
+model = loaded.build_model(state_space, assignment="exits")
+```
+
+The default exponential link explicitly bounds fitted scores to `[-30, 30]`.
+Applications should replace those bounds with justified deployment limits (or
+set them to `None`) and call `artifact.adapter().validate_hazards(...)` on
+in-domain and stress grids before valuation.
 
 Advanced/internal inspection symbols are importable for users who need deeper
 debugging hooks, but they are not part of the main top-level `jact` surface:
