@@ -1,460 +1,518 @@
-# Design note: model-object wrappers for fitted intensities
+# Design note: exporting fitted intensities into Jact
 
 ## Status
 
-Proposed.
+The generic wrapper layer described in the first version of this note is
+implemented in `jact.wrappers`. This revision records the actual public API and,
+more importantly, defines the export boundary that a fitted intensity model
+must satisfy to work correctly in Jact.
+
+The normative API remains `docs/api_spec.md`. This note is design guidance for
+the fitting-to-Jact handoff and identifies follow-up work; it is not a second API
+specification.
+
+---
 
 ## Context
 
-`jact` currently expects transition intensities as solver-shaped callables:
+Jact consumes transition intensities through pure solver callables:
 
 ```python
-fn(t, d, **kwargs) -> array
+fn(t, d, **kwargs) -> array_like
 ```
 
-That interface is small and composable, but it is lower-level than many
-users will expect when coming from `flax`, `optax`, `equinox`, or similar
-JAX-native modelling stacks.
+The fitting design in `notes/design/modelling_framework.md` uses a different,
+training-oriented abstraction:
 
-A typical ML workflow looks like this:
+```python
+log_intensities(params, batch) -> [batch_size, max_outgoing]
+```
 
-1. define a module object,
-2. train it with some external training loop,
-3. keep the trained parameters and any model state,
-4. expect to hand the trained object to downstream code directly.
+That distinction is useful. Training should be free to use interval rows,
+padded risk sets, integer state identifiers, and log-intensities. Jact, however,
+evaluates a model repeatedly on a clock-time-by-state-duration grid and binds
+each returned intensity to a declared transition. A fitted artifact therefore
+needs a small export adapter; the training predictor should not be handed to
+`StateSpace.build(...)` unchanged.
 
-Today, a `jact` user must write an adapter manually:
+The export adapter has four responsibilities:
 
-- convert solver inputs `(t, d, **kwargs)` into feature tensors,
-- call `module.apply(...)` or equivalent,
-- reshape outputs into `(batch, D)` or `(n_transitions, batch, D)`,
-- then pass the adapter into `state_space.build(...)`.
+1. convert Jact coordinates and solve-time covariates into fitted-model
+   features;
+2. convert log-intensities or unconstrained scores to actual intensities;
+3. remove padding and put outputs in Jact's transition order; and
+4. expose a pure, deterministic, JIT-compatible callable with Jact's shape
+   semantics.
 
-This is workable, but verbose enough that it weakens the "fit a flexible
-model, then solve" story in the README. A wrapper layer would improve
-adoptability by making the handoff from training code to `jact` feel
-native rather than improvised.
+`jact.wrappers` handles the framework call and output-axis normalization. The
+fitted artifact remains responsible for feature semantics, the link from model
+score to intensity, and transition identity.
 
 ---
 
-## Goal
+## Decision: the final exported quantity is a Jact intensity
 
-Add a convenient, explicit wrapper API so users can pass fitted model
-objects into `jact` without writing a custom solver adapter each time.
+The fitting layer may model
 
-The wrapper layer should:
+\[
+f_{rs}(x) = \log \lambda_{rs}(x),
+\]
 
-- preserve the current callable-based core,
-- stay fully JAX-native and JIT-compatible,
-- work with separate-per-transition models and joint multi-output models,
-- support common module styles such as `flax.linen.Module.apply(...)`,
-- make the feature construction step explicit, since `jact` cannot infer
-  model features from `(t, d, **kwargs)` on its own.
+but its Jact-facing `apply_fn` must return \(\lambda_{rs}(x)\), not
+\(f_{rs}(x)\). Jact interprets every returned value as an instantaneous rate in
+the time unit used by `horizon`, `steps_per_unit`, clock time, and duration.
 
-## Non-goals
+A suitable exported apply function is conceptually:
 
-- `jact` will not take over training, optimisation, batching, or dataset
-  management.
-- `jact` will not become framework-agnostic across non-JAX ecosystems.
-  The target is JAX-native model objects.
-- The wrapper layer will not replace the existing callable protocol.
-  Direct callables remain the lowest-level contract and the internal
-  solver interface.
+```python
+def apply_rates(params, features):
+    log_rates = predict_log_intensities(params, features)
+    return jnp.exp(log_rates)
+```
+
+An intrinsically positive parameterization such as `softplus` is also valid.
+The choice of link belongs to the fitted model specification and must be the
+same at training and inference time.
+
+The wrappers currently return `jnp.maximum(output, 0.0)`. This is a final
+safety clamp, not a substitute for a positive output link:
+
+- it changes the meaning of a log-intensity if one is passed accidentally;
+- it gives zero gradient for negative raw outputs;
+- it can hide a poorly calibrated or broken model from the simulator's
+  negative-intensity validation; and
+- it does not repair `NaN` or infinite outputs.
+
+The exported intensity should therefore already be non-negative and finite on
+the complete domain Jact will evaluate. Any stabilization of `exp`, bounds on
+extrapolation, or maximum-rate policy must be chosen and tested by the fitting
+artifact rather than silently invented by Jact.
 
 ---
 
-## Proposed public shape
+## Actual public wrapper API
 
-### 1. Add wrapper constructors in the top-level namespace
-
-Recommended API:
-
-```python
-jact.bind_intensity(...)
-jact.bind_grouped_intensity(...)
-jact.bind_exit_intensity(...)
-```
-
-These constructors return ordinary callables with the existing solver
-signature, so they fit naturally into:
+The wrappers live in the public `jact.wrappers` submodule. They are deliberately
+not top-level aliases.
 
 ```python
-state_space.build(
-    transitions=...,
-    groups=...,
-    exits=...,
+jact.wrappers.bind_intensity(
+    apply_fn,
+    params,
+    feature_fn,
+    *,
+    model_state=None,
+    apply_kwargs=None,
+)
+
+jact.wrappers.bind_grouped_intensity(
+    apply_fn,
+    params,
+    feature_fn,
+    *,
+    output_count,
+    output_axis=-1,
+    model_state=None,
+    apply_kwargs=None,
+)
+
+jact.wrappers.bind_exit_intensity(
+    apply_fn,
+    params,
+    feature_fn,
+    *,
+    output_count,
+    output_axis=-1,
+    model_state=None,
+    apply_kwargs=None,
 )
 ```
 
-This keeps `StateSpace.build(...)` unchanged and avoids introducing a
-second, parallel model-building API prematurely.
+All three return ordinary callables accepted by `StateSpace.build(...)`.
+`bind_exit_intensity()` is an intent-revealing alias over the grouped wrapper;
+it does not receive a `StateSpace` or a source state and cannot validate the
+topology itself.
 
-### 2. Transition-level wrapper
-
-For a model object that emits one hazard surface:
+The call made by a single wrapper is:
 
 ```python
-healthy_dead = jact.bind_intensity(
-    apply_fn=hazard_net.apply,
-    params=params,
-    feature_fn=feature_fn,
-    model_state=batch_stats,   # optional
-    apply_kwargs={"train": False},  # optional
+features = feature_fn(t, d, **kwargs)
+raw = apply_fn(params, features, **apply_kwargs)
+```
+
+When `model_state` is not `None`, it is instead:
+
+```python
+raw = apply_fn(
+    {"params": params, **model_state},
+    features,
+    **apply_kwargs,
+)
+```
+
+This supports frozen inference collections such as Flax batch statistics. In
+the current implementation:
+
+- `model_state` must not contain its own `"params"` entry because it would
+  replace the explicit `params` value;
+- a Flax apply function that expects `{"params": params}` even without other
+  collections needs either `model_state={}` or a small explicit adapter;
+- mutable inference that returns `(output, updated_state)` is not supported;
+  the wrapper output must be one array-like intensity value; and
+- `feature_fn` may return a PyTree if `apply_fn` accepts it, but the model output
+  itself may not be a PyTree.
+
+`apply_kwargs` is copied into the closure and is intended for static inference
+configuration such as `train=False`, not per-solve data. Per-solve values belong
+in `**kwargs` and are processed by `feature_fn`.
+
+---
+
+## Jact coordinate and shape contract
+
+### Inputs seen by `feature_fn`
+
+Jact supplies:
+
+- `t`: scalar clock time;
+- `d`: current-state duration values; and
+- `**kwargs`: scalar or batch-major solve-time covariates.
+
+For the continuous density calculation, `d` normally has shape `(1, D)`. For
+point-mass calculations, including non-zero initial duration, Jact may evaluate
+the same callable with per-individual durations shaped `(batch, 1)`. A feature
+builder must support both and should use broadcasting rather than assume that
+the first axis of `d` is always one.
+
+For example:
+
+```python
+def feature_fn(t, d, *, baseline_age, sex_code):
+    age = jnp.asarray(baseline_age)
+    sex = jnp.asarray(sex_code)
+    if age.ndim == 0:
+        age = age[None]
+    if sex.ndim == 0:
+        sex = sex[None]
+
+    attained_age, duration, sex = jnp.broadcast_arrays(
+        age[:, None] + t,
+        d,
+        sex[:, None],
+    )
+    return {
+        "numeric": jnp.stack([attained_age, duration], axis=-1),
+        "sex": sex,
+    }
+```
+
+Only axis 0 of a non-scalar solve kwarg is a batch axis. Callable outputs never
+define Jact's batch size, and all non-scalar kwargs must agree on the size of
+axis 0. Solve-time covariates must be numeric and convertible with
+`jnp.asarray`; encode strings and categories before calling Jact. The names
+`initial` and `initial_duration` are reserved and cannot also be feature
+covariates. If a model needs static preprocessing constants, spline knots,
+vocabularies, state identifiers, or feature scaling, those should be stored in
+the fitted artifact or closure rather than repeated as batch covariates.
+
+Clock time and duration have distinct meanings:
+
+- `t` is elapsed time since the start of the solve;
+- `d` is time since entry into the current state and resets after a transition;
+- attained age is normally `baseline_age + t`, not `baseline_age + d`; and
+- calendar time is normally `baseline_calendar_time + t`.
+
+Training and export must use the same time unit. A model trained with days of
+exposure cannot be used with a Jact horizon measured in years without an
+explicit conversion of both coordinates and rates.
+
+### Single-transition output
+
+`bind_intensity()` accepts any model output broadcastable with Jact's eventual
+`(batch, D)` solver grid. Useful shapes include:
+
+- scalar `()`;
+- duration-only `(D,)` or `(1, D)`;
+- individual-only `(batch, 1)`; and
+- full `(batch, D)`.
+
+The wrapper does not force the result to `(batch, D)`; the solver performs the
+authoritative broadcast once its batch size is known.
+
+### Grouped and exit output
+
+A grouped model must include an output axis. The wrapper moves `output_axis` to
+the front, checks that its size equals `output_count`, and leaves every selected
+output broadcastable to `(batch, D)`.
+
+Consequently, all of these can be useful layouts:
+
+- `(batch, D, K)` with `output_axis=-1`;
+- `(K, batch, D)` with `output_axis=0`; and
+- `(K,)` with `output_axis=0` for constant transition-specific rates.
+
+The contract is not limited to rank-three arrays. Shape checks that depend on
+the actual feature output run when the wrapper is called or traced, not through
+an eager dummy call at wrapper construction. A dummy call would be unreliable
+because Jact does not know the required covariates, batch shape, dtype, or model
+input PyTree at construction time.
+
+---
+
+## Mapping a fitted transition graph to Jact
+
+The fitting artifact must persist a stable mapping between its integer state or
+edge identifiers and the state names used to construct `StateSpace`. Matching
+only on array position is too fragile for a serialized model.
+
+Every Jact transition must be covered exactly once across `transitions`,
+`exits`, and `groups`. The three assignment modes have different ordering
+rules.
+
+### Separate transition models
+
+Use `transitions` when the exported apply function returns one rate surface:
+
+```python
+onset = jact.wrappers.bind_intensity(
+    onset_apply_rates,
+    onset_params,
+    feature_fn,
 )
 
 model = state_space.build(
     transitions={
-        ("healthy", "dead"): healthy_dead,
+        ("healthy", "disabled"): onset,
+        # Every other declared transition must also be assigned exactly once.
     }
 )
 ```
 
-### 3. Group wrapper
+### One packed model per source state
 
-For a model object that jointly emits several hazards:
+This is the closest match to the fitting framework's
+`[batch, max_outgoing]` predictor. Build one fixed-source adapter for each
+transient state and return only its valid, unpadded outputs in this exact order:
 
 ```python
-joint_hazards = jact.bind_grouped_intensity(
-    apply_fn=hazard_net.apply,
-    params=params,
-    feature_fn=feature_fn,
-    outputs=[
-        ("healthy", "disabled"),
-        ("healthy", "dead"),
-        ("disabled", "dead"),
-    ],
+targets = state_space.targets("healthy")
+# Equivalent transition order:
+# state_space.exits("healthy") == tuple(("healthy", x) for x in targets)
+
+healthy_exits = jact.wrappers.bind_exit_intensity(
+    healthy_apply_rates,
+    fitted_params,
+    feature_fn,
+    output_count=len(targets),
+    output_axis=-1,
 )
 
-model = state_space.build(
-    groups={
-        joint_hazards: [
-            ("healthy", "disabled"),
-            ("healthy", "dead"),
-            ("disabled", "dead"),
-        ]
-    }
-)
+model = state_space.build(exits={"healthy": healthy_exits, ...})
 ```
 
-### 4. Exit wrapper
+`StateSpace.targets(source)` orders targets by their order in
+`StateSpace.states`, which may differ from the packed training graph. The
+source-specific adapter must gather/reorder outputs and discard padded slots
+before returning them. `bind_exit_intensity()` cannot do this automatically.
 
-For one model object that emits all exits from a source state:
+### One model for an arbitrary transition group
 
-```python
-healthy_exits = jact.bind_exit_intensity(
-    apply_fn=hazard_net.apply,
-    params=params,
-    source="healthy",
-    feature_fn=feature_fn,
-)
-
-model = state_space.build(
-    exits={
-        "healthy": healthy_exits,
-    }
-)
-```
-
----
-
-## Required wrapper inputs
-
-Each wrapper should accept the following data explicitly.
-
-### `apply_fn`
-
-The function used for inference, typically:
-
-- `module.apply` for Flax,
-- a bound callable for Equinox or custom JAX models,
-- any other JAX-native forward function.
-
-`jact` should not depend on a specific framework type. The contract is
-"callable inference function", not "Flax module instance".
-
-### `params`
-
-Framework-specific trained parameters, passed through untouched to
-`apply_fn`.
-
-### `feature_fn`
-
-A required user-supplied function:
+For `groups`, output position `i` corresponds exactly to transition `i` in the
+supplied list:
 
 ```python
-feature_fn(t, d, **kwargs) -> features
-```
+ordered_edges = [
+    ("healthy", "disabled"),
+    ("healthy", "dead"),
+    ("disabled", "dead"),
+]
 
-This is the central abstraction. It converts solver coordinates into
-model inputs. `jact` should not try to guess whether a model wants:
-
-- attained age,
-- current-state duration,
-- calendar time,
-- static covariates,
-- interaction terms,
-- embeddings,
-- or some nested pytree input.
-
-The feature function should be allowed to return any pytree accepted by
-`apply_fn`, not just a single dense array.
-
-### Optional `model_state`
-
-Needed for frameworks such as Flax when inference depends on mutable
-collections such as batch statistics.
-
-The wrapper should support:
-
-- no model state,
-- immutable state passed into inference,
-- optional extraction of the `"params"` collection when the user passes a
-  full variables dict directly.
-
-### Optional `apply_kwargs`
-
-Extra static kwargs forwarded to `apply_fn`, for example `train=False`.
-
-These should be treated as static wrapper configuration, not dynamic
-solve-time inputs.
-
----
-
-## Output-shape contract
-
-The wrappers should normalise framework outputs into the shapes already
-expected by `StateSpace.build(...)`.
-
-### `bind_intensity`
-
-- expected model output: `(batch, D)` or broadcast-compatible equivalent,
-- wrapper output: `(batch, D)`.
-
-### `bind_grouped_intensity`
-
-- expected model output: `(batch, D, K)` or `(K, batch, D)`,
-- wrapper normalises to: `(K, batch, D)`,
-- `K` must equal `len(outputs)`.
-
-### `bind_exit_intensity`
-
-- expected model output: `(batch, D, K)` or `(K, batch, D)`,
-- wrapper normalises to: `(K, batch, D)`,
-- `K` must equal the number of exits from the given source state.
-
-The wrappers should accept one explicit `output_axis` option for grouped
-and exit models instead of trying to infer arbitrary layouts.
-
-Recommended default:
-
-```python
-output_axis=-1
-```
-
-so `(batch, D, K)` is the default expectation for modern NN code.
-
----
-
-## Validation rules
-
-Validation should happen at wrapper-construction time where possible.
-
-### Structural checks
-
-- `apply_fn` must be callable.
-- `feature_fn` must be callable.
-- grouped `outputs` must be non-empty.
-- `apply_kwargs` must be a mapping if provided.
-
-### Shape checks
-
-The wrapper should run one eager reference call during construction
-using small dummy arrays, analogous to other `jact` validation paths.
-
-It should validate:
-
-- transition wrappers produce rank-2 `(batch, D)` output or a supported
-  broadcastable equivalent,
-- grouped/exit wrappers produce one supported rank-3 layout,
-- output count matches declared transitions or exits.
-
-Error messages should mention:
-
-- expected shape family,
-- actual shape received,
-- which wrapper constructor failed.
-
-### No hidden transition mapping
-
-Grouped wrappers should require the user to declare output transition
-order explicitly. `jact` should not guess transition identity from model
-output names or dataclass fields.
-
----
-
-## Recommended implementation strategy
-
-### Phase 1: generic wrappers only
-
-Implement framework-agnostic wrappers that operate on plain callables:
-
-- `bind_intensity`
-- `bind_grouped_intensity`
-- `bind_exit_intensity`
-
-Internally these produce ordinary solver callables and do not modify the
-solver.
-
-This phase delivers nearly all usability value while keeping risk low.
-
-### Phase 2: optional convenience aliases
-
-If Phase 1 lands well, consider adding thin aliases specialised for
-common patterns, for example:
-
-```python
-jact.bind_flax_intensity(...)
-```
-
-These should remain optional sugar over the generic wrappers, not a
-separate capability layer.
-
-### Phase 3: higher-level build helpers only if needed
-
-Only after wrapper constructors exist should we consider a higher-level
-API such as:
-
-```python
-state_space.build_from_model(...)
-```
-
-This should be deferred. It adds another entry point and risks API
-duplication before we know whether the wrappers alone are sufficient.
-
----
-
-## Example target usage
-
-### Separate per-transition models
-
-```python
-def feature_fn(t, d, *, age):
-    attained_age = age[:, None] + t
-    return jnp.stack([attained_age, d], axis=-1)
-
-model = state_space.build(
-    transitions={
-        ("healthy", "disabled"): jact.bind_intensity(
-            apply_fn=onset_net.apply,
-            params=onset_params,
-            feature_fn=feature_fn,
-        ),
-        ("healthy", "dead"): jact.bind_intensity(
-            apply_fn=healthy_dead_net.apply,
-            params=healthy_dead_params,
-            feature_fn=feature_fn,
-        ),
-        ("disabled", "dead"): jact.bind_intensity(
-            apply_fn=disabled_dead_net.apply,
-            params=disabled_dead_params,
-            feature_fn=feature_fn,
-        ),
-    }
-)
-```
-
-### One joint multi-output model
-
-```python
-joint_intensity = jact.bind_grouped_intensity(
-    apply_fn=joint_net.apply,
-    params=joint_params,
-    feature_fn=feature_fn,
-    outputs=[
-        ("healthy", "disabled"),
-        ("healthy", "dead"),
-        ("disabled", "dead"),
-    ],
+all_rates = jact.wrappers.bind_grouped_intensity(
+    all_edges_apply_rates,
+    fitted_params,
+    feature_fn,
+    output_count=len(ordered_edges),
 )
 
-model = state_space.build(
-    groups={
-        joint_intensity: [
-            ("healthy", "disabled"),
-            ("healthy", "dead"),
-            ("disabled", "dead"),
-        ]
-    }
-)
+model = state_space.build(groups={all_rates: ordered_edges})
 ```
 
-These examples are intentionally thin. The user hands over model-object
-inference plus a feature function and stays inside the existing
-`build(...)` grammar.
+An origin-conditioned predictor cannot directly serve a cross-origin group
+unless its export adapter evaluates all listed origins and assembles one global
+edge vector. A source-specific `exits` adapter is usually simpler.
 
 ---
 
-## Documentation plan
+## Other Jact-specific considerations
 
-When the wrapper API is implemented, documentation should change in four
-places:
+### Purity and inference state
 
-1. `README.md`
-   Add a short example showing a wrapped fitted model object rather than
-   only hand-written callables.
-2. `docs/example_notebook.ipynb`
-   Keep the current manual callable example as the minimal baseline.
-3. Add a dedicated notebook for fitted model objects
-   Prefer a short Flax/Optax-style example that uses
-   `bind_grouped_intensity(...)`.
-4. `docs/api_spec.md`
-   Document wrapper constructors as convenience layers over the core
-   callable protocol.
+Intensity and feature functions must be deterministic, side-effect-free, and
+JIT-compatible. Disable dropout and use frozen normalization statistics.
+Python data-dependent branching, host NumPy conversion, pandas/sklearn
+preprocessors, callbacks, and mutation do not belong inside the exported
+function. Preprocessing needed for inference should be re-expressed in JAX and
+stored with the fitted artifact.
 
-The docs should make the layering explicit:
+### Repeated evaluation and smoothness
 
-- solver contract: still `fn(t, d, **kwargs)`,
-- wrapper layer: helper for turning trained model objects into that
-  contract.
+`solve()` evaluates intensities repeatedly at midpoint clock times and over a
+duration grid. `simulate()` uses the same model on midpoint cells and samples
+continuous event times under the resulting rectangular piecewise-constant
+approximation. The fit should therefore be stable and reasonably smooth over
+the full reachable time-duration domain, including extrapolation beyond the
+training support.
+
+Very large rates may remain mathematically valid but make results highly
+sensitive to `steps_per_unit`. Export tests should include a refinement check,
+not only pointwise prediction accuracy.
+
+### Grouped-model performance
+
+Grouped assignment currently has different evaluation behavior in Jact's two
+engines:
+
+- `simulate()` evaluates a grouped callable once and slices all requested
+  outputs;
+- `solve()` builds a single-transition closure for each edge, so the traced
+  JAXPR contains one grouped-call expansion per selected transition.
+
+In a representative grouped MLP test, the current XLA optimizer eliminated
+those identical expansions: optimized HLO contained the same number of shared
+matrix multiplications and activations for one, two, and three exits. Thus this
+is not a demonstrated runtime duplication problem for ordinary pure models.
+
+It is still a compiler optimization rather than a structural guarantee made by
+Jact. Effectful custom calls, non-identical adapters, or future compiler changes
+could prevent common-subexpression elimination. Benchmark an expensive or
+unusual shared model end to end. A future solver change could represent grouped
+evaluation as one explicit block, matching the simulator and making sharing
+independent of compiler optimization.
+
+### Differentiation and parameter lifetime
+
+The wrappers capture `params` and `model_state` in a Python closure. That is a
+good inference boundary for a finished fit. Replacing captured parameters means
+constructing a new wrapper/model and may lead to another compilation.
+
+For repeated sensitivities with respect to model parameters, parameters are
+better supplied as dynamic JAX inputs through a deliberately designed callable
+or the model/wrapper must be constructed inside the transformed function. The
+fitting loop should not use `Model.solve()` as its ordinary minibatch training
+loop.
+
+### Multi-device execution
+
+With `devices >= 2`, Jact shards the individual batch. `feature_fn` and
+`apply_fn` see only a local `(local_batch, ...)` shard of each non-scalar
+covariate; scalar covariates remain scalar. Jact may pad by repeating the last
+real individual, and removes padding from public results. Exported inference
+must be row-local and must not depend on global batch statistics, global batch
+indices, or a particular batch size.
+
+### Numerical validation differs by engine
+
+The exported model must return finite non-negative rates for both engines.
+`simulate()` explicitly rejects non-finite and materially negative intensities,
+whereas solver arithmetic may propagate non-finite values into its result. The
+current wrappers clamp all negative raw values before either engine sees them,
+so tests must inspect the exported rates directly rather than rely only on an
+end-to-end simulation error.
+
+Use at least float32 for the final link and intensity arithmetic. If a neural
+trunk uses lower precision, convert before `exp`/`softplus` and before returning
+rates when needed for numerical stability.
+
+### Serialization
+
+Jact serializes `StateSpace`, but not `Model`, wrapper closures, fitted
+parameters, preprocessing, or framework state. A deployable fitted artifact
+must serialize those pieces separately and reconstruct:
+
+1. the exact state and transition mapping;
+2. static preprocessing and architecture information;
+3. parameters and immutable inference state;
+4. fixed-source or global-edge apply adapters; and
+5. the Jact wrappers and `Model`.
+
+Loading should reject an artifact whose saved topology or time-unit metadata
+does not match the target `StateSpace`.
 
 ---
 
-## Testing plan
+## Validation and testing plan
 
-Add tests at three levels.
+The export boundary should be tested independently of training.
 
-### Unit tests
+### Artifact-level tests
 
-- transition wrapper returns `(batch, D)` with a simple fake `apply_fn`,
-- grouped wrapper returns `(K, batch, D)` with both supported output
-  axis conventions,
-- exit wrapper validates output count against source exits,
-- wrapper rejects incompatible output rank or mismatched output count.
+- log-score conversion produces finite non-negative intensities;
+- preprocessing at export matches preprocessing used during fitting;
+- state and edge identifiers map to the intended Jact names;
+- each fixed-source output is reordered to `state_space.targets(source)`;
+- padded outputs are removed;
+- both `(1, D)` and `(batch, 1)` duration inputs work;
+- scalar and batch-major covariates produce the intended shapes;
+- predictions remain stable over the full deployment time-duration domain; and
+- saving and loading preserves predictions and topology metadata.
 
-### Integration tests
+### Jact integration tests
 
-- wrapped transition model solves through `model.solve(...)`,
-- wrapped grouped model solves through `model.solve(...)`,
-- wrapped model supports `jax.jit` around solve,
-- wrapped model supports autodiff through solve where the wrapped model
-  itself is differentiable.
+- separate, exit, and grouped assignments cover every transition exactly once;
+- wrapper outputs broadcast through `model.solve(...)`;
+- the same fitted model works through `model.simulate(...)`;
+- `jax.jit` and the required autodiff mode work;
+- single- and multi-device results agree within tolerance;
+- probability is conserved and remains finite;
+- increasing `steps_per_unit` gives acceptable convergence for the largest
+  fitted hazards; and
+- grouped-model performance is benchmarked against separate exported heads.
 
-### Documentation tests
+### Wrapper tests
 
-- notebook example executes end to end,
-- README example remains synchronized with the implemented constructor
-  names and argument order.
+The wrapper suite should cover:
+
+- supported broadcast shapes;
+- grouped `output_axis` normalization;
+- `output_count` mismatch;
+- invalid callable, mapping, and axis configuration;
+- immutable model state and static apply kwargs; and
+- explicit behavior for non-finite raw outputs.
 
 ---
 
-## Recommendation
+## Recommended export boundary
 
-Implement `bind_intensity`, `bind_grouped_intensity`, and
-`bind_exit_intensity` as framework-agnostic wrapper constructors that
-return ordinary solver callables.
+Keep training and Jact integration separate. The fitting package should export
+a compact pure-JAX artifact whose public inference function returns
+intensity-scale values for either one transition or one source state's valid
+outgoing transitions. Then construct thin source/transition adapters with
+`feature_fn` and bind them through `jact.wrappers`.
 
-This improves the fitted-model user experience substantially without
-changing the solver core or replacing the existing `StateSpace.build(...)`
-grammar. It also keeps the design honest: users still define the crucial
-`feature_fn`, but they no longer have to hand-roll output reshaping and
-`apply(...)` plumbing every time.
+For the proposed joint competing-risks model, the default should be one
+fixed-source export per transient state:
+
+```python
+predict_exit_rates(
+    params,
+    static_spec,
+    source_id,
+    features,
+) -> (..., n_valid_exits_for_source)
+```
+
+Each adapter must return valid exits in `StateSpace.targets(source)` order and
+on the intensity scale. This retains the statistically useful joint outgoing
+hazard model while making transition identity, padding removal, feature
+semantics, and Jact's solver contract explicit.
+
+Two follow-ups are worth considering in Jact itself:
+
+1. make grouped evaluation a first-class solver block so shared evaluation is
+   structurally guaranteed rather than left to compiler optimization; and
+2. consider a topology-aware binding helper that accepts a `StateSpace` and
+   source, derives `output_count`, and validates/reorders declared targets.
+
+Neither follow-up is required for correctness. The existing wrapper API is
+sufficient once the fitted artifact exports finite, non-negative,
+correctly-ordered intensity values with Jact-compatible broadcasting.
