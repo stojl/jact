@@ -9,6 +9,10 @@ This directory contains the public documentation for `jact`.
 - [Simulation notebook](simulation_notebook.ipynb): sample, inspect, plot, and validate continuous event histories.
 - [Autodiff notebook](autodiff_notebook.ipynb): differentiate a terminal present value with respect to an intensity parameter.
 - [Fitted neural-network notebook](fitted_nn_notebook.ipynb): fit synthetic hazard targets with pure `jax`, then pass the learned intensities directly into `jact.solve(...)`.
+- [Modelling framework notebook](modelling_framework_notebook.ipynb): fit a
+  rich five-state income-protection event-history dataset with nonlinear and
+  interacting risks using `jact.fitting`, export the artifact, and validate it
+  through `solve()` and `simulate()`.
 
 ## Maintainer-only material
 

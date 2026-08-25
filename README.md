@@ -175,6 +175,8 @@ For sampled event histories and simulation diagnostics, see the
 [simulation notebook](https://github.com/stojl/jact/blob/main/docs/simulation_notebook.ipynb).
 For a fitting-to-solver workflow with neural-network intensities, see the
 [fitted neural-network notebook](https://github.com/stojl/jact/blob/main/docs/fitted_nn_notebook.ipynb).
+For an end-to-end competing-risks fitting example using `jact.fitting`, see the
+[modelling framework notebook](https://github.com/stojl/jact/blob/main/docs/modelling_framework_notebook.ipynb).
 
 ## AI agent skill
 
