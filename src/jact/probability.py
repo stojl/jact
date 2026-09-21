@@ -1,9 +1,9 @@
 # pyright: strict, reportMissingImports=false, reportUnknownMemberType=false, reportUntypedClassDecorator=false, reportUntypedFunctionDecorator=false
 """Probability output types and dispatch.
 
-The public surface is six frozen-dataclass output types
+The public surface is seven frozen-dataclass output types
 (``StateProbability``, ``DensityProbability``, ``Density``, ``PointMass``,
-``MarginalComponents``, ``Full``) plus the ``ProbabilityOutput`` union and
+``MarginalComponents``, ``Tail``, ``Full``) plus the ``ProbabilityOutput`` union and
 support for arbitrary user-supplied callables.
 """
 
@@ -23,6 +23,7 @@ __all__ = [
     "PointMass",
     "MarginalComponents",
     "Full",
+    "Tail",
     "ProbabilityOutput",
     "CallbackFn",
     "resolve_callback",
@@ -113,6 +114,13 @@ class _PointMass:
         return self
 
 
+class _TailProbability(NamedTuple):
+    """Continuous mass at a fixed representative duration."""
+
+    mass: jnp.ndarray
+    duration: jnp.ndarray
+
+
 class StateCarry(NamedTuple):
     """Per-state solver carry.
 
@@ -121,13 +129,23 @@ class StateCarry(NamedTuple):
 
     density: jnp.ndarray
     point_mass: _PointMass | None
+    tail: _TailProbability | None = None
 
 
 CallbackFn = Callable[[tuple[StateCarry, ...]], Any]
 PointMassResult = dict[str, jax.Array]
 
 
-class ComponentsResult(TypedDict):
+class TailResult(TypedDict):
+    mass: jax.Array
+    duration: jax.Array
+
+
+class _OptionalTailResult(TypedDict, total=False):
+    tail: TailResult
+
+
+class ComponentsResult(_OptionalTailResult):
     density: jax.Array
     point_mass: PointMassResult
 
@@ -147,7 +165,7 @@ class StateProbability:
     """Total state occupancy after marginalizing over duration.
 
     Returns a ``(T, B, S)`` tensor of duration-marginal density plus
-    point-mass value per state.
+    tail mass and point-mass value per state.
     """
 
 
@@ -155,7 +173,7 @@ class StateProbability:
 class DensityProbability:
     """Duration-marginal density per state, stacked into a tensor.
 
-    Returns a ``(T, B, S)`` tensor; excludes point masses.
+    Returns a ``(T, B, S)`` tensor including tail mass; excludes point masses.
     """
 
 
@@ -163,7 +181,8 @@ class DensityProbability:
 class Density:
     """Absolutely continuous duration density per state, stacked.
 
-    Returns a ``(T, B, S, D)`` tensor of raw duration density per state.
+    Returns a ``(T, B, S, D)`` tensor of retained regular cells per state.
+    Compressed tail mass is available separately through ``Tail()``.
     """
 
 
@@ -185,10 +204,20 @@ class MarginalComponents:
 
 
 @dataclass(frozen=True)
+class Tail:
+    """Continuous tail diagnostics with ``mass`` and ``duration`` (T, B, S).
+
+    Both leaves are zero without compression. Under compression the duration
+    is fixed at the cutoff, even when the tail mass is zero.
+    """
+
+
+@dataclass(frozen=True)
 class Full:
     """Per-state duration density and point masses, keyed by state name.
 
     Returns ``{"density": (T, B, S, D), "point_mass": {state_name: (T, B)}}``.
+    Under compression adds ``"tail"`` with the same payload as ``Tail()``.
     """
 
 
@@ -199,6 +228,7 @@ ProbabilityOutput = Union[
     PointMass,
     MarginalComponents,
     Full,
+    Tail,
 ]
 
 
@@ -213,13 +243,32 @@ def _none_callback(state: tuple[StateCarry, ...]) -> None:
     return None
 
 
+def _continuous_mass(carry: StateCarry) -> jnp.ndarray:
+    mass = jnp.sum(carry.density, axis=-1)
+    return mass if carry.tail is None else mass + carry.tail.mass
+
+
+@jax.jit
+def _tail_callback(state: tuple[StateCarry, ...]) -> TailResult:
+    return {
+        "mass": jnp.stack(tuple(
+            jnp.zeros_like(carry.density[:, 0])
+            if carry.tail is None else carry.tail.mass for carry in state
+        ), axis=-1),
+        "duration": jnp.stack(tuple(
+            jnp.zeros_like(carry.density[:, 0])
+            if carry.tail is None else carry.tail.duration for carry in state
+        ), axis=-1),
+    }
+
+
 @jax.jit
 def _state_probability_callback(state: tuple[StateCarry, ...]) -> jnp.ndarray:
     return jnp.stack(
         tuple(
-            jnp.sum(carry.density, axis=-1)
+            _continuous_mass(carry)
             if carry.point_mass is None
-            else jnp.sum(carry.density, axis=-1) + carry.point_mass.value
+            else _continuous_mass(carry) + carry.point_mass.value
             for carry in state
         ),
         axis=-1,
@@ -236,7 +285,7 @@ def _density_probability_callback(
     state: tuple[StateCarry, ...],
 ) -> jnp.ndarray:
     return jnp.stack(
-        tuple(jnp.sum(carry.density, axis=-1) for carry in state),
+        tuple(_continuous_mass(carry) for carry in state),
         axis=-1,
     )
 
@@ -255,12 +304,15 @@ def _point_mass_dict(
 @lru_cache(maxsize=None)
 def _full_callback(state_names: tuple[str, ...]) -> ComponentsCallback:
     def fn(state: tuple[StateCarry, ...]) -> ComponentsResult:
-        return {
+        result: ComponentsResult = {
             "density": jnp.stack(
                 tuple(carry.density for carry in state), axis=-2
             ),
             "point_mass": _point_mass_dict(state, state_names),
         }
+        if state[0].tail is not None:
+            result["tail"] = _tail_callback(state)
+        return result
 
     return fn
 
@@ -272,7 +324,7 @@ def _marginal_components_callback(
     def fn(state: tuple[StateCarry, ...]) -> ComponentsResult:
         return {
             "density": jnp.stack(
-                tuple(jnp.sum(carry.density, axis=-1) for carry in state),
+                tuple(_continuous_mass(carry) for carry in state),
                 axis=-1,
             ),
             "point_mass": _point_mass_dict(state, state_names),
@@ -316,6 +368,8 @@ def resolve_callback(
         return _point_mass_callback(state_names)
     if isinstance(output, MarginalComponents):
         return _marginal_components_callback(state_names)
+    if isinstance(output, Tail):
+        return _tail_callback
     if isinstance(output, Full):
         return _full_callback(state_names)
     if callable(output):
@@ -323,6 +377,6 @@ def resolve_callback(
     raise TypeError(  # pyright: ignore[reportUnreachable]
         "probability must be None, a probability-output instance "
         "(StateProbability, DensityProbability, Density, PointMass, "
-        "MarginalComponents, Full), or a callable; "
+        "MarginalComponents, Tail, Full), or a callable; "
         f"got {type(output).__name__}."
     )

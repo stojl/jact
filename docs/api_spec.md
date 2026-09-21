@@ -27,7 +27,7 @@ helpers live under public submodules:
   `CashflowView` unions.
 - `jact.probability` — output reducers (`StateProbability`,
   `DensityProbability`, `Density`, `PointMass`, `MarginalComponents`,
-  `Full`) and the `ProbabilityOutput` union.
+  `Tail`, `Full`) and the `ProbabilityOutput` union.
 - `jact.typing` — callable protocols (`Intensity`, `GroupedIntensity`,
   `Payment`, `When`, `DurationAt`, `Weight`) and JAX's `ArrayLike` type.
 - `jact.wrappers` — fitted-model intensity helpers (`bind_intensity`,
@@ -703,6 +703,9 @@ Parameters:
 | `cashflow_views` | mapping or `None` | Solve-time views; requires `cashflows` |
 | `record_every` | positive int | Must divide `horizon * steps_per_unit` |
 | `devices` | int, sequence of `jax.Device`, or `None` | Optional local devices for batch-sharded execution |
+| `intensity_duration_limit` | float, int, or `None` | Keyword-only; hold intensities constant in duration above this cutoff |
+| `payment_duration_limit` | float, int, or `None` | Keyword-only; hold payment values constant in duration above this cutoff |
+| `probability_duration_limit` | float, int, or `None` | Keyword-only; compress older continuous probability into a fixed-duration tail |
 | `**kwargs` | arrays | Scalar constants or covariates with a shared leading batch dimension |
 
 Validation and defaults:
@@ -721,6 +724,61 @@ Validation and defaults:
 - `devices=None` uses the single-device JIT path; `devices=1` also stays on
   that path; selecting two or more local devices splits the batch axis across
   devices and restores the documented output shapes.
+
+### Duration-limit approximations
+
+All three limits default to `None`. Each accepts a finite, nonnegative Python
+numeric scalar (`int` or `float`, excluding booleans), in the model's duration
+units. Arrays and traced values are rejected. The limits are static JIT
+configuration; changing one can recompile the solve. They are independent and
+can be combined in any ordering. `StateSpace` and model construction do not
+change. With all three disabled, numerical behavior and output structures are
+unchanged.
+
+`intensity_duration_limit=L` evaluates intensities at `min(d, L)` while keeping
+clock time `t` unchanged. The solver evaluates only existing duration samples
+through `L` and, when needed, one shared threshold sample; older grid cells
+reuse its value. `payment_duration_limit` applies the same rule to `StateRate`,
+`TransitionLump`, `ScheduledEvent`, and duration-event payment values. Separate
+compact layouts preserve midpoint and left-endpoint sampling. Payment limits
+do not affect probabilities. Event timing and cashflow weights do not change.
+Both function limits apply to initial point masses at their actual evolving
+durations, as well as to continuous probability.
+
+For `probability_duration_limit=P`, let `N = horizon * steps_per_unit`. The
+regular grid retains `K = min(N, floor(P * steps_per_unit) + 1)` cells, with
+near-integer products snapped before flooring (absolute tolerance `1e-10`).
+Their left nodes are `k / steps_per_unit <= P`, apart from that rounding
+tolerance. There is always at least one regular cell. Simulation still takes
+`N` steps, independent of `K`.
+
+Surviving continuous probability shifting beyond the retained grid enters one
+additional tail. Its mass starts at zero and its representative duration is
+always exactly `P`; it never ages, including while empty. The tail obeys the
+usual survival and competing-exit formulas. Exits reset destination duration
+and take part in the usual same-step transfers. With one retained cell, the
+part of midpoint inflow destined for the first omitted cell enters the tail.
+Tail occupancy and exits contribute to state-rate, transition-lump, and
+scheduled-event payments. Tail functions are evaluated at `P`, or at their
+own smaller function limit, reusing the threshold sample when available.
+
+Initial point masses remain separately tracked at their true durations, even
+above `P`; they are never merged into the tail. Compression discards duration
+heterogeneity and further aging only for older continuous probability.
+
+`DurationEvent` keeps its existing snapping and horizon rules. Continuous
+payments come only from retained regular cells; omitted cells contribute zero,
+and the tail never triggers a duration event. Initial point-mass events still
+trigger at their true durations, including targets above `P`. Scalar and
+callable targets (including traced targets) are accepted without
+compression-specific rejection or warnings. Consequently, targets beyond the
+retained grid can miss continuous-probability payments. Choose cutoffs with
+that approximation in mind.
+
+Use `Tail()` or compressed `Full()` for tail diagnostics. `ModelResult` does not
+automatically retain diagnostic fields or approximation settings. No automatic
+cutoff selection, weighted-mean tails, multiple buckets, or public comparison
+utility is provided.
 
 ### Device sharding
 
@@ -893,7 +951,15 @@ order), and `D` for the duration grid:
 | `Density()` | `(T, B, S, D)` tensor — continuous duration density per state; excludes point masses. |
 | `PointMass()` | `{state_name: (T, B)}` — only states that carry a point mass appear. |
 | `MarginalComponents()` | `{"density": (T, B, S), "point_mass": {state_name: (T, B)}}` |
-| `Full()` | `{"density": (T, B, S, D), "point_mass": {state_name: (T, B)}}` |
+| `Full()` | `{"density": (T, B, S, D), "point_mass": {state_name: (T, B)}}`; adds `"tail"` under compression. |
+| `Tail()` | `{"mass": (T, B, S), "duration": (T, B, S)}`; both leaves are zero when compression is disabled. |
+
+Under compression, `D = K` and `Density()` contains only retained regular
+cells. `StateProbability()`, `DensityProbability()`, and the `"density"` leaf
+of `MarginalComponents()` include tail mass in their duration marginals.
+`Full()["tail"]` has the same payload as `Tail()`, in state order. Its duration
+leaf stays at the supplied cutoff even when mass is zero. Without compression,
+`Full()` retains its original two-key structure.
 
 These types live under `jact.probability` and form the
 `ProbabilityOutput` union. Built-in reducers do not expose point-mass
@@ -909,7 +975,9 @@ Custom probability callables have signature
 stacked by `jax.lax.scan` along a new leading time axis. `StateCarry` and
 `_PointMass` are advanced/internal solver inspection symbols and live under
 `jact.probability`; they are not part of the main top-level `jact` surface but
-remain importable for advanced use.
+remain importable for advanced use. `StateCarry` appends an optional `tail`
+field, defaulting to `None`; when present it exposes per-individual `mass` and
+fixed `duration` arrays. Existing two-argument construction remains valid.
 
 ## Numerical and JIT contract
 
@@ -924,7 +992,7 @@ Static at trace time:
 - probability reducer callable identity,
 - presence or absence of point mass per reachable state,
 - declared initial-state set,
-- `step_size` and `record_every`,
+- `step_size`, `record_every`, and all three duration limits,
 - cashflow component names, kinds, and attachment points,
 - payment, `when`, and weight callable identities,
 - cashflow view names, kinds, and `terminal` flags.

@@ -26,6 +26,8 @@ from .probability import (
     PointMassResult,
     ProbabilityOutput,
     StateProbability,
+    Tail,
+    TailResult,
 )
 from .result import ModelResult
 from .state_space import StateSpace
@@ -341,6 +343,10 @@ class Model:
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
         devices: int | Sequence[Any] | None = None,
+        *,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
         **kwargs: Any,
     ) -> ModelResult[jax.Array]: ...
 
@@ -356,8 +362,31 @@ class Model:
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
         devices: int | Sequence[Any] | None = None,
+        *,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
         **kwargs: Any,
     ) -> ModelResult[PointMassResult]: ...
+
+    @overload
+    def solve(
+        self,
+        initial: str | ArrayLike | InitialDistribution,
+        horizon: int,
+        steps_per_unit: int,
+        initial_duration: ArrayLike,
+        probability: Tail,
+        cashflows: CashflowDeclaration | None = None,
+        cashflow_views: Mapping[str, CashflowView] | None = None,
+        record_every: int = 1,
+        devices: int | Sequence[Any] | None = None,
+        *,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
+        **kwargs: Any,
+    ) -> ModelResult[TailResult]: ...
 
     @overload
     def solve(
@@ -371,6 +400,10 @@ class Model:
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
         devices: int | Sequence[Any] | None = None,
+        *,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
         **kwargs: Any,
     ) -> ModelResult[ComponentsResult]: ...
 
@@ -386,6 +419,10 @@ class Model:
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
         devices: int | Sequence[Any] | None = None,
+        *,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
         **kwargs: Any,
     ) -> ModelResult[None]: ...
 
@@ -401,6 +438,10 @@ class Model:
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
         devices: int | Sequence[Any] | None = None,
+        *,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
         **kwargs: Any,
     ) -> ModelResult[ProbabilityT]: ...
 
@@ -417,8 +458,30 @@ class Model:
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
         devices: int | Sequence[Any] | None = None,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
         **kwargs: Any,
     ) -> ModelResult[PointMassResult]: ...
+
+    @overload
+    def solve(
+        self,
+        initial: str | ArrayLike | InitialDistribution,
+        horizon: int,
+        steps_per_unit: int,
+        initial_duration: ArrayLike = 0.0,
+        *,
+        probability: Tail,
+        cashflows: CashflowDeclaration | None = None,
+        cashflow_views: Mapping[str, CashflowView] | None = None,
+        record_every: int = 1,
+        devices: int | Sequence[Any] | None = None,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
+        **kwargs: Any,
+    ) -> ModelResult[TailResult]: ...
 
     @overload
     def solve(
@@ -433,6 +496,9 @@ class Model:
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
         devices: int | Sequence[Any] | None = None,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
         **kwargs: Any,
     ) -> ModelResult[ComponentsResult]: ...
 
@@ -449,6 +515,9 @@ class Model:
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
         devices: int | Sequence[Any] | None = None,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
         **kwargs: Any,
     ) -> ModelResult[None]: ...
 
@@ -465,6 +534,9 @@ class Model:
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
         devices: int | Sequence[Any] | None = None,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
         **kwargs: Any,
     ) -> ModelResult[ProbabilityT]: ...
 
@@ -481,6 +553,10 @@ class Model:
         ) = None,
         record_every: int = 1,
         devices: int | Sequence[Any] | None = None,
+        *,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
         **kwargs: Any,
     ) -> ModelResult[Any]:
         """Compute transition probabilities from a documented initial condition.
@@ -510,7 +586,7 @@ class Model:
             ``(T, batch, S)`` tensor of per-state occupancy with state-name
             order given by ``result.states``. Other built-in choices are
             ``jact.probability.Density()``, ``DensityProbability()``,
-            ``PointMass()``, ``MarginalComponents()``, and ``Full()``; see
+            ``PointMass()``, ``MarginalComponents()``, ``Tail()``, and ``Full()``; see
             ``docs/api_spec.md`` for the full output-shape table. Custom
             callables receive ``tuple[StateCarry, ...]`` and may return any
             PyTree, which is stacked along the leading time axis. ``None``
@@ -527,6 +603,14 @@ class Model:
             Select multiple local devices for batch-sharded execution.
             ``None`` keeps the single-device JIT path. ``1`` explicitly
             selects one device and also uses the single-device path.
+        intensity_duration_limit, payment_duration_limit : float or None
+            Keyword-only static cutoffs: evaluate the corresponding functions
+            at the cutoff for older durations. Defaults are ``None``.
+        probability_duration_limit : float or None
+            Keyword-only static cutoff for the regular continuous-probability
+            grid. Older mass enters a fixed-duration tail; initial point masses
+            remain separate. Defaults to ``None``. Duration events never trigger
+            from the tail. See ``docs/api_spec.md`` for approximation semantics.
         **kwargs
             Scalar constants or covariate arrays of shape ``(batch, ...)``
             passed to intensity and cashflow callables. Scalar covariates do
@@ -550,6 +634,9 @@ class Model:
                 horizon=horizon,
                 steps_per_unit=steps_per_unit,
                 initial_duration=initial_duration,
+                intensity_duration_limit=intensity_duration_limit,
+                payment_duration_limit=payment_duration_limit,
+                probability_duration_limit=probability_duration_limit,
                 probability=cast(Any, probability),
                 cashflows=cashflows,
                 cashflow_views=cashflow_views,
