@@ -183,6 +183,7 @@ def _consumer_type_check(
 def test_typing_is_a_public_submodule():
     assert jact.typing.__all__ == [
         "ArrayLike",
+        "Derived",
         "Intensity",
         "GroupedIntensity",
         "Payment",

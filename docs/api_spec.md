@@ -27,9 +27,10 @@ helpers live under public submodules:
   `CashflowView` unions.
 - `jact.probability` — output reducers (`StateProbability`,
   `DensityProbability`, `Density`, `PointMass`, `MarginalComponents`,
-  `Full`) and the `ProbabilityOutput` union.
+  `Tail`, `Full`) and the `ProbabilityOutput` union.
 - `jact.typing` — callable protocols (`Intensity`, `GroupedIntensity`,
-  `Payment`, `When`, `DurationAt`, `Weight`) and JAX's `ArrayLike` type.
+  `Payment`, `When`, `DurationAt`, `Weight`), the `Derived` mapping alias,
+  and JAX's `ArrayLike` type.
 - `jact.wrappers` — fitted-model intensity helpers (`bind_intensity`,
   `bind_grouped_intensity`, `bind_exit_intensity`).
 
@@ -81,8 +82,8 @@ Surface:
 | `has_transition(src, tgt)` | Whether `(src, tgt)` is declared |
 | `state_index(state)` | Zero-based index in `states` |
 | `reachable_from(state)` | Starting state first, then reachable states in original state order |
-| `build(transitions=..., exits=..., groups=...)` | Create a `Model` |
-| `cashflows({...})` | Create a `CashflowDeclaration` |
+| `build(transitions=..., exits=..., groups=..., derived=...)` | Create a `Model` |
+| `cashflows({...}, derived=...)` | Create a `CashflowDeclaration` |
 | `initial_at(state, duration=0.0)` | Create an `InitialDistribution` |
 | `initial_distribution(components=..., normalise=True)` | Create an `InitialDistribution` |
 | `initial_per_individual(...)` | Create an `InitialDistribution` from per-individual initial states |
@@ -109,6 +110,7 @@ model = state_space.build(
     transitions={...},
     exits={...},
     groups={...},
+    derived={...},
 )
 ```
 
@@ -128,6 +130,57 @@ Notes:
   non-callable assignments.
 - `exits` and `groups` are sliced at model-build time so the solver always sees
   one selected transition output, then broadcasts that output to `(batch, D)`.
+- `derived` contributes reusable fields to the shared exogenous graph described
+  below. It is stored on the model, not on the topology-only `StateSpace`.
+
+### Shared derived fields
+
+`StateSpace.build`, `StateSpace.cashflows`, `Model.solve`, and `jact.solve`
+accept an optional `derived` mapping. The three declaration scopes compose into
+one graph at solve time. Scope determines ownership and reuse; every callable
+receives the same resolved fields through its existing `**kwargs` interface.
+
+```python
+model = state_space.build(
+    transitions={("healthy", "dead"): mortality},
+    derived={
+        "age": lambda t, baseline_age: baseline_age + t,
+    },
+)
+cashflows = state_space.cashflows(
+    {"premium": jact.cashflows.StateRate({"healthy": premium})},
+    derived={"indexed_premium": lambda age, salary: salary * (1 + 0.01 * age)},
+)
+result = model.solve(
+    initial="healthy", horizon=10, steps_per_unit=12,
+    cashflows=cashflows,
+    derived={"discount": lambda t, interest: jnp.exp(-interest * t)},
+    baseline_age=baseline_age, salary=salary, interest=interest,
+)
+```
+
+Each field function's named parameters are its dependencies. They may refer to
+solve inputs, canonical solver fields `t` and `d`, or fields from any scope.
+Definitions are independent of the evolving probability and cashflow state.
+Fixed parameters can be captured in closures. Field functions need inspectable
+signatures with named parameters; `*args`, `**kwargs`, and positional-only
+parameters are rejected. An optional parameter with a default may omit its
+dependency. Fields must return JAX-compatible values.
+
+Before numerical solving, the combined graph rejects duplicate field names,
+names colliding with solve inputs or `t`, `d`, `initial`, or
+`initial_duration`, missing required dependencies, and cycles. Definitions do
+not override one another. Inputs and derived values keep their declared shapes;
+callables should add a duration axis explicitly when needed, such as
+`kwargs["age"][:, None]`.
+
+Input-only fields are resolved once per solve or device shard. Time and duration
+fields are resolved in the relevant solver evaluation context and reused by
+intensities, grouped intensities, and payments in that context. The solver
+applies each intensity or payment duration limit to `d` before resolving its
+fields. Event-time and duration-target callables receive input-only fields.
+Cashflow view weights receive input-only and time-derived fields; they have no
+state-duration context. Views consume fields but have no `derived` mapping.
 
 ### Reduction
 
@@ -325,13 +378,13 @@ Arguments:
 |---|---|---|
 | `t` | scalar float | Clock time |
 | `d` | `(1, D)` | Duration grid broadcast over batch |
-| `**kwargs` | scalar or `(batch, ...)` arrays | Solve-time covariates |
+| `**kwargs` | scalar or `(batch, ...)` arrays | Solve inputs and resolved derived fields |
 
 Interpretation:
 
 - `t` is clock time,
 - `d` is duration in the current state,
-- `**kwargs` are solve-time covariates. Scalars with shape `()` are replicated
+- `**kwargs` include solve inputs and derived fields. Scalars with shape `()` are replicated
   constants and do not define batch size. Non-scalar covariates use axis 0 as
   the batch axis. A rank-1 value such as `jnp.arange(batch_size)` is batched
   with one scalar per individual; a value with shape `(batch_size, 1)` is also
@@ -471,6 +524,7 @@ The returned object is a `CashflowDeclaration` with this surface:
 cashflows.state_space
 cashflows.names
 cashflows.component("premium")
+cashflows.derived
 ```
 
 Validation is structural:
@@ -703,6 +757,10 @@ Parameters:
 | `cashflow_views` | mapping or `None` | Solve-time views; requires `cashflows` |
 | `record_every` | positive int | Must divide `horizon * steps_per_unit` |
 | `devices` | int, sequence of `jax.Device`, or `None` | Optional local devices for batch-sharded execution |
+| `intensity_duration_limit` | float, int, or `None` | Keyword-only; hold intensities constant in duration above this cutoff |
+| `payment_duration_limit` | float, int, or `None` | Keyword-only; hold payment values constant in duration above this cutoff |
+| `probability_duration_limit` | float, int, or `None` | Keyword-only; compress older continuous probability into a fixed-duration tail |
+| `derived` | mapping or `None` | Solve-level named field functions, combined with model and cashflow fields |
 | `**kwargs` | arrays | Scalar constants or covariates with a shared leading batch dimension |
 
 Validation and defaults:
@@ -721,6 +779,65 @@ Validation and defaults:
 - `devices=None` uses the single-device JIT path; `devices=1` also stays on
   that path; selecting two or more local devices splits the batch axis across
   devices and restores the documented output shapes.
+
+### Duration-limit approximations
+
+All three limits default to `None`. Each accepts a finite, nonnegative Python
+numeric scalar (`int` or `float`, excluding booleans), in the model's duration
+units. Arrays and traced values are rejected. The limits are static JIT
+configuration; changing one can recompile the solve. They are independent and
+can be combined in any ordering. `StateSpace` and model construction do not
+change. With all three disabled, numerical behavior and output structures are
+unchanged.
+
+`intensity_duration_limit=L` evaluates intensities at `min(d, L)` while keeping
+clock time `t` unchanged. The solver evaluates only existing duration samples
+through `L` and, when needed, one shared threshold sample; older grid cells
+reuse its value. `payment_duration_limit` applies the same rule to `StateRate`,
+`TransitionLump`, `ScheduledEvent`, and duration-event payment values. Separate
+compact layouts preserve midpoint and left-endpoint sampling. Payment limits
+do not affect probabilities. Event timing and cashflow weights do not change.
+Both function limits apply to initial point masses at their actual evolving
+durations, as well as to continuous probability.
+
+For `probability_duration_limit=P`, let `N = horizon * steps_per_unit`. The
+regular grid retains `K = min(N, floor(P * steps_per_unit) + 1)` cells, with
+near-integer products snapped before flooring (absolute tolerance `1e-10`).
+Their left nodes are `k / steps_per_unit <= P`, apart from that rounding
+tolerance. There is always at least one regular cell. Simulation still takes
+`N` steps, independent of `K`.
+
+When `K=N`, transport matches the uncompressed grid. The tail remains present
+for diagnostics at duration `P`, but its mass stays zero because no regular
+cells were omitted.
+
+Surviving continuous probability shifting beyond the retained grid enters one
+additional tail. Its mass starts at zero and its representative duration is
+always exactly `P`; it never ages, including while empty. The tail obeys the
+usual survival and competing-exit formulas. Exits reset destination duration
+and take part in the usual same-step transfers. With one retained cell, the
+part of midpoint inflow destined for the first omitted cell enters the tail.
+Tail occupancy and exits contribute to state-rate, transition-lump, and
+scheduled-event payments. Tail functions are evaluated at `P`, or at their
+own smaller function limit, reusing the threshold sample when available.
+
+Initial point masses remain separately tracked at their true durations, even
+above `P`; they are never merged into the tail. Compression discards duration
+heterogeneity and further aging only for older continuous probability.
+
+`DurationEvent` keeps its existing snapping and horizon rules. Continuous
+payments come only from retained regular cells; omitted cells contribute zero,
+and the tail never triggers a duration event. Initial point-mass events still
+trigger at their true durations, including targets above `P`. Scalar and
+callable targets (including traced targets) are accepted without
+compression-specific rejection or warnings. Consequently, targets beyond the
+retained grid can miss continuous-probability payments. Choose cutoffs with
+that approximation in mind.
+
+Use `Tail()` or compressed `Full()` for tail diagnostics. `ModelResult` does not
+automatically retain diagnostic fields or approximation settings. No automatic
+cutoff selection, weighted-mean tails, multiple buckets, or public comparison
+utility is provided.
 
 ### Device sharding
 
@@ -893,7 +1010,15 @@ order), and `D` for the duration grid:
 | `Density()` | `(T, B, S, D)` tensor — continuous duration density per state; excludes point masses. |
 | `PointMass()` | `{state_name: (T, B)}` — only states that carry a point mass appear. |
 | `MarginalComponents()` | `{"density": (T, B, S), "point_mass": {state_name: (T, B)}}` |
-| `Full()` | `{"density": (T, B, S, D), "point_mass": {state_name: (T, B)}}` |
+| `Full()` | `{"density": (T, B, S, D), "point_mass": {state_name: (T, B)}}`; adds `"tail"` under compression. |
+| `Tail()` | `{"mass": (T, B, S), "duration": (T, B, S)}`; both leaves are zero when compression is disabled. |
+
+Under compression, `D = K` and `Density()` contains only retained regular
+cells. `StateProbability()`, `DensityProbability()`, and the `"density"` leaf
+of `MarginalComponents()` include tail mass in their duration marginals.
+`Full()["tail"]` has the same payload as `Tail()`, in state order. Its duration
+leaf stays at the supplied cutoff even when mass is zero. Without compression,
+`Full()` retains its original two-key structure.
 
 These types live under `jact.probability` and form the
 `ProbabilityOutput` union. Built-in reducers do not expose point-mass
@@ -909,7 +1034,9 @@ Custom probability callables have signature
 stacked by `jax.lax.scan` along a new leading time axis. `StateCarry` and
 `_PointMass` are advanced/internal solver inspection symbols and live under
 `jact.probability`; they are not part of the main top-level `jact` surface but
-remain importable for advanced use.
+remain importable for advanced use. `StateCarry` appends an optional `tail`
+field, defaulting to `None`; when present it exposes per-individual `mass` and
+fixed `duration` arrays. Existing two-argument construction remains valid.
 
 ## Numerical and JIT contract
 
@@ -924,9 +1051,10 @@ Static at trace time:
 - probability reducer callable identity,
 - presence or absence of point mass per reachable state,
 - declared initial-state set,
-- `step_size` and `record_every`,
+- `step_size`, `record_every`, and all three duration limits,
 - cashflow component names, kinds, and attachment points,
 - payment, `when`, and weight callable identities,
+- derived graph names, dependencies, and callable identities,
 - cashflow view names, kinds, and `terminal` flags.
 
 Traced at runtime:

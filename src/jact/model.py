@@ -26,10 +26,12 @@ from .probability import (
     PointMassResult,
     ProbabilityOutput,
     StateProbability,
+    Tail,
+    TailResult,
 )
 from .result import ModelResult
 from .state_space import StateSpace
-from .typing import ArrayLike, GroupedIntensity, Intensity
+from .typing import ArrayLike, Derived, GroupedIntensity, Intensity
 
 __all__ = ["Model", "ReducedModel", "TransitionInfo"]
 
@@ -100,13 +102,13 @@ class Model:
         transitions: Mapping[Transition, Intensity] | None = None,
         exits: Mapping[str, GroupedIntensity] | None = None,
         groups: Mapping[GroupedIntensity, Sequence[Transition]] | None = None,
+        derived: Derived | None = None,
     ) -> None:
         self._state_space = state_space
+        self.derived: Derived = dict(derived or {})
         self._transitions_map: Mapping[Transition, Intensity] = transitions or {}
         self._exits_map: Mapping[str, GroupedIntensity] = exits or {}
-        self._groups_map: Mapping[
-            GroupedIntensity, Sequence[Transition]
-        ] = groups or {}
+        self._groups_map: Mapping[GroupedIntensity, Sequence[Transition]] = groups or {}
         self._transition_info: dict[Transition, TransitionInfo] = {}
 
         self._validate_and_register()
@@ -132,13 +134,10 @@ class Model:
             exit_transitions = self._state_space.exits(src)
             if not exit_transitions:
                 raise ValueError(
-                    f"State '{src}' has no outgoing transitions — "
-                    f"cannot assign exits."
+                    f"State '{src}' has no outgoing transitions — cannot assign exits."
                 )
             for i, (s, t) in enumerate(exit_transitions):
-                self._register_transition(
-                    s, t, "exits", fn, index=i, covered=covered
-                )
+                self._register_transition(s, t, "exits", fn, index=i, covered=covered)
 
         # Groups
         for fn, trans_list in self._groups_map.items():
@@ -154,9 +153,7 @@ class Model:
         # Check all transitions are covered
         uncovered = self._state_space.transitions - set(covered.keys())
         if uncovered:
-            uncovered_str = ", ".join(
-                f"'{s}' -> '{t}'" for s, t in sorted(uncovered)
-            )
+            uncovered_str = ", ".join(f"'{s}' -> '{t}'" for s, t in sorted(uncovered))
             raise ValueError(
                 f"The following transitions are not covered by any model: "
                 f"{uncovered_str}"
@@ -178,8 +175,7 @@ class Model:
             )
         if not self._state_space.has_transition(src, tgt):
             raise ValueError(
-                f"Transition '{src}' -> '{tgt}' is not declared in the "
-                f"StateSpace."
+                f"Transition '{src}' -> '{tgt}' is not declared in the StateSpace."
             )
         if (src, tgt) in covered:
             raise ValueError(
@@ -318,9 +314,7 @@ class Model:
         """
         key = (source, target)
         if key not in self._transition_info:
-            raise ValueError(
-                f"No transition '{source}' -> '{target}' in this model."
-            )
+            raise ValueError(f"No transition '{source}' -> '{target}' in this model.")
         return self._transition_info[key]
 
     # ------------------------------------------------------------------ #
@@ -341,6 +335,11 @@ class Model:
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
         devices: int | Sequence[Any] | None = None,
+        *,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
+        derived: Derived | None = None,
         **kwargs: Any,
     ) -> ModelResult[jax.Array]: ...
 
@@ -356,8 +355,33 @@ class Model:
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
         devices: int | Sequence[Any] | None = None,
+        *,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
+        derived: Derived | None = None,
         **kwargs: Any,
     ) -> ModelResult[PointMassResult]: ...
+
+    @overload
+    def solve(
+        self,
+        initial: str | ArrayLike | InitialDistribution,
+        horizon: int,
+        steps_per_unit: int,
+        initial_duration: ArrayLike,
+        probability: Tail,
+        cashflows: CashflowDeclaration | None = None,
+        cashflow_views: Mapping[str, CashflowView] | None = None,
+        record_every: int = 1,
+        devices: int | Sequence[Any] | None = None,
+        *,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
+        derived: Derived | None = None,
+        **kwargs: Any,
+    ) -> ModelResult[TailResult]: ...
 
     @overload
     def solve(
@@ -371,6 +395,11 @@ class Model:
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
         devices: int | Sequence[Any] | None = None,
+        *,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
+        derived: Derived | None = None,
         **kwargs: Any,
     ) -> ModelResult[ComponentsResult]: ...
 
@@ -386,6 +415,11 @@ class Model:
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
         devices: int | Sequence[Any] | None = None,
+        *,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
+        derived: Derived | None = None,
         **kwargs: Any,
     ) -> ModelResult[None]: ...
 
@@ -401,6 +435,11 @@ class Model:
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
         devices: int | Sequence[Any] | None = None,
+        *,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
+        derived: Derived | None = None,
         **kwargs: Any,
     ) -> ModelResult[ProbabilityT]: ...
 
@@ -417,8 +456,32 @@ class Model:
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
         devices: int | Sequence[Any] | None = None,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
+        derived: Derived | None = None,
         **kwargs: Any,
     ) -> ModelResult[PointMassResult]: ...
+
+    @overload
+    def solve(
+        self,
+        initial: str | ArrayLike | InitialDistribution,
+        horizon: int,
+        steps_per_unit: int,
+        initial_duration: ArrayLike = 0.0,
+        *,
+        probability: Tail,
+        cashflows: CashflowDeclaration | None = None,
+        cashflow_views: Mapping[str, CashflowView] | None = None,
+        record_every: int = 1,
+        devices: int | Sequence[Any] | None = None,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
+        derived: Derived | None = None,
+        **kwargs: Any,
+    ) -> ModelResult[TailResult]: ...
 
     @overload
     def solve(
@@ -433,6 +496,10 @@ class Model:
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
         devices: int | Sequence[Any] | None = None,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
+        derived: Derived | None = None,
         **kwargs: Any,
     ) -> ModelResult[ComponentsResult]: ...
 
@@ -449,6 +516,10 @@ class Model:
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
         devices: int | Sequence[Any] | None = None,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
+        derived: Derived | None = None,
         **kwargs: Any,
     ) -> ModelResult[None]: ...
 
@@ -465,6 +536,10 @@ class Model:
         cashflow_views: Mapping[str, CashflowView] | None = None,
         record_every: int = 1,
         devices: int | Sequence[Any] | None = None,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
+        derived: Derived | None = None,
         **kwargs: Any,
     ) -> ModelResult[ProbabilityT]: ...
 
@@ -476,11 +551,14 @@ class Model:
         initial_duration: ArrayLike = 0.0,
         probability: None | ProbabilityOutput | CallbackFn = StateProbability(),
         cashflows: CashflowDeclaration | None = None,
-        cashflow_views: (
-            Mapping[str, CashflowView] | None
-        ) = None,
+        cashflow_views: (Mapping[str, CashflowView] | None) = None,
         record_every: int = 1,
         devices: int | Sequence[Any] | None = None,
+        *,
+        intensity_duration_limit: float | None = None,
+        payment_duration_limit: float | None = None,
+        probability_duration_limit: float | None = None,
+        derived: Derived | None = None,
         **kwargs: Any,
     ) -> ModelResult[Any]:
         """Compute transition probabilities from a documented initial condition.
@@ -510,7 +588,7 @@ class Model:
             ``(T, batch, S)`` tensor of per-state occupancy with state-name
             order given by ``result.states``. Other built-in choices are
             ``jact.probability.Density()``, ``DensityProbability()``,
-            ``PointMass()``, ``MarginalComponents()``, and ``Full()``; see
+            ``PointMass()``, ``MarginalComponents()``, ``Tail()``, and ``Full()``; see
             ``docs/api_spec.md`` for the full output-shape table. Custom
             callables receive ``tuple[StateCarry, ...]`` and may return any
             PyTree, which is stacked along the leading time axis. ``None``
@@ -527,6 +605,17 @@ class Model:
             Select multiple local devices for batch-sharded execution.
             ``None`` keeps the single-device JIT path. ``1`` explicitly
             selects one device and also uses the single-device path.
+        intensity_duration_limit, payment_duration_limit : float or None
+            Keyword-only static cutoffs: evaluate the corresponding functions
+            at the cutoff for older durations. Defaults are ``None``.
+        probability_duration_limit : float or None
+            Keyword-only static cutoff for the regular continuous-probability
+            grid. Older mass enters a fixed-duration tail; initial point masses
+            remain separate. Defaults to ``None``. Duration events never trigger
+            from the tail. See ``docs/api_spec.md`` for approximation semantics.
+        derived : mapping, optional
+            Named exogenous fields. Callable parameter names declare dependencies
+            on solve inputs, ``t``, ``d``, or other derived fields.
         **kwargs
             Scalar constants or covariate arrays of shape ``(batch, ...)``
             passed to intensity and cashflow callables. Scalar covariates do
@@ -550,6 +639,10 @@ class Model:
                 horizon=horizon,
                 steps_per_unit=steps_per_unit,
                 initial_duration=initial_duration,
+                intensity_duration_limit=intensity_duration_limit,
+                payment_duration_limit=payment_duration_limit,
+                probability_duration_limit=probability_duration_limit,
+                derived=derived,
                 probability=cast(Any, probability),
                 cashflows=cashflows,
                 cashflow_views=cashflow_views,
@@ -567,6 +660,8 @@ class Model:
         assignments: list[str] = []
         for (src, tgt), info in sorted(self._transition_info.items()):
             assignments.append(f"  {src}->{tgt}: {info.assignment}")
+        if self.derived:
+            assignments.append(f"  derived: {', '.join(sorted(self.derived))}")
         body = "\n".join(assignments)
         return f"Model(\n{body}\n)"
 

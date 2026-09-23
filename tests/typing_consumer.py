@@ -52,6 +52,14 @@ def _check_method_solve(model: jact.Model) -> None:
             jact.ModelResult[jact.probability.ComponentsResult],
         )
 
+    tail = model.solve(
+        "healthy", 1, 1, probability=jact.probability.Tail(),
+        intensity_duration_limit=0.5, payment_duration_limit=0.25,
+        probability_duration_limit=0.75,
+    )
+    assert_type(tail, jact.ModelResult[jact.probability.TailResult])
+    assert_type(tail.probability["mass"], jax.Array)
+
     disabled = model.solve("healthy", 1, 1, probability=None)
     assert_type(disabled, jact.ModelResult[None])
     assert_type(disabled.probability, None)
@@ -123,6 +131,14 @@ def _check_function_solve(model: jact.Model) -> None:
             components.probability,
             jact.probability.ComponentsResult,
         )
+
+    tail = jact.solve(
+        model, "healthy", 1, 1, 0.0, jact.probability.Tail(),
+        intensity_duration_limit=0.5, payment_duration_limit=0.25,
+        probability_duration_limit=0.75,
+    )
+    assert_type(tail.probability, jact.probability.TailResult)
+    assert_type(tail.probability["duration"], jax.Array)
 
     disabled = jact.solve(model, "healthy", 1, 1, probability=None)
     assert_type(disabled.probability, None)

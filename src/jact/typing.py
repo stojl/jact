@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from typing import Any, Protocol, TypeAlias
 
 import jax.numpy as jnp
@@ -20,9 +21,11 @@ ArrayLike: TypeAlias = (
     | float
     | complex
 )
+Derived: TypeAlias = Mapping[str, Callable[..., ArrayLike]]
 
 __all__ = [
     "ArrayLike",
+    "Derived",
     "Intensity",
     "GroupedIntensity",
     "Payment",
@@ -86,9 +89,7 @@ class When(Protocol):
     The return value must be scalar or broadcastable to ``(batch,)``.
     """
 
-    def __call__(
-        self, **kwargs: Any
-    ) -> ArrayLike: ...
+    def __call__(self, **kwargs: Any) -> ArrayLike: ...
 
 
 class DurationAt(Protocol):
@@ -97,9 +98,7 @@ class DurationAt(Protocol):
     The return value must be scalar or broadcastable to ``(batch,)``.
     """
 
-    def __call__(
-        self, **kwargs: Any
-    ) -> ArrayLike: ...
+    def __call__(self, **kwargs: Any) -> ArrayLike: ...
 
 
 class Weight(Protocol):
@@ -108,6 +107,4 @@ class Weight(Protocol):
     The return value must be scalar or broadcastable to ``(batch,)``.
     """
 
-    def __call__(
-        self, t: jnp.ndarray, /, **kwargs: Any
-    ) -> ArrayLike: ...
+    def __call__(self, t: jnp.ndarray, /, **kwargs: Any) -> ArrayLike: ...

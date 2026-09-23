@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Hashable, Iterable, Mapping, Sequence, TypeVar
 import jax.numpy as jnp
 
 from .initial_distribution import InitialDistribution
-from .typing import ArrayLike, GroupedIntensity, Intensity
+from .typing import ArrayLike, Derived, GroupedIntensity, Intensity
 
 if TYPE_CHECKING:
     from .cashflows import CashflowComponent, CashflowDeclaration
@@ -85,10 +85,7 @@ class StateSpace:
     ) -> None:
         for state in states:
             if not isinstance(state, str):  # pyright: ignore[reportUnnecessaryIsInstance]
-                raise TypeError(
-                    "State names must be strings, "
-                    f"got {type(state)}."
-                )
+                raise TypeError(f"State names must be strings, got {type(state)}.")
 
         duplicate_states = _duplicates(states)
         if duplicate_states:
@@ -98,17 +95,11 @@ class StateSpace:
 
         for src, tgt in transitions:
             if src not in state_set:
-                raise ValueError(
-                    f"Transition source '{src}' is not a declared state."
-                )
+                raise ValueError(f"Transition source '{src}' is not a declared state.")
             if tgt not in state_set:
-                raise ValueError(
-                    f"Transition target '{tgt}' is not a declared state."
-                )
+                raise ValueError(f"Transition target '{tgt}' is not a declared state.")
             if src == tgt:
-                raise ValueError(
-                    f"Self-transition '{src}' -> '{src}' is not allowed."
-                )
+                raise ValueError(f"Self-transition '{src}' -> '{src}' is not allowed.")
 
         duplicate_transitions = _duplicates(transitions)
         if duplicate_transitions:
@@ -267,8 +258,7 @@ class StateSpace:
     def _check_state(self, state: str) -> None:
         if state not in self._state_to_index:
             raise ValueError(
-                f"'{state}' is not a declared state. "
-                f"Available states: {self._states}"
+                f"'{state}' is not a declared state. Available states: {self._states}"
             )
 
     # ------------------------------------------------------------------ #
@@ -280,6 +270,7 @@ class StateSpace:
         transitions: Mapping[tuple[str, str], Intensity] | None = None,
         exits: Mapping[str, GroupedIntensity] | None = None,
         groups: Mapping[GroupedIntensity, Sequence[tuple[str, str]]] | None = None,
+        derived: Derived | None = None,
     ) -> Model:
         """Create a Model by assigning intensity callables to transitions.
 
@@ -306,16 +297,18 @@ class StateSpace:
             transitions=transitions,
             exits=exits,
             groups=groups,
+            derived=derived,
         )
 
     def cashflows(
         self,
         components: Mapping[str, CashflowComponent],
+        derived: Derived | None = None,
     ) -> CashflowDeclaration:
         """Create a validated cashflow declaration for this state space."""
         from .cashflows import validate_cashflow_components
 
-        return validate_cashflow_components(self, components)
+        return validate_cashflow_components(self, components, derived=derived)
 
     # ------------------------------------------------------------------ #
     # InitialDistribution helpers                                         #
@@ -457,7 +450,4 @@ class StateSpace:
 
     def __repr__(self) -> str:
         trans_str = ", ".join(f"{s}->{t}" for s, t in sorted(self._transitions))
-        return (
-            f"StateSpace(states={list(self._states)}, "
-            f"transitions=[{trans_str}])"
-        )
+        return f"StateSpace(states={list(self._states)}, transitions=[{trans_str}])"
