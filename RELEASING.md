@@ -15,7 +15,7 @@ The workflow uses OIDC and does not require a long-lived PyPI API token.
 
 1. Make sure the working tree is clean.
 2. Update `version` in `pyproject.toml`.
-3. Review the release notes you want to publish with the tag.
+3. Update `CHANGELOG.md` with the release notes to publish with the tag.
 4. Run the local validation commands:
 
 ```bash

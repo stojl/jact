@@ -162,6 +162,8 @@ For the full API contract, use the
 [API specification](https://github.com/stojl/jact/blob/main/docs/api_spec.md).
 For a runnable walkthrough of the main workflow, see the
 [example notebook](https://github.com/stojl/jact/blob/main/docs/example_notebook.ipynb).
+For reusable covariates and a tracing benchmark, see the
+[derived fields notebook](https://github.com/stojl/jact/blob/main/docs/derived_fields_notebook.ipynb).
 For a fitting-to-solver workflow with neural-network intensities, see the
 [fitted neural-network notebook](https://github.com/stojl/jact/blob/main/docs/fitted_nn_notebook.ipynb).
 
@@ -257,7 +259,10 @@ ruff check src tests
 pytest -q
 ```
 
-The tag-driven publish flow is documented in [RELEASING.md](RELEASING.md).
+The tag-driven publish flow is documented in
+[RELEASING.md](https://github.com/stojl/jact/blob/main/RELEASING.md).
+See the [release notes](https://github.com/stojl/jact/blob/main/CHANGELOG.md)
+for changes in each version.
 
 ## Requirements
 

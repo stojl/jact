@@ -660,6 +660,8 @@ class Model:
         assignments: list[str] = []
         for (src, tgt), info in sorted(self._transition_info.items()):
             assignments.append(f"  {src}->{tgt}: {info.assignment}")
+        if self.derived:
+            assignments.append(f"  derived: {', '.join(sorted(self.derived))}")
         body = "\n".join(assignments)
         return f"Model(\n{body}\n)"
 
