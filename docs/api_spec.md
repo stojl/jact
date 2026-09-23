@@ -807,6 +807,10 @@ Their left nodes are `k / steps_per_unit <= P`, apart from that rounding
 tolerance. There is always at least one regular cell. Simulation still takes
 `N` steps, independent of `K`.
 
+When `K=N`, transport matches the uncompressed grid. The tail remains present
+for diagnostics at duration `P`, but its mass stays zero because no regular
+cells were omitted.
+
 Surviving continuous probability shifting beyond the retained grid enters one
 additional tail. Its mass starts at zero and its representative duration is
 always exactly `P`; it never ages, including while empty. The tail obeys the

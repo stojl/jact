@@ -197,6 +197,35 @@ def test_compression_conserves_mass_and_keeps_fixed_tail(limit, width):
 
 
 @pytest.mark.parametrize(
+    "horizon,steps_per_unit,limit",
+    [(3, 2, 2.9), (3, 2, 3.0), (3, 2, 20.0), (1, 1, 20.0)],
+)
+def test_full_width_probability_limit_keeps_all_density_in_regular_cells(
+    horizon, steps_per_unit, limit
+):
+    model = _model(_space(), _constant)
+    args: dict[str, Any] = dict(
+        initial="a", horizon=horizon, steps_per_unit=steps_per_unit
+    )
+    exact = model.solve(**args, probability=pr.Density()).probability
+    full = model.solve(
+        **args, probability=pr.Full(), probability_duration_limit=limit
+    ).probability
+    assert "tail" in full
+    np.testing.assert_allclose(full["density"], exact, atol=1e-7, rtol=1e-6)
+    np.testing.assert_array_equal(full["tail"]["mass"], 0)
+    np.testing.assert_allclose(full["tail"]["duration"], limit, atol=1e-7)
+    density = model.solve(
+        **args, probability=pr.Density(), probability_duration_limit=limit
+    ).probability
+    tail = model.solve(
+        **args, probability=pr.Tail(), probability_duration_limit=limit
+    ).probability
+    np.testing.assert_allclose(density, exact, atol=1e-7, rtol=1e-6)
+    _assert_tree_close(tail, full["tail"])
+
+
+@pytest.mark.parametrize(
     "intensity,payment,probability",
     [
         (None, None, 0.0),

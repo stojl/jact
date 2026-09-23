@@ -63,6 +63,7 @@ K = min(N, floor(P * S) + 1)
 regular cells, snapping products within `1e-10` of an integer before flooring.
 Their left nodes are `k / S <= P` (up to snapping). Retention is bounded by the
 original width, and includes at least the zero-duration cell.
+When `K=N`, regular transport is unchanged and the tail stays empty at `P`.
 
 The carry adds a separate tail for continuous probability:
 

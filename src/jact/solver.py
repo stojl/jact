@@ -737,6 +737,7 @@ def _advance_solver_step_from_dynamics(
     row_hazards: tuple[_RowHazards, ...],
     same_step_transfers: _SameStepTransfers,
     tail_duration: float | None = None,
+    tail_collects_mass: bool = True,
 ) -> tuple[StateCarry, ...]:
     next_point_values = point_values
     next_point_log_values = point_log_values
@@ -747,16 +748,24 @@ def _advance_solver_step_from_dynamics(
             next_point_log_values = next_point_log_values.at[i].set(next_log_value)
             next_point_values = next_point_values.at[i].set(jnp.exp(next_log_value))
 
+    # A full-width grid has no omitted regular cells. Advance it with the
+    # uncompressed transport rule and keep the requested tail empty.
+    empty_tail = tail_duration is not None and not tail_collects_mass
     next_densities: list[jnp.ndarray] = []
     for i, hz in enumerate(row_hazards):
-        next_densities.append(
-            _advance_density(
-                densities[i],
-                hz.density_total,
-                same_step_transfers.next_inflow_zero[i],
-                same_step_transfers.next_inflow_one[i],
-            )
+        density = densities[i][..., :-1] if empty_tail else densities[i]
+        total_hazard = hz.density_total[..., :-1] if empty_tail else hz.density_total
+        next_density = _advance_density(
+            density,
+            total_hazard,
+            same_step_transfers.next_inflow_zero[i],
+            same_step_transfers.next_inflow_one[i],
         )
+        if empty_tail:
+            next_density = jnp.concatenate(
+                (next_density, jnp.zeros_like(densities[i][..., -1:])), axis=-1
+            )
+        next_densities.append(next_density)
 
     return _dense_state_to_tuple(
         jnp.stack(tuple(next_densities), axis=0),
@@ -1615,6 +1624,7 @@ def _midpoint_solver(
             next_state = _advance_solver_step_from_dynamics(
                 *dynamics,
                 tail_duration=config.probability_limit,
+                tail_collects_mass=config.width < config.n_steps,
             )
             return (next_state, block_cashflows, terminal_cashflows), None
 
