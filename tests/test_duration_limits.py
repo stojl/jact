@@ -487,6 +487,7 @@ def test_padded_multi_device_batch_matches_single_device():
     script = textwrap.dedent("""
         import jax
         import jax.numpy as jnp
+        from typing import Any
         from tests.test_duration_limits import (
             _space, _model, _cashflows, _assert_tree_close,
         )

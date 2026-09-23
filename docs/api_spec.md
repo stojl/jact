@@ -29,7 +29,8 @@ helpers live under public submodules:
   `DensityProbability`, `Density`, `PointMass`, `MarginalComponents`,
   `Tail`, `Full`) and the `ProbabilityOutput` union.
 - `jact.typing` — callable protocols (`Intensity`, `GroupedIntensity`,
-  `Payment`, `When`, `DurationAt`, `Weight`) and JAX's `ArrayLike` type.
+  `Payment`, `When`, `DurationAt`, `Weight`), the `Derived` mapping alias,
+  and JAX's `ArrayLike` type.
 - `jact.wrappers` — fitted-model intensity helpers (`bind_intensity`,
   `bind_grouped_intensity`, `bind_exit_intensity`).
 
@@ -81,8 +82,8 @@ Surface:
 | `has_transition(src, tgt)` | Whether `(src, tgt)` is declared |
 | `state_index(state)` | Zero-based index in `states` |
 | `reachable_from(state)` | Starting state first, then reachable states in original state order |
-| `build(transitions=..., exits=..., groups=...)` | Create a `Model` |
-| `cashflows({...})` | Create a `CashflowDeclaration` |
+| `build(transitions=..., exits=..., groups=..., derived=...)` | Create a `Model` |
+| `cashflows({...}, derived=...)` | Create a `CashflowDeclaration` |
 | `initial_at(state, duration=0.0)` | Create an `InitialDistribution` |
 | `initial_distribution(components=..., normalise=True)` | Create an `InitialDistribution` |
 | `initial_per_individual(...)` | Create an `InitialDistribution` from per-individual initial states |
@@ -109,6 +110,7 @@ model = state_space.build(
     transitions={...},
     exits={...},
     groups={...},
+    derived={...},
 )
 ```
 
@@ -128,6 +130,57 @@ Notes:
   non-callable assignments.
 - `exits` and `groups` are sliced at model-build time so the solver always sees
   one selected transition output, then broadcasts that output to `(batch, D)`.
+- `derived` contributes reusable fields to the shared exogenous graph described
+  below. It is stored on the model, not on the topology-only `StateSpace`.
+
+### Shared derived fields
+
+`StateSpace.build`, `StateSpace.cashflows`, `Model.solve`, and `jact.solve`
+accept an optional `derived` mapping. The three declaration scopes compose into
+one graph at solve time. Scope determines ownership and reuse; every callable
+receives the same resolved fields through its existing `**kwargs` interface.
+
+```python
+model = state_space.build(
+    transitions={("healthy", "dead"): mortality},
+    derived={
+        "age": lambda t, baseline_age: baseline_age + t,
+    },
+)
+cashflows = state_space.cashflows(
+    {"premium": jact.cashflows.StateRate({"healthy": premium})},
+    derived={"indexed_premium": lambda age, salary: salary * (1 + 0.01 * age)},
+)
+result = model.solve(
+    initial="healthy", horizon=10, steps_per_unit=12,
+    cashflows=cashflows,
+    derived={"discount": lambda t, interest: jnp.exp(-interest * t)},
+    baseline_age=baseline_age, salary=salary, interest=interest,
+)
+```
+
+Each field function's named parameters are its dependencies. They may refer to
+solve inputs, canonical solver fields `t` and `d`, or fields from any scope.
+Definitions are independent of the evolving probability and cashflow state.
+Fixed parameters can be captured in closures. Field functions need inspectable
+signatures with named parameters; `*args`, `**kwargs`, and positional-only
+parameters are rejected. An optional parameter with a default may omit its
+dependency. Fields must return JAX-compatible values.
+
+Before numerical solving, the combined graph rejects duplicate field names,
+names colliding with solve inputs or `t`, `d`, `initial`, or
+`initial_duration`, missing required dependencies, and cycles. Definitions do
+not override one another. Inputs and derived values keep their declared shapes;
+callables should add a duration axis explicitly when needed, such as
+`kwargs["age"][:, None]`.
+
+Input-only fields are resolved once per solve or device shard. Time and duration
+fields are resolved in the relevant solver evaluation context and reused by
+intensities, grouped intensities, and payments in that context. The solver
+applies each intensity or payment duration limit to `d` before resolving its
+fields. Event-time and duration-target callables receive input-only fields.
+Cashflow view weights receive input-only and time-derived fields; they have no
+state-duration context. Views consume fields but have no `derived` mapping.
 
 ### Reduction
 
@@ -325,13 +378,13 @@ Arguments:
 |---|---|---|
 | `t` | scalar float | Clock time |
 | `d` | `(1, D)` | Duration grid broadcast over batch |
-| `**kwargs` | scalar or `(batch, ...)` arrays | Solve-time covariates |
+| `**kwargs` | scalar or `(batch, ...)` arrays | Solve inputs and resolved derived fields |
 
 Interpretation:
 
 - `t` is clock time,
 - `d` is duration in the current state,
-- `**kwargs` are solve-time covariates. Scalars with shape `()` are replicated
+- `**kwargs` include solve inputs and derived fields. Scalars with shape `()` are replicated
   constants and do not define batch size. Non-scalar covariates use axis 0 as
   the batch axis. A rank-1 value such as `jnp.arange(batch_size)` is batched
   with one scalar per individual; a value with shape `(batch_size, 1)` is also
@@ -471,6 +524,7 @@ The returned object is a `CashflowDeclaration` with this surface:
 cashflows.state_space
 cashflows.names
 cashflows.component("premium")
+cashflows.derived
 ```
 
 Validation is structural:
@@ -706,6 +760,7 @@ Parameters:
 | `intensity_duration_limit` | float, int, or `None` | Keyword-only; hold intensities constant in duration above this cutoff |
 | `payment_duration_limit` | float, int, or `None` | Keyword-only; hold payment values constant in duration above this cutoff |
 | `probability_duration_limit` | float, int, or `None` | Keyword-only; compress older continuous probability into a fixed-duration tail |
+| `derived` | mapping or `None` | Solve-level named field functions, combined with model and cashflow fields |
 | `**kwargs` | arrays | Scalar constants or covariates with a shared leading batch dimension |
 
 Validation and defaults:
@@ -995,6 +1050,7 @@ Static at trace time:
 - `step_size`, `record_every`, and all three duration limits,
 - cashflow component names, kinds, and attachment points,
 - payment, `when`, and weight callable identities,
+- derived graph names, dependencies, and callable identities,
 - cashflow view names, kinds, and `terminal` flags.
 
 Traced at runtime:

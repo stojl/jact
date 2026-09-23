@@ -41,6 +41,7 @@ from ._cashflow_ir import (
     TransitionLumpSpec,
     TransitionPayment,
 )
+from ._derived import FieldGraph, FieldRuntime
 from .cashflows import (
     ByKind,
     ByState,
@@ -77,7 +78,7 @@ from .probability import (
     resolve_callback,
 )
 from .result import ModelResult
-from .typing import ArrayLike, Intensity, Payment, Weight
+from .typing import ArrayLike, Derived, Intensity, Payment, Weight
 
 __all__ = ["solve"]
 
@@ -136,11 +137,12 @@ def _evaluation_layout(
         slots[limit] = len(indices)
         threshold = limit
     gather = tuple(slots[min(value, limit)] for value in samples)
-    threshold_output_index = (
-        gather.index(slots[limit]) if limit in slots else None
-    )
+    threshold_output_index = gather.index(slots[limit]) if limit in slots else None
     return _EvaluationLayout(
-        tuple(indices), gather, threshold, threshold_output_index,
+        tuple(indices),
+        gather,
+        threshold,
+        threshold_output_index,
     )
 
 
@@ -148,14 +150,18 @@ def _evaluate_grid(
     fn: Intensity,
     t: jnp.ndarray,
     d: jnp.ndarray,
-    kwargs: dict[str, jnp.ndarray],
+    kwargs: FieldRuntime,
     batch_size: int,
     label: str,
     layout: _EvaluationLayout | None,
+    phase: str = "mid",
+    limit: float | None = None,
 ) -> jnp.ndarray:
     if layout is None:
         return _broadcast_grid_output(
-            fn(t, d, **kwargs), (batch_size, d.shape[-1]), label,
+            fn(t, d, **kwargs.resolve(("grid", phase, limit), t, d)),
+            (batch_size, d.shape[-1]),
+            label,
         )
     compact = d[:, jnp.asarray(layout.indices, dtype=jnp.int32)]
     if layout.threshold is not None:
@@ -163,7 +169,9 @@ def _evaluate_grid(
             (compact, jnp.full((1, 1), layout.threshold, dtype=d.dtype)), axis=-1
         )
     values = _broadcast_grid_output(
-        fn(t, compact, **kwargs), (batch_size, compact.shape[-1]), label
+        fn(t, compact, **kwargs.resolve(("grid", phase, limit), t, compact)),
+        (batch_size, compact.shape[-1]),
+        label,
     )
     return values[:, jnp.asarray(layout.gather, dtype=jnp.int32)]
 
@@ -210,11 +218,15 @@ class _SolverResult(NamedTuple):
 def _stack_state_densities(state: tuple[StateCarry, ...]) -> jnp.ndarray:
     # Treat the fixed tail as the final cell during survival and transfers.
     # Only the regular cells shift; the final cell accumulates survivors.
-    return jnp.stack(tuple(
-        carry.density if carry.tail is None else jnp.concatenate(
-            (carry.density, carry.tail.mass[:, None]), axis=-1
-        ) for carry in state
-    ), axis=0)
+    return jnp.stack(
+        tuple(
+            carry.density
+            if carry.tail is None
+            else jnp.concatenate((carry.density, carry.tail.mass[:, None]), axis=-1)
+            for carry in state
+        ),
+        axis=0,
+    )
 
 
 def _stack_point_masses(
@@ -283,8 +295,7 @@ def _broadcast_grid_output(
         return jnp.broadcast_to(arr, target_shape)
     except ValueError as exc:
         raise ValueError(
-            f"{label} with shape {arr.shape} cannot broadcast to "
-            f"{target_shape}."
+            f"{label} with shape {arr.shape} cannot broadcast to {target_shape}."
         ) from exc
 
 
@@ -298,8 +309,7 @@ def _broadcast_vector_output(
         return jnp.broadcast_to(arr, target_shape)
     except ValueError as exc:
         raise ValueError(
-            f"{label} with shape {arr.shape} cannot broadcast to "
-            f"{target_shape}."
+            f"{label} with shape {arr.shape} cannot broadcast to {target_shape}."
         ) from exc
 
 
@@ -321,9 +331,11 @@ def _evaluate_intensity_at_point(
     fn: Intensity,
     t: jnp.ndarray,
     d_per_individual: jnp.ndarray,
-    intensity_kwargs: dict[str, jnp.ndarray],
+    intensity_kwargs: FieldRuntime,
     duration_limit: float | None = None,
     threshold_value: jnp.ndarray | None = None,
+    context_key: object | None = None,
+    phase: str = "mid",
 ) -> jnp.ndarray:
     """Evaluate individual durations, reusing an available threshold sample."""
     d = d_per_individual
@@ -332,18 +344,30 @@ def _evaluate_intensity_at_point(
 
     def evaluate() -> jnp.ndarray:
         return _broadcast_point_output(
-            fn(t, d[:, None], **intensity_kwargs),
-            d.shape[0], "Point callable output",
+            fn(
+                t,
+                d[:, None],
+                **intensity_kwargs.resolve(
+                    ("point", phase, duration_limit, context_key), t, d[:, None]
+                ),
+            ),
+            d.shape[0],
+            "Point callable output",
         )
 
     if duration_limit is None or threshold_value is None:
         return evaluate()
     older = d_per_individual >= duration_limit
-    return cast(jnp.ndarray, jax.lax.cond(
-        jnp.all(older),
-        lambda: threshold_value,
-        lambda: jnp.where(older, threshold_value, evaluate()),
-    ))
+    if intensity_kwargs.graph.nodes:
+        return jnp.where(older, threshold_value, evaluate())
+    return cast(
+        jnp.ndarray,
+        jax.lax.cond(
+            jnp.all(older),
+            lambda: threshold_value,
+            lambda: jnp.where(older, threshold_value, evaluate()),
+        ),
+    )
 
 
 def _integrated_density_hazard(
@@ -351,13 +375,21 @@ def _integrated_density_hazard(
     t: jnp.ndarray,
     duration_mid: jnp.ndarray,
     step_size: float,
-    intensity_kwargs: dict[str, jnp.ndarray],
+    intensity_kwargs: FieldRuntime,
     batch_size: int,
     layout: _EvaluationLayout | None = None,
+    duration_limit: float | None = None,
 ) -> jnp.ndarray:
     midpoint = _evaluate_grid(
-        fn, t + 0.5 * step_size, duration_mid, intensity_kwargs,
-        batch_size, "Intensity output", layout,
+        fn,
+        t + 0.5 * step_size,
+        duration_mid,
+        intensity_kwargs,
+        batch_size,
+        "Intensity output",
+        layout,
+        "mid",
+        duration_limit,
     )
     return jnp.maximum(step_size * midpoint, 0.0)
 
@@ -367,25 +399,37 @@ def _integrated_point_hazard(
     t: jnp.ndarray,
     point_d_0: jnp.ndarray,
     step_size: float,
-    intensity_kwargs: dict[str, jnp.ndarray],
+    intensity_kwargs: FieldRuntime,
     duration_limit: float | None = None,
     threshold_hazard: jnp.ndarray | None = None,
+    source_index: int | None = None,
 ) -> jnp.ndarray:
     duration = point_d_0 + t + 0.5 * step_size
 
     def evaluate() -> jnp.ndarray:
         midpoint = _evaluate_intensity_at_point(
-            fn, t + 0.5 * step_size, duration, intensity_kwargs, duration_limit,
+            fn,
+            t + 0.5 * step_size,
+            duration,
+            intensity_kwargs,
+            duration_limit,
+            context_key=("source", source_index),
         )
         return jnp.maximum(step_size * midpoint, 0.0)
 
     if duration_limit is None or threshold_hazard is None:
         return evaluate()
     older = duration >= duration_limit
-    return cast(jnp.ndarray, jax.lax.cond(
-        jnp.all(older), lambda: threshold_hazard,
-        lambda: jnp.where(older, threshold_hazard, evaluate()),
-    ))
+    if intensity_kwargs.graph.nodes:
+        return jnp.where(older, threshold_hazard, evaluate())
+    return cast(
+        jnp.ndarray,
+        jax.lax.cond(
+            jnp.all(older),
+            lambda: threshold_hazard,
+            lambda: jnp.where(older, threshold_hazard, evaluate()),
+        ),
+    )
 
 
 def _transfer_factor(total_hazard: jnp.ndarray) -> jnp.ndarray:
@@ -476,12 +520,22 @@ def _call_payment(
     fn: Payment,
     t: jnp.ndarray,
     d: jnp.ndarray,
-    intensity_kwargs: dict[str, jnp.ndarray],
+    intensity_kwargs: FieldRuntime,
     target_shape: tuple[int, int],
     layout: _EvaluationLayout | None = None,
+    phase: str = "mid",
+    duration_limit: float | None = None,
 ) -> jnp.ndarray:
     return _evaluate_grid(
-        fn, t, d, intensity_kwargs, target_shape[0], "Payment output", layout,
+        fn,
+        t,
+        d,
+        intensity_kwargs,
+        target_shape[0],
+        "Payment output",
+        layout,
+        phase,
+        duration_limit,
     )
 
 
@@ -524,7 +578,7 @@ def _solver_step_dynamics(
     duration_mid: jnp.ndarray,
     step_size: float,
     solver_matrix: Sequence[Sequence[Intensity | None]],
-    intensity_kwargs: dict[str, jnp.ndarray],
+    intensity_kwargs: FieldRuntime,
     intensity_limit: float | None = None,
     intensity_layout: _EvaluationLayout | None = None,
 ) -> tuple[
@@ -558,6 +612,7 @@ def _solver_step_dynamics(
                 intensity_kwargs,
                 densities.shape[1],
                 intensity_layout,
+                intensity_limit,
             )
             density_total = density_total + density_hazard
             density_hazards.append((target_index, density_hazard))
@@ -571,6 +626,7 @@ def _solver_step_dynamics(
                     intensity_kwargs,
                     intensity_limit,
                     _threshold_value(density_hazard, intensity_layout),
+                    source_index,
                 )
                 point_total = point_total + point_hazard
                 point_hazards.append((target_index, point_hazard))
@@ -648,9 +704,7 @@ def _compute_same_step_transfers(
 
                 for j, density_hazard in hz.density_hazards:
                     chained = (
-                        inflow
-                        * (0.5 * density_hazard[..., 0])
-                        * half_transfer_factor
+                        inflow * (0.5 * density_hazard[..., 0]) * half_transfer_factor
                     )
                     next_inflow_zero = next_inflow_zero.at[j].add(chained)
                     chained_from_source.append(chained)
@@ -691,9 +745,7 @@ def _advance_solver_step_from_dynamics(
         if point_mask[i]:
             next_log_value = point_log_values[i] - hz.point_total
             next_point_log_values = next_point_log_values.at[i].set(next_log_value)
-            next_point_values = next_point_values.at[i].set(
-                jnp.exp(next_log_value)
-            )
+            next_point_values = next_point_values.at[i].set(jnp.exp(next_log_value))
 
     next_densities: list[jnp.ndarray] = []
     for i, hz in enumerate(row_hazards):
@@ -728,7 +780,7 @@ def _compute_cashflow_step(
     duration_mid: jnp.ndarray,
     duration_left: jnp.ndarray,
     step_size: float,
-    intensity_kwargs: dict[str, jnp.ndarray],
+    intensity_kwargs: FieldRuntime,
     cashflow_components: CashflowComponentSpecs,
     scheduled_events: ResolvedScheduledEvents,
     duration_events: ResolvedDurationEvents,
@@ -764,6 +816,7 @@ def _compute_cashflow_step(
                     intensity_kwargs,
                     (densities.shape[1], duration_mid.shape[-1]),
                     payment_mid_layout,
+                    duration_limit=config.payment_limit,
                 )
                 contribution = step_size * jnp.sum(
                     density_midpoint * payment,
@@ -777,6 +830,7 @@ def _compute_cashflow_step(
                         intensity_kwargs,
                         config.payment_limit,
                         _threshold_value(payment, payment_mid_layout),
+                        context_key=("source", state_index),
                     )
                     point_midpoint = jnp.exp(
                         point_log_values[state_index] - 0.5 * hz.point_total
@@ -792,8 +846,10 @@ def _compute_cashflow_step(
                             t_mid,
                             jnp.full_like(template, 0.5 * step_size),
                             intensity_kwargs,
+                            context_key=("inflow", state_index),
                         )
-                        if config.payment_limit is None else payment[:, 0]
+                        if config.payment_limit is None
+                        else payment[:, 0]
                     )
                     contribution = contribution + (
                         0.5 * step_size * same_step_inflow * same_step_payment
@@ -821,6 +877,7 @@ def _compute_cashflow_step(
                     intensity_kwargs,
                     (densities.shape[1], duration_mid.shape[-1]),
                     payment_mid_layout,
+                    duration_limit=config.payment_limit,
                 )
                 contribution = jnp.sum(
                     densities[source_index]
@@ -838,6 +895,7 @@ def _compute_cashflow_step(
                         intensity_kwargs,
                         config.payment_limit,
                         _threshold_value(payment, payment_mid_layout),
+                        context_key=("source", source_index),
                     )
                     contribution = contribution + (
                         point_values[source_index]
@@ -856,6 +914,7 @@ def _compute_cashflow_step(
                         intensity_kwargs,
                         config.payment_limit,
                         _threshold_value(payment, payment_mid_layout),
+                        context_key=("chained", source_index),
                     )
                     contribution = contribution + chained_exit * chained_payment
                 component_total, by_state, by_kind = _add_cashflow_contribution(
@@ -899,6 +958,8 @@ def _compute_cashflow_step(
                     intensity_kwargs,
                     (densities.shape[1], duration_left.shape[-1]),
                     payment_left_layout,
+                    phase="left",
+                    duration_limit=config.payment_limit,
                 )
                 contribution = active * jnp.sum(
                     densities[state_index] * payment,
@@ -912,6 +973,8 @@ def _compute_cashflow_step(
                         intensity_kwargs,
                         config.payment_limit,
                         _threshold_value(payment, payment_left_layout),
+                        context_key=("source", state_index),
+                        phase="left",
                     )
                     contribution = contribution + (
                         active * point_values[state_index] * point_payment
@@ -974,12 +1037,12 @@ def _compute_cashflow_step(
                     effective_at_duration,
                     intensity_kwargs,
                     config.payment_limit,
+                    context_key=("duration_event", component_index, state_index),
+                    phase="left",
                 )
-                contribution = (
-                    in_horizon & (at_duration_index < config.width)
-                ).astype(template.dtype) * (
-                    density_at_duration * payment
-                )
+                contribution = (in_horizon & (at_duration_index < config.width)).astype(
+                    template.dtype
+                ) * (density_at_duration * payment)
 
                 if point_mask[state_index]:
                     remaining = effective_at_duration - point_d_0[state_index]
@@ -1116,12 +1179,17 @@ def _source_value(
 def _evaluate_weight(
     weight: Weight | Scalar | None,
     t: jnp.ndarray,
-    intensity_kwargs: dict[str, jnp.ndarray],
+    intensity_kwargs: FieldRuntime,
     template: jnp.ndarray,
+    phase: str,
 ) -> jnp.ndarray:
     if weight is None:
         return jnp.ones_like(template)
-    value = weight(t, **intensity_kwargs) if callable(weight) else weight
+    value = (
+        weight(t, **intensity_kwargs.resolve(("time", phase), t))
+        if callable(weight)
+        else weight
+    )
     arr = jnp.asarray(value, dtype=template.dtype)
     return _broadcast_vector_output(arr, template.shape, "Cashflow view weight")
 
@@ -1135,7 +1203,7 @@ def _compute_cashflow_views(
     event_by_kind: tuple[jnp.ndarray, ...],
     t: jnp.ndarray,
     step_size: float,
-    intensity_kwargs: dict[str, jnp.ndarray],
+    intensity_kwargs: FieldRuntime,
     cashflow_views: PreparedCashflowViews,
     template: jnp.ndarray,
 ) -> CashflowViewValues:
@@ -1155,12 +1223,14 @@ def _compute_cashflow_views(
             t + 0.5 * step_size,
             intensity_kwargs,
             template,
+            "mid",
         )
         event_factor = _evaluate_weight(
             view.weight,
             t,
             intensity_kwargs,
             template,
+            "left",
         )
         view_values.append(
             tuple(
@@ -1284,8 +1354,22 @@ def _add_selected_view_values(
 
 # JAX accepts arbitrary PyTree axis specifications here, but its public typing
 # does not currently expose a corresponding recursive alias.
-_PMAP_IN_AXES: Any = (0, None, None, None, None, 0, None, None, None, None, None, None)
-_PMAP_STATIC_ARGNUMS = (3, 4, 7, 8, 9, 10, 11)
+_PMAP_IN_AXES: Any = (
+    0,
+    None,
+    None,
+    None,
+    None,
+    0,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+)
+_PMAP_STATIC_ARGNUMS = (3, 4, 7, 8, 9, 10, 11, 12)
 _jax_checkpoint: Callable[[Callable[..., Any]], Callable[..., Any]] = getattr(
     jax,
     "checkpoint",
@@ -1310,21 +1394,26 @@ def _midpoint_solver_pmapped_all_devices(
     cashflow_components: CashflowComponentSpecs = (),
     cashflow_views: PreparedCashflowViews = (),
     duration_config: _DurationConfig | None = None,
+    field_graph: FieldGraph = FieldGraph(()),
 ) -> _SolverResult:
     intensity_kwargs = {**scalar_kwargs, **batch_kwargs}
-    return cast(_SolverResult, _midpoint_solver(
-        state_0,
-        duration_mid,
-        duration_left,
-        step_size,
-        solver_matrix,
-        intensity_kwargs,
-        prob_callback,
-        record_every,
-        cashflow_components,
-        cashflow_views,
-        duration_config,
-    ))
+    return cast(
+        _SolverResult,
+        _midpoint_solver(
+            state_0,
+            duration_mid,
+            duration_left,
+            step_size,
+            solver_matrix,
+            intensity_kwargs,
+            prob_callback,
+            record_every,
+            cashflow_components,
+            cashflow_views,
+            duration_config,
+            field_graph,
+        ),
+    )
 
 
 def _midpoint_solver_pmapped_on_devices(
@@ -1351,20 +1440,25 @@ def _midpoint_solver_pmapped_wrapper(
     cashflow_components: CashflowComponentSpecs = (),
     cashflow_views: PreparedCashflowViews = (),
     duration_config: _DurationConfig | None = None,
+    field_graph: FieldGraph = FieldGraph(()),
 ) -> _SolverResult:
-    return cast(_SolverResult, _midpoint_solver(
-        state_0,
-        duration_mid,
-        duration_left,
-        step_size,
-        solver_matrix,
-        {**scalar_kwargs, **batch_kwargs},
-        prob_callback,
-        record_every,
-        cashflow_components,
-        cashflow_views,
-        duration_config,
-    ))
+    return cast(
+        _SolverResult,
+        _midpoint_solver(
+            state_0,
+            duration_mid,
+            duration_left,
+            step_size,
+            solver_matrix,
+            {**scalar_kwargs, **batch_kwargs},
+            prob_callback,
+            record_every,
+            cashflow_components,
+            cashflow_views,
+            duration_config,
+            field_graph,
+        ),
+    )
 
 
 @partial(
@@ -1377,6 +1471,7 @@ def _midpoint_solver_pmapped_wrapper(
         "cashflow_components",
         "cashflow_views",
         "duration_config",
+        "field_graph",
     ],
 )
 def _midpoint_solver(
@@ -1391,37 +1486,52 @@ def _midpoint_solver(
     cashflow_components: CashflowComponentSpecs = (),
     cashflow_views: PreparedCashflowViews = (),
     duration_config: _DurationConfig | None = None,
+    field_graph: FieldGraph = FieldGraph(()),
 ) -> _SolverResult:
     """Run the midpoint solver and record probability outputs."""
     if duration_config is None:
         duration_config = _DurationConfig(
-            duration_mid.shape[-1], duration_mid.shape[-1], None, None, None,
+            duration_mid.shape[-1],
+            duration_mid.shape[-1],
+            None,
+            None,
+            None,
         )
     config = duration_config
     n_steps = config.n_steps
     intensity_layout = _evaluation_layout(
-        config, step_size, 0.5, config.intensity_limit,
+        config,
+        step_size,
+        0.5,
+        config.intensity_limit,
     )
     payment_mid_layout = _evaluation_layout(
-        config, step_size, 0.5, config.payment_limit,
+        config,
+        step_size,
+        0.5,
+        config.payment_limit,
     )
     payment_left_layout = _evaluation_layout(
-        config, step_size, 0.0, config.payment_limit,
+        config,
+        step_size,
+        0.0,
+        config.payment_limit,
     )
     n_records = n_steps // record_every
     has_cashflows = bool(cashflow_components)
     value_template = state_0[0].density[:, 0]
     block_0 = _zero_view_values(cashflow_views, value_template)
     terminal_0 = _zero_view_values(cashflow_views, value_template)
+    input_fields = field_graph.input_only(intensity_kwargs)
     scheduled_events = _compute_scheduled_events(
         cashflow_components,
         step_size,
-        intensity_kwargs,
+        input_fields,
     )
     duration_components = _compute_duration_events(
         cashflow_components,
         step_size,
-        intensity_kwargs,
+        input_fields,
     )
 
     def block_scan(
@@ -1451,6 +1561,7 @@ def _midpoint_solver(
         ]:
             inner_state, block_cashflows, terminal_cashflows = inner_carry
             current_t = block_start + offset * step_size
+            fields = FieldRuntime(field_graph, input_fields)
 
             dynamics = _solver_step_dynamics(
                 inner_state,
@@ -1458,7 +1569,7 @@ def _midpoint_solver(
                 duration_mid,
                 step_size,
                 solver_matrix,
-                intensity_kwargs,
+                fields,
                 config.intensity_limit,
                 intensity_layout,
             )
@@ -1468,7 +1579,7 @@ def _midpoint_solver(
                 duration_mid,
                 duration_left,
                 step_size,
-                intensity_kwargs,
+                fields,
                 cashflow_components,
                 scheduled_events,
                 duration_components,
@@ -1485,7 +1596,7 @@ def _midpoint_solver(
                 aggregation.event_by_kind,
                 current_t,
                 step_size,
-                intensity_kwargs,
+                fields,
                 cashflow_views,
                 value_template,
             )
@@ -1502,7 +1613,8 @@ def _midpoint_solver(
                 terminal=True,
             )
             next_state = _advance_solver_step_from_dynamics(
-                *dynamics, tail_duration=config.probability_limit,
+                *dynamics,
+                tail_duration=config.probability_limit,
             )
             return (next_state, block_cashflows, terminal_cashflows), None
 
@@ -1593,9 +1705,7 @@ def _solver_value_dtype(
             *kwargs.values(),
         )
     ]
-    float_leaves = [
-        leaf for leaf in leaves if jnp.issubdtype(leaf.dtype, jnp.inexact)
-    ]
+    float_leaves = [leaf for leaf in leaves if jnp.issubdtype(leaf.dtype, jnp.inexact)]
     if not float_leaves:
         return cast(_DType, jnp.asarray(0.0).dtype)
     return cast(_DType, jnp.result_type(*float_leaves))
@@ -1654,8 +1764,7 @@ def _canonicalize_initial(
             has_nonzero_duration = initial_duration != 0.0
         if has_nonzero_duration:
             raise ValueError(
-                "initial_duration is invalid when initial is an "
-                "InitialDistribution."
+                "initial_duration is invalid when initial is an InitialDistribution."
             )
         return initial
     if isinstance(initial, str):
@@ -1725,9 +1834,7 @@ def _prepare_cashflow_components(
                 for state, fn in component.payments.items()
                 if state in state_index
             )
-            prepared.append(
-                ScheduledEventSpec(when=component.when, payments=payments)
-            )
+            prepared.append(ScheduledEventSpec(when=component.when, payments=payments))
         elif isinstance(component, DurationEvent):  # pyright: ignore[reportUnnecessaryIsInstance]
             targets = tuple(
                 DurationTargetPayment(
@@ -1825,10 +1932,13 @@ def _format_cashflow_view_values(
         if view.output == "single":
             formatted[view.name] = view_values[0]
         else:
-            formatted[view.name] = cast(FormattedCashflowValue, {
-                leaf_name: value
-                for leaf_name, value in zip(view.leaf_names, view_values)
-            })
+            formatted[view.name] = cast(
+                FormattedCashflowValue,
+                {
+                    leaf_name: value
+                    for leaf_name, value in zip(view.leaf_names, view_values)
+                },
+            )
     return formatted
 
 
@@ -1873,21 +1983,26 @@ def _run_midpoint_solver(
     cashflow_views: PreparedCashflowViews,
     devices: tuple[Any, ...],
     duration_config: _DurationConfig,
+    field_graph: FieldGraph,
 ) -> _SolverResult:
     if len(devices) <= 1:
-        return cast(_SolverResult, _midpoint_solver(
-            state_0,
-            duration_mid,
-            duration_left,
-            step_size,
-            solver_matrix,
-            intensity_kwargs,
-            prob_callback,
-            record_every,
-            cashflow_components,
-            cashflow_views,
-            duration_config,
-        ))
+        return cast(
+            _SolverResult,
+            _midpoint_solver(
+                state_0,
+                duration_mid,
+                duration_left,
+                step_size,
+                solver_matrix,
+                intensity_kwargs,
+                prob_callback,
+                record_every,
+                cashflow_components,
+                cashflow_views,
+                duration_config,
+                field_graph,
+            ),
+        )
 
     sharded_state_0, batch_size = _shard_batch_tree(state_0, len(devices))
     scalar_kwargs, batch_kwargs = _split_scalar_and_batch_kwargs(intensity_kwargs)
@@ -1915,6 +2030,7 @@ def _run_midpoint_solver(
             cashflow_components,
             cashflow_views,
             duration_config,
+            field_graph,
         )
     else:
         sharded_result = _midpoint_solver_pmapped_on_devices(devices)(
@@ -1930,6 +2046,7 @@ def _run_midpoint_solver(
             cashflow_components,
             cashflow_views,
             duration_config,
+            field_graph,
         )
     return _unshard_batch_tree(sharded_result, batch_size)
 
@@ -1941,9 +2058,7 @@ def solve(
     horizon: int,
     steps_per_unit: int,
     initial_duration: ArrayLike = 0.0,
-    probability: (
-        StateProbability | DensityProbability | Density
-    ) = StateProbability(),
+    probability: (StateProbability | DensityProbability | Density) = StateProbability(),
     cashflows: CashflowDeclaration | None = None,
     cashflow_views: Mapping[str, CashflowView] | None = None,
     record_every: int = 1,
@@ -1952,6 +2067,7 @@ def solve(
     intensity_duration_limit: float | None = None,
     payment_duration_limit: float | None = None,
     probability_duration_limit: float | None = None,
+    derived: Derived | None = None,
     **kwargs: Any,
 ) -> ModelResult[jax.Array]: ...
 
@@ -1972,6 +2088,7 @@ def solve(
     intensity_duration_limit: float | None = None,
     payment_duration_limit: float | None = None,
     probability_duration_limit: float | None = None,
+    derived: Derived | None = None,
     **kwargs: Any,
 ) -> ModelResult[PointMassResult]: ...
 
@@ -1992,6 +2109,7 @@ def solve(
     intensity_duration_limit: float | None = None,
     payment_duration_limit: float | None = None,
     probability_duration_limit: float | None = None,
+    derived: Derived | None = None,
     **kwargs: Any,
 ) -> ModelResult[TailResult]: ...
 
@@ -2012,6 +2130,7 @@ def solve(
     intensity_duration_limit: float | None = None,
     payment_duration_limit: float | None = None,
     probability_duration_limit: float | None = None,
+    derived: Derived | None = None,
     **kwargs: Any,
 ) -> ModelResult[ComponentsResult]: ...
 
@@ -2032,6 +2151,7 @@ def solve(
     intensity_duration_limit: float | None = None,
     payment_duration_limit: float | None = None,
     probability_duration_limit: float | None = None,
+    derived: Derived | None = None,
     **kwargs: Any,
 ) -> ModelResult[None]: ...
 
@@ -2052,6 +2172,7 @@ def solve(
     intensity_duration_limit: float | None = None,
     payment_duration_limit: float | None = None,
     probability_duration_limit: float | None = None,
+    derived: Derived | None = None,
     **kwargs: Any,
 ) -> ModelResult[_PyTreeT]: ...
 
@@ -2072,6 +2193,7 @@ def solve(
     intensity_duration_limit: float | None = None,
     payment_duration_limit: float | None = None,
     probability_duration_limit: float | None = None,
+    derived: Derived | None = None,
     **kwargs: Any,
 ) -> ModelResult[PointMassResult]: ...
 
@@ -2092,6 +2214,7 @@ def solve(
     intensity_duration_limit: float | None = None,
     payment_duration_limit: float | None = None,
     probability_duration_limit: float | None = None,
+    derived: Derived | None = None,
     **kwargs: Any,
 ) -> ModelResult[TailResult]: ...
 
@@ -2112,6 +2235,7 @@ def solve(
     intensity_duration_limit: float | None = None,
     payment_duration_limit: float | None = None,
     probability_duration_limit: float | None = None,
+    derived: Derived | None = None,
     **kwargs: Any,
 ) -> ModelResult[ComponentsResult]: ...
 
@@ -2132,6 +2256,7 @@ def solve(
     intensity_duration_limit: float | None = None,
     payment_duration_limit: float | None = None,
     probability_duration_limit: float | None = None,
+    derived: Derived | None = None,
     **kwargs: Any,
 ) -> ModelResult[None]: ...
 
@@ -2152,6 +2277,7 @@ def solve(
     intensity_duration_limit: float | None = None,
     payment_duration_limit: float | None = None,
     probability_duration_limit: float | None = None,
+    derived: Derived | None = None,
     **kwargs: Any,
 ) -> ModelResult[_PyTreeT]: ...
 
@@ -2171,6 +2297,7 @@ def solve(
     intensity_duration_limit: float | None = None,
     payment_duration_limit: float | None = None,
     probability_duration_limit: float | None = None,
+    derived: Derived | None = None,
     **kwargs: Any,
 ) -> ModelResult[Any]:
     """Compute probabilities and cashflows, optionally limiting duration.
@@ -2181,9 +2308,7 @@ def solve(
     initial point masses remain separate. See ``docs/api_spec.md`` for details.
     """
     if "freeze_initial" in kwargs:
-        raise TypeError(
-            "solve() got an unexpected keyword argument 'freeze_initial'"
-        )
+        raise TypeError("solve() got an unexpected keyword argument 'freeze_initial'")
     if "callback" in kwargs:
         raise TypeError("solve() got an unexpected keyword argument 'callback'")
 
@@ -2194,21 +2319,23 @@ def solve(
         raise ValueError(f"Reserved covariate names are not allowed: {names}")
 
     intensity_duration_limit = _validate_duration_limit(
-        "intensity_duration_limit", intensity_duration_limit,
+        "intensity_duration_limit",
+        intensity_duration_limit,
     )
     payment_duration_limit = _validate_duration_limit(
-        "payment_duration_limit", payment_duration_limit,
+        "payment_duration_limit",
+        payment_duration_limit,
     )
     probability_duration_limit = _validate_duration_limit(
-        "probability_duration_limit", probability_duration_limit,
+        "probability_duration_limit",
+        probability_duration_limit,
     )
     horizon = _validate_positive_integer("horizon", horizon)
     steps_per_unit = _validate_positive_integer("steps_per_unit", steps_per_unit)
     solver_steps = steps_per_unit * horizon
     if record_every <= 0 or solver_steps % record_every != 0:
         raise ValueError(
-            "record_every must be a positive integer dividing "
-            "horizon * steps_per_unit."
+            "record_every must be a positive integer dividing horizon * steps_per_unit."
         )
 
     probability_disabled = probability is None
@@ -2223,6 +2350,13 @@ def solve(
     if cashflows is not None:
         _prepare_cashflow_views(cashflows, cashflow_views, model.state_space.states)
 
+    field_graph = FieldGraph.build(
+        model.derived,
+        cashflows.derived if cashflows is not None else None,
+        derived,
+        kwargs,
+    )
+
     initial_distribution = _canonicalize_initial(initial, initial_duration)
     model_states = model.state_space.states
     initial_distribution.validate_for_model(model_states)
@@ -2233,14 +2367,17 @@ def solve(
     grid = jnp.linspace(0, horizon, solver_steps + 1, endpoint=True)[None, :]
     width = _duration_width(probability_duration_limit, steps_per_unit, solver_steps)
     duration_left = grid[:, :width]
-    duration_mid = 0.5 * (duration_left + grid[:, 1:width + 1])
+    duration_mid = 0.5 * (duration_left + grid[:, 1 : width + 1])
     if probability_duration_limit is not None:
         tail_grid = jnp.full((1, 1), probability_duration_limit, dtype=grid.dtype)
         duration_left = jnp.concatenate((duration_left, tail_grid), axis=-1)
         duration_mid = jnp.concatenate((duration_mid, tail_grid), axis=-1)
     duration_config = _DurationConfig(
-        solver_steps, width, intensity_duration_limit,
-        payment_duration_limit, probability_duration_limit,
+        solver_steps,
+        width,
+        intensity_duration_limit,
+        payment_duration_limit,
+        probability_duration_limit,
     )
     step_size = 1 / steps_per_unit
     prob_callback = resolve_callback(probability, reduced.reachable_states)
@@ -2274,9 +2411,7 @@ def solve(
         batch_size = 1
     value_dtype = _solver_value_dtype(canonical, intensity_kwargs)
 
-    declared_index = {
-        state: i for i, state in enumerate(canonical.states)
-    }
+    declared_index = {state: i for i, state in enumerate(canonical.states)}
     state_0: list[StateCarry] = []
     for state_name in reduced.reachable_states:
         density = jnp.zeros((batch_size, width), dtype=value_dtype)
@@ -2292,8 +2427,9 @@ def solve(
         if probability_duration_limit is not None:
             tail = _TailProbability(
                 mass=jnp.zeros((batch_size,), dtype=value_dtype),
-                duration=jnp.full((batch_size,), probability_duration_limit,
-                                  dtype=value_dtype),
+                duration=jnp.full(
+                    (batch_size,), probability_duration_limit, dtype=value_dtype
+                ),
             )
         state_0.append(StateCarry(density=density, point_mass=point_mass, tail=tail))
     selected_devices = _resolve_devices(devices)
@@ -2310,6 +2446,7 @@ def solve(
         prepared_cashflow_views,
         selected_devices,
         duration_config,
+        field_graph,
     )
     probability_out = None if probability_disabled else result.probability
     cashflows_out = None

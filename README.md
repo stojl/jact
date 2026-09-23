@@ -36,6 +36,33 @@ ages = jnp.linspace(30, 80, 1_000)
 result = model.solve(initial="healthy", horizon=30, steps_per_unit=12, age=ages)
 ```
 
+## Shared derived fields
+
+Declare reusable features on a model, cashflow declaration, or individual
+solve. Field function parameters name their dependencies on solve inputs,
+`t`, `d`, or other fields:
+
+```python
+model = state_space.build(
+    transitions={
+        ("healthy", "disabled"): onset_fn,
+        ("healthy", "dead"): mortality_fn,
+        ("disabled", "dead"): disabled_mort_fn,
+    },
+    derived={"attained_age": lambda t, baseline_age: baseline_age + t},
+)
+
+# onset_fn, mortality_fn, and payment functions can read
+# kwargs["attained_age"] without rebuilding it separately.
+result = model.solve(
+    initial="healthy", horizon=30, steps_per_unit=12,
+    baseline_age=ages,
+)
+```
+
+`derived` is also accepted by `state_space.cashflows(...)` and `model.solve(...)`.
+The combined field graph rejects duplicate names, missing inputs, and cycles.
+
 ## Fitted-model intensity wrappers
 
 Use `jact.wrappers.bind_intensity()` when a fitted model has a separate feature

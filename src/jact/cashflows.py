@@ -11,7 +11,7 @@ from typing import NamedTuple, TypeAlias, cast
 import jax.numpy as jnp
 
 from .state_space import StateSpace
-from .typing import ArrayLike, DurationAt, Payment, Weight, When
+from .typing import ArrayLike, Derived, DurationAt, Payment, Weight, When
 
 Scalar = bool | int | float | complex
 
@@ -115,6 +115,7 @@ class CashflowDeclaration:
 
     state_space: StateSpace
     components: tuple[tuple[str, CashflowComponent], ...]
+    derived: Derived | None = None
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -149,10 +150,7 @@ def _validate_payment_mapping(
     values = cast(Mapping[object, object], payments)
     for fn in values.values():
         _check_callable(fn, f"{field} values")
-    return {
-        key: cast(Payment, fn)
-        for key, fn in values.items()
-    }
+    return {key: cast(Payment, fn) for key, fn in values.items()}
 
 
 def _validate_at_duration_mapping(
@@ -162,9 +160,7 @@ def _validate_at_duration_mapping(
     if not isinstance(at_durations, Mapping) or not at_durations:
         raise ValueError(f"{field} must be a non-empty mapping.")
     normalised: dict[object, ArrayLike | DurationAt] = {}
-    for state, at_duration in cast(
-        Mapping[object, object], at_durations
-    ).items():
+    for state, at_duration in cast(Mapping[object, object], at_durations).items():
         if callable(at_duration):
             normalised[state] = cast(DurationAt, at_duration)
         elif _is_scalar_array_like(at_duration):
@@ -204,6 +200,7 @@ def _normalise_weight(
 def validate_cashflow_components(
     state_space: StateSpace,
     components: Mapping[str, CashflowComponent],
+    derived: Derived | None = None,
 ) -> CashflowDeclaration:
     """Validate and freeze a component mapping for a state space."""
     if not isinstance(components, Mapping) or not components:  # pyright: ignore[reportUnnecessaryIsInstance]
@@ -223,9 +220,7 @@ def validate_cashflow_components(
                 f"StateRate('{name}').payments",
             )
             _validate_state_payments(state_space, payments)
-            frozen_component = StateRate(
-                payments=cast(Mapping[str, Payment], payments)
-            )
+            frozen_component = StateRate(payments=cast(Mapping[str, Payment], payments))
         elif isinstance(component, TransitionLump):
             payments = _validate_payment_mapping(
                 component.payments,
@@ -282,9 +277,7 @@ def validate_cashflow_components(
                     "must use the same state keys."
                 )
             frozen_component = DurationEvent(
-                at_durations=cast(
-                    Mapping[str, ArrayLike | DurationAt], at_durations
-                ),
+                at_durations=cast(Mapping[str, ArrayLike | DurationAt], at_durations),
                 payments=cast(Mapping[str, Payment], payments),
             )
         else:
@@ -294,7 +287,9 @@ def validate_cashflow_components(
             )
         frozen.append((name, frozen_component))
 
-    return CashflowDeclaration(state_space=state_space, components=tuple(frozen))
+    return CashflowDeclaration(
+        state_space=state_space, components=tuple(frozen), derived=dict(derived or {})
+    )
 
 
 def _validate_view_common(view: CashflowView) -> None:
@@ -350,8 +345,7 @@ def validate_cashflow_views(
             )
             if view.name is not None and view.name not in component_names:
                 raise ValueError(
-                    f"Raw view '{name}' references unknown component "
-                    f"'{view.name}'."
+                    f"Raw view '{name}' references unknown component '{view.name}'."
                 )
         elif isinstance(view, Group):
             if isinstance(view.members, str) or not view.members:
@@ -360,8 +354,7 @@ def validate_cashflow_views(
             for member in members:
                 if member not in component_names:
                     raise ValueError(
-                        f"Group view '{name}' references unknown component "
-                        f"'{member}'."
+                        f"Group view '{name}' references unknown component '{member}'."
                     )
             common = _normalised_view(view)
             view = Group(
