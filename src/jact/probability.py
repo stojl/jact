@@ -71,46 +71,51 @@ class _PointMass:
     user-facing reducers expose point-mass data as plain dicts.
     """
 
-    __slots__ = ("value", "d_0", "log_value")
+    __slots__ = ("value", "d_0", "initial_value", "log_survival")
 
     def __init__(
         self,
         value: jnp.ndarray,
         d_0: jnp.ndarray,
-        log_value: jnp.ndarray | None = None,
+        initial_value: jnp.ndarray | None = None,
+        log_survival: jnp.ndarray | None = None,
     ) -> None:
         value_shape = jnp.shape(value)
         _validate_shape("d_0", d_0, value_shape)
-        if log_value is not None:
-            _validate_shape("log_value", log_value, value_shape)
+        if initial_value is not None:
+            _validate_shape("initial_value", initial_value, value_shape)
+        if log_survival is not None:
+            _validate_shape("log_survival", log_survival, value_shape)
         _validate_non_negative_if_concrete(value)
         self.value = value
         self.d_0 = d_0
-        self.log_value = (
-            jnp.where(value > 0, jnp.log(value), -jnp.inf)
-            if log_value is None
-            else log_value
+        # Keep mass separate from survival so zero initial mass has a finite,
+        # nonzero derivative. Accumulating log survival retains small hazards.
+        self.initial_value = value if initial_value is None else initial_value
+        self.log_survival = (
+            jnp.zeros_like(value) if log_survival is None else log_survival
         )
 
     def tree_flatten(
         self,
     ) -> tuple[
-        tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
+        tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray],
         None,
     ]:
-        return (self.value, self.d_0, self.log_value), None
+        return (self.value, self.d_0, self.initial_value, self.log_survival), None
 
     @classmethod
     def tree_unflatten(
         cls,
         _aux: None,
-        children: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
+        children: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray],
     ) -> _PointMass:
-        value, d_0, log_value = children
+        value, d_0, initial_value, log_survival = children
         self = cls.__new__(cls)
         self.value = value
         self.d_0 = d_0
-        self.log_value = log_value
+        self.initial_value = initial_value
+        self.log_survival = log_survival
         return self
 
 

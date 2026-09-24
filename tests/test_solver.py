@@ -208,15 +208,16 @@ class TestPointMassValidation:
                 d_0=jnp.zeros((3, 2)),
             )
 
-    def test_rejects_incompatible_explicit_log_value_shape(self):
+    @pytest.mark.parametrize("field", ["initial_value", "log_survival"])
+    def test_rejects_incompatible_survival_shapes(self, field):
         with pytest.raises(
             ValueError,
-            match=r"log_value must have shape \(2, 3\)",
+            match=rf"{field} must have shape \(2, 3\)",
         ):
             _PointMass(
                 value=jnp.ones((2, 3)),
                 d_0=jnp.zeros((2, 3)),
-                log_value=jnp.zeros((2, 2)),
+                **{field: jnp.zeros((2, 2))},
             )
 
     def test_rejects_negative_concrete_value(self):

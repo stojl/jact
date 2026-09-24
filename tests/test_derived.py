@@ -226,6 +226,87 @@ def test_fields_are_resolved_once_per_context_and_input_fields_once_per_solve():
     assert counts == {"input": 1, "time": 1, "duration": 2}
 
 
+def test_hoisted_grid_fields_match_inline_point_and_payment_contexts():
+    ss = jact.StateSpace(["active", "dead"], [("active", "dead")])
+
+    def derived_value(t, d, **kw):
+        return kw["surface"]
+
+    def inline_value(t, d, **kw):
+        return jnp.sin(d * kw["scale"]) + 0.01 * t
+
+    derived_model = ss.build(
+        transitions={("active", "dead"): derived_value},
+        derived={
+            "basis": lambda d, scale: jnp.sin(d * scale),
+            "surface": lambda t, basis: basis + 0.01 * t,
+        },
+    )
+    inline_model = ss.build(transitions={("active", "dead"): inline_value})
+    derived_cashflows = ss.cashflows(
+        {
+            "rate": jact.cashflows.StateRate({"active": derived_value}),
+            "event": jact.cashflows.ScheduledEvent(
+                when=lambda **kw: 0.5, payments={"active": derived_value}
+            ),
+        }
+    )
+    inline_cashflows = ss.cashflows(
+        {
+            "rate": jact.cashflows.StateRate({"active": inline_value}),
+            "event": jact.cashflows.ScheduledEvent(
+                when=lambda **kw: 0.5, payments={"active": inline_value}
+            ),
+        }
+    )
+    common: dict[str, Any] = dict(
+        initial="active",
+        initial_duration=jnp.array([0.0, 0.25]),
+        horizon=1,
+        steps_per_unit=4,
+        intensity_duration_limit=0.6,
+        payment_duration_limit=0.8,
+        probability=jact.probability.Full(),
+        scale=jnp.array([0.7, 1.2])[:, None],
+    )
+    actual = derived_model.solve(cashflows=derived_cashflows, **common)
+    expected = inline_model.solve(cashflows=inline_cashflows, **common)
+    _assert_tree_close(actual.probability, expected.probability)
+    _assert_tree_close(actual.cashflows, expected.cashflows)
+
+
+def test_compiled_duration_grid_transform_is_outside_scan():
+    ss = jact.StateSpace(["active", "dead"], [("active", "dead")])
+    model = ss.build(
+        transitions={("active", "dead"): lambda t, d, **kw: kw["basis"]},
+        derived={"basis": lambda d, scale: jnp.sin(d * scale)},
+    )
+    steps = 16
+
+    def solve(scale):
+        return model.solve(
+            initial="active", horizon=1, steps_per_unit=steps, scale=scale
+        ).probability
+
+    scale = jax.device_put(jnp.array(0.7), jax.local_devices(backend="cpu")[0])
+    compiled = jax.jit(solve).lower(scale).compile()
+    executable = compiled.runtime_executable()
+    assert executable is not None
+    hlo = executable.hlo_modules()[0].to_string()
+    grid_sines = [
+        line
+        for line in hlo.splitlines()
+        if " sine(" in line and f"[1,{steps}]" in line
+    ]
+    assert grid_sines
+    assert all("while/body" not in line for line in grid_sines)
+    assert any(
+        " sine(" in line and "while/body" in line and f"[1,{steps}]" not in line
+        for line in hlo.splitlines()
+    )
+    assert jnp.isfinite(jax.grad(lambda x: solve(x)[-1, 0, 0])(jnp.array(0.7)))
+
+
 def test_grouped_intensity_consumes_shared_field():
     ss = jact.StateSpace(
         ["active", "dead", "lapsed"],
@@ -296,6 +377,17 @@ r = model.solve(
 assert r.probability.shape == (3, 4, 2)
 expected = jnp.exp(-2*jnp.array([0.1, 0.2, 0.3, 0.4]))
 assert jnp.allclose(r.probability[-1, :, 0], expected)
+grid_model = ss.build(
+    transitions={('active', 'dead'): lambda t, d, **kw: 0.1 + kw['basis']},
+    derived={'basis': lambda d, input_rate: jnp.sin(d * input_rate[:, None])},
+)
+inputs = dict(
+    initial='active', horizon=1, steps_per_unit=4,
+    input_rate=jnp.array([0.1, 0.2, 0.3, 0.4]),
+)
+parallel = grid_model.solve(devices=2, **inputs)
+serial = grid_model.solve(**inputs)
+assert jnp.allclose(parallel.probability, serial.probability)
 """
     env = dict(os.environ)
     env["JAX_PLATFORMS"] = "cpu"

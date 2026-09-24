@@ -157,23 +157,38 @@ def _evaluate_grid(
     phase: str = "mid",
     limit: float | None = None,
 ) -> jnp.ndarray:
+    key = ("grid", phase, limit)
     if layout is None:
         return _broadcast_grid_output(
-            fn(t, d, **kwargs.resolve(("grid", phase, limit), t, d)),
+            fn(t, d, **kwargs.resolve(key, t, d)),
             (batch_size, d.shape[-1]),
             label,
         )
+    compact = cast(
+        jnp.ndarray,
+        kwargs.grid_durations[key]
+        if key in kwargs.grid_durations
+        else _sampled_grid(d, layout),
+    )
+    values = _broadcast_grid_output(
+        fn(t, compact, **kwargs.resolve(key, t, compact)),
+        (batch_size, compact.shape[-1]),
+        label,
+    )
+    return values[:, jnp.asarray(layout.gather, dtype=jnp.int32)]
+
+
+def _sampled_grid(
+    d: jnp.ndarray, layout: _EvaluationLayout | None
+) -> jnp.ndarray:
+    if layout is None:
+        return d
     compact = d[:, jnp.asarray(layout.indices, dtype=jnp.int32)]
     if layout.threshold is not None:
         compact = jnp.concatenate(
             (compact, jnp.full((1, 1), layout.threshold, dtype=d.dtype)), axis=-1
         )
-    values = _broadcast_grid_output(
-        fn(t, compact, **kwargs.resolve(("grid", phase, limit), t, compact)),
-        (batch_size, compact.shape[-1]),
-        label,
-    )
-    return values[:, jnp.asarray(layout.gather, dtype=jnp.int32)]
+    return compact
 
 
 def _threshold_value(
@@ -231,27 +246,31 @@ def _stack_state_densities(state: tuple[StateCarry, ...]) -> jnp.ndarray:
 
 def _stack_point_masses(
     state: tuple[StateCarry, ...],
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, tuple[bool, ...]]:
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, tuple[bool, ...]]:
     value_template = state[0].density[:, 0]
     values: list[jnp.ndarray] = []
     d_0: list[jnp.ndarray] = []
-    log_values: list[jnp.ndarray] = []
+    initial_values: list[jnp.ndarray] = []
+    log_survivals: list[jnp.ndarray] = []
     mask: list[bool] = []
     for carry in state:
         if carry.point_mass is None:
             values.append(jnp.zeros_like(value_template))
             d_0.append(jnp.zeros_like(value_template))
-            log_values.append(jnp.full_like(value_template, -jnp.inf))
+            initial_values.append(jnp.zeros_like(value_template))
+            log_survivals.append(jnp.zeros_like(value_template))
             mask.append(False)
         else:
             values.append(carry.point_mass.value)
             d_0.append(carry.point_mass.d_0)
-            log_values.append(carry.point_mass.log_value)
+            initial_values.append(carry.point_mass.initial_value)
+            log_survivals.append(carry.point_mass.log_survival)
             mask.append(True)
     return (
         jnp.stack(values, axis=0),
         jnp.stack(d_0, axis=0),
-        jnp.stack(log_values, axis=0),
+        jnp.stack(initial_values, axis=0),
+        jnp.stack(log_survivals, axis=0),
         tuple(mask),
     )
 
@@ -260,7 +279,8 @@ def _dense_state_to_tuple(
     densities: jnp.ndarray,
     point_values: jnp.ndarray,
     point_d_0: jnp.ndarray,
-    point_log_values: jnp.ndarray,
+    point_initial_values: jnp.ndarray,
+    point_log_survivals: jnp.ndarray,
     point_mask: tuple[bool, ...],
     tail_duration: float | None = None,
 ) -> tuple[StateCarry, ...]:
@@ -271,7 +291,8 @@ def _dense_state_to_tuple(
             point_mass = _PointMass(
                 value=point_values[i],
                 d_0=point_d_0[i],
-                log_value=point_log_values[i],
+                initial_value=point_initial_values[i],
+                log_survival=point_log_survivals[i],
             )
         density = densities[i]
         tail = None
@@ -447,7 +468,9 @@ def _advance_density(
 ) -> jnp.ndarray:
     def survive(values: jnp.ndarray, hazard: jnp.ndarray) -> jnp.ndarray:
         survived = values + values * jnp.expm1(-hazard)
-        return jnp.maximum(survived, jnp.zeros_like(values))
+        # At zero mass, retain the derivative from the nonnegative side.
+        # maximum's averaged derivative would halve it on every empty cell.
+        return jnp.where(survived >= 0, survived, jnp.zeros_like(values))
 
     if density.shape[-1] == 1:
         survived = survive(density[..., 0], total_hazard[..., 0])
@@ -586,12 +609,19 @@ def _solver_step_dynamics(
     jnp.ndarray,
     jnp.ndarray,
     jnp.ndarray,
+    jnp.ndarray,
     tuple[bool, ...],
     tuple[_RowHazards, ...],
     _SameStepTransfers,
 ]:
     densities = _stack_state_densities(state)
-    point_values, point_d_0, point_log_values, point_mask = _stack_point_masses(state)
+    (
+        point_values,
+        point_d_0,
+        point_initial_values,
+        point_log_survivals,
+        point_mask,
+    ) = _stack_point_masses(state)
     row_hazards_list: list[_RowHazards] = []
 
     for source_index, row in enumerate(solver_matrix):
@@ -655,7 +685,8 @@ def _solver_step_dynamics(
         densities,
         point_values,
         point_d_0,
-        point_log_values,
+        point_initial_values,
+        point_log_survivals,
         point_mask,
         row_hazards,
         transfers,
@@ -732,7 +763,8 @@ def _advance_solver_step_from_dynamics(
     densities: jnp.ndarray,
     point_values: jnp.ndarray,
     point_d_0: jnp.ndarray,
-    point_log_values: jnp.ndarray,
+    point_initial_values: jnp.ndarray,
+    point_log_survivals: jnp.ndarray,
     point_mask: tuple[bool, ...],
     row_hazards: tuple[_RowHazards, ...],
     same_step_transfers: _SameStepTransfers,
@@ -740,13 +772,17 @@ def _advance_solver_step_from_dynamics(
     tail_collects_mass: bool = True,
 ) -> tuple[StateCarry, ...]:
     next_point_values = point_values
-    next_point_log_values = point_log_values
+    next_point_log_survivals = point_log_survivals
 
     for i, hz in enumerate(row_hazards):
         if point_mask[i]:
-            next_log_value = point_log_values[i] - hz.point_total
-            next_point_log_values = next_point_log_values.at[i].set(next_log_value)
-            next_point_values = next_point_values.at[i].set(jnp.exp(next_log_value))
+            next_log_survival = point_log_survivals[i] - hz.point_total
+            next_point_log_survivals = next_point_log_survivals.at[i].set(
+                next_log_survival
+            )
+            next_point_values = next_point_values.at[i].set(
+                point_initial_values[i] * jnp.exp(next_log_survival)
+            )
 
     # A full-width grid has no omitted regular cells. Advance it with the
     # uncompressed transport rule and keep the requested tail empty.
@@ -771,7 +807,8 @@ def _advance_solver_step_from_dynamics(
         jnp.stack(tuple(next_densities), axis=0),
         next_point_values,
         point_d_0,
-        next_point_log_values,
+        point_initial_values,
+        next_point_log_survivals,
         point_mask,
         tail_duration,
     )
@@ -781,7 +818,8 @@ def _compute_cashflow_step(
     densities: jnp.ndarray,
     point_values: jnp.ndarray,
     point_d_0: jnp.ndarray,
-    point_log_values: jnp.ndarray,
+    point_initial_values: jnp.ndarray,
+    point_log_survivals: jnp.ndarray,
     point_mask: tuple[bool, ...],
     row_hazards: tuple[_RowHazards, ...],
     same_step_transfers: _SameStepTransfers,
@@ -841,8 +879,8 @@ def _compute_cashflow_step(
                         _threshold_value(payment, payment_mid_layout),
                         context_key=("source", state_index),
                     )
-                    point_midpoint = jnp.exp(
-                        point_log_values[state_index] - 0.5 * hz.point_total
+                    point_midpoint = point_initial_values[state_index] * jnp.exp(
+                        point_log_survivals[state_index] - 0.5 * hz.point_total
                     )
                     contribution = contribution + (
                         step_size * point_midpoint * point_payment
@@ -1532,6 +1570,60 @@ def _midpoint_solver(
     block_0 = _zero_view_values(cashflow_views, value_template)
     terminal_0 = _zero_view_values(cashflow_views, value_template)
     input_fields = field_graph.input_only(intensity_kwargs)
+    grid_fields: dict[object, dict[str, jnp.ndarray]] = {}
+    grid_durations: dict[object, jnp.ndarray] = {}
+    if any(node.needs_duration and not node.needs_time for node in field_graph.nodes):
+        prepared_layouts: dict[
+            tuple[str, _EvaluationLayout | None],
+            tuple[jnp.ndarray, dict[str, jnp.ndarray]],
+        ] = {}
+        grid_contexts: list[
+            tuple[tuple[str, str, float | None], jnp.ndarray, _EvaluationLayout | None]
+        ] = []
+        if any(fn is not None for row in solver_matrix for fn in row):
+            grid_contexts.append(
+                (
+                    ("grid", "mid", config.intensity_limit),
+                    duration_mid,
+                    intensity_layout,
+                )
+            )
+        if any(
+            isinstance(component, (StateRateSpec, TransitionLumpSpec))
+            and component.payments
+            for component in cashflow_components
+        ):
+            grid_contexts.append(
+                (
+                    ("grid", "mid", config.payment_limit),
+                    duration_mid,
+                    payment_mid_layout,
+                )
+            )
+        if any(
+            isinstance(component, ScheduledEventSpec) and component.payments
+            for component in cashflow_components
+        ):
+            grid_contexts.append(
+                (
+                    ("grid", "left", config.payment_limit),
+                    duration_left,
+                    payment_left_layout,
+                )
+            )
+        for key, d, layout in grid_contexts:
+            if key not in grid_fields:
+                phase = key[1]
+                layout_key = (phase, layout)
+                if layout_key not in prepared_layouts:
+                    sampled = _sampled_grid(d, layout)
+                    prepared_layouts[layout_key] = (
+                        sampled,
+                        field_graph.duration_only(input_fields, sampled),
+                    )
+                sampled, resolved = prepared_layouts[layout_key]
+                grid_durations[key] = sampled
+                grid_fields[key] = resolved
     scheduled_events = _compute_scheduled_events(
         cashflow_components,
         step_size,
@@ -1570,7 +1662,9 @@ def _midpoint_solver(
         ]:
             inner_state, block_cashflows, terminal_cashflows = inner_carry
             current_t = block_start + offset * step_size
-            fields = FieldRuntime(field_graph, input_fields)
+            fields = FieldRuntime(
+                field_graph, input_fields, grid_fields, grid_durations
+            )
 
             dynamics = _solver_step_dynamics(
                 inner_state,
@@ -1790,10 +1884,11 @@ def _seed_point_mass(
     mass: ArrayLike,
     duration: ArrayLike,
     batch_size: int,
+    dtype: _DType,
 ) -> _PointMass:
     return _PointMass(
-        value=_broadcast_batch(mass, batch_size),
-        d_0=_broadcast_batch(duration, batch_size),
+        value=_broadcast_batch(mass, batch_size).astype(dtype),
+        d_0=_broadcast_batch(duration, batch_size).astype(dtype),
     )
 
 
@@ -2432,6 +2527,7 @@ def solve(
                 canonical.masses[idx],
                 canonical.durations[idx],
                 batch_size,
+                value_dtype,
             )
         tail = None
         if probability_duration_limit is not None:
