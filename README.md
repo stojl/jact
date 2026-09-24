@@ -63,6 +63,41 @@ result = model.solve(
 `derived` is also accepted by `state_space.cashflows(...)` and `model.solve(...)`.
 The combined field graph rejects duplicate names, missing inputs, and cycles.
 
+## Shared payment cores
+
+When payments share a duration-dependent function, define it once in `cores`
+and reference it by name. The solver integrates each compatible core once per
+step, then applies each payment's duration-independent weight:
+
+```python
+from jact import cashflows as cf
+
+def eligible(t, d, **kwargs):
+    return jnp.where(d >= 0.5, 1.0, 0.0)
+
+cashflows = state_space.cashflows(
+    {
+        "income": cf.StateRate({
+            "disabled": cf.Scaled(
+                "eligible", weight=lambda t, **kw: 0.60 * kw["salary"],
+            ),
+        }),
+        "pension": cf.StateRate({
+            "disabled": cf.Scaled(
+                "eligible", weight=lambda t, **kw: 0.10 * kw["salary"],
+            ),
+        }),
+    },
+    cores={"eligible": eligible},
+)
+```
+
+Both payments remain separate named components for grouping and totals.
+Weights may depend on time, individual inputs, and duration-independent derived
+fields. Sharing uses the core name and compatible state, transition, or event
+context; payment declarations created by separate factories can reference the
+same name. See [the API specification](docs/api_spec.md#named-payment-cores).
+
 ## Fitted-model intensity wrappers
 
 Use `jact.wrappers.bind_intensity()` when a fitted model has a separate feature

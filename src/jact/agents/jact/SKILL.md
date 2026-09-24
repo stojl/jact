@@ -474,6 +474,87 @@ result = model.solve(
 expected_time = result.cashflows["expected_time"]
 ```
 
+## Shared Payment Cores
+
+When several payments have the form `weight(t, inputs) * core(t, d, inputs)`,
+register the core once with `state_space.cashflows(..., cores={...})` and use
+`jact.cashflows.Scaled("core_name", weight=...)` in each payment mapping.
+Derived fields share exogenous feature evaluations; named cores also share the
+complete integrated payment contribution, including point masses and transfer
+corrections. Both features can be used together.
+
+For example, disability income and pension contributions can share eligibility
+after six months while paying different fractions of annual salary:
+
+```python
+import jax.numpy as jnp
+import jact
+from jact import cashflows as cf
+
+state_space = jact.StateSpace(
+    ["disabled", "dead"], [("disabled", "dead")],
+)
+model = state_space.build(
+    transitions={("disabled", "dead"): lambda t, d, **kw: 0.02},
+)
+
+
+def eligible(t, d, **kwargs):
+    return jnp.where(d >= 0.5, 1.0, 0.0)
+
+
+cashflows = state_space.cashflows(
+    {
+        "income": cf.StateRate({
+            "disabled": cf.Scaled(
+                "eligible", weight=lambda t, **kw: 0.60 * kw["salary"],
+            ),
+        }),
+        "pension": cf.StateRate({
+            "disabled": cf.Scaled(
+                "eligible", weight=lambda t, **kw: 0.10 * kw["salary"],
+            ),
+        }),
+    },
+    cores={"eligible": eligible},
+)
+result = model.solve(
+    initial="disabled", horizon=10, steps_per_unit=12,
+    probability=None, cashflows=cashflows,
+    cashflow_views={"benefits": cf.Raw(terminal=True)},
+    salary=jnp.array([40_000.0, 60_000.0]),
+)
+income = result.cashflows["benefits"]["income"]
+pension = result.cashflows["benefits"]["pension"]
+```
+
+- Core definitions use the ordinary payment contract `(t, d, **kwargs)`.
+  Names are local to the declaration, which copies and freezes the registry.
+  Independently factory-created payment declarations can reference the same
+  name; each name has one authoritative definition. Unknown names are errors.
+- `Scaled` is a declaration, not a callable; its first argument is a name.
+  Use `Scaled("eligible")` for unity weighting. Distinct names and ordinary
+  payment callables do not implicitly share, even when their functions match.
+- Weights accept a scalar, rank-zero array, `None` for unity, or a callable
+  `(t, **kwargs)` returning a scalar or `(batch,)`-broadcastable value. Pass
+  per-person arrays through solve inputs and return them from a weight callable,
+  without adding a duration axis. Weights may use time and duration-independent
+  derived fields, but cannot read `d` or fields depending directly or indirectly
+  on it. Keep duration dependence in the core.
+- Sharing requires the same core name and compatible attachment context within
+  one component kind: the same state for `StateRate`, the same transition for
+  `TransitionLump`, the same state and `when` callable object for `ScheduledEvent`,
+  or the same state and scalar target value/target callable object for
+  `DurationEvent`. Different states or transitions have different integration
+  measures and require separate contributions.
+- Component weights are applied at every inner step before accumulation and
+  view weights. Rates and transition lumps use the midpoint; both event kinds
+  use the left endpoint under existing event rounding rules. Do not move a
+  time-varying weight outside an accumulated output interval.
+- Consumers remain named components for `Raw`, `Group`, `Total`, `ByState`, and
+  `ByKind`. A registry core is not an extra output component or an extra payment
+  in totals. View weights can still apply discounting to the scaled payments.
+
 ## Avoid
 
 - Do not import domain types such as `StateRate`, `Raw`, or `StateProbability`

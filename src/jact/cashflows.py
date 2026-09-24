@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from numbers import Number
+from types import MappingProxyType
 from typing import NamedTuple, TypeAlias, cast
 
 import jax.numpy as jnp
@@ -24,6 +25,7 @@ __all__ = [
     "DurationEvent",
     "Group",
     "Raw",
+    "Scaled",
     "ScheduledEvent",
     "StateRate",
     "Total",
@@ -32,17 +34,25 @@ __all__ = [
 
 
 @dataclass(frozen=True)
+class Scaled:
+    """Reference a named payment core with a duration-independent weight."""
+
+    core: str
+    weight: Weight | Scalar | ArrayLike | None = field(default=1.0, kw_only=True)
+
+
+@dataclass(frozen=True)
 class StateRate:
     """Payment-rate callables attached to occupied states."""
 
-    payments: Mapping[str, Payment]
+    payments: Mapping[str, Payment | Scaled]
 
 
 @dataclass(frozen=True)
 class TransitionLump:
     """Lump-sum payment callables attached to transitions."""
 
-    payments: Mapping[tuple[str, str], Payment]
+    payments: Mapping[tuple[str, str], Payment | Scaled]
 
 
 @dataclass(frozen=True)
@@ -50,7 +60,7 @@ class ScheduledEvent:
     """State-conditioned payments at deterministic event times."""
 
     when: When
-    payments: Mapping[str, Payment]
+    payments: Mapping[str, Payment | Scaled]
 
 
 @dataclass(frozen=True)
@@ -58,7 +68,7 @@ class DurationEvent:
     """State-duration conditioned one-time payments."""
 
     at_durations: Mapping[str, ArrayLike | DurationAt]
-    payments: Mapping[str, Payment]
+    payments: Mapping[str, Payment | Scaled]
 
 
 @dataclass(frozen=True)
@@ -116,6 +126,12 @@ class CashflowDeclaration:
     state_space: StateSpace
     components: tuple[tuple[str, CashflowComponent], ...]
     derived: Derived | None = None
+    cores: Mapping[str, Payment] = field(
+        default_factory=lambda: dict[str, Payment](), kw_only=True
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "cores", MappingProxyType(dict(self.cores)))
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -144,13 +160,26 @@ def _check_callable(value: object, field: str) -> None:
 def _validate_payment_mapping(
     payments: object,
     field: str,
-) -> dict[object, Payment]:
+    cores: Mapping[str, Payment],
+) -> dict[object, Payment | Scaled]:
     if not isinstance(payments, Mapping) or not payments:
         raise ValueError(f"{field} must be a non-empty mapping.")
     values = cast(Mapping[object, object], payments)
-    for fn in values.values():
-        _check_callable(fn, f"{field} values")
-    return {key: cast(Payment, fn) for key, fn in values.items()}
+    frozen: dict[object, Payment | Scaled] = {}
+    for key, fn in values.items():
+        if isinstance(fn, Scaled):
+            if not isinstance(fn.core, str) or not fn.core:  # pyright: ignore[reportUnnecessaryIsInstance]
+                raise ValueError(f"{field}[{key!r}] core must be a non-empty name.")
+            if fn.core not in cores:
+                raise ValueError(
+                    f"{field}[{key!r}] references unknown core {fn.core!r}."
+                )
+            _validate_weight(fn.weight, f"{field}[{key!r}] weight")
+            frozen[key] = Scaled(fn.core, weight=_normalise_weight(fn.weight))
+        else:
+            _check_callable(fn, f"{field} values")
+            frozen[key] = cast(Payment, fn)
+    return frozen
 
 
 def _validate_at_duration_mapping(
@@ -172,7 +201,7 @@ def _validate_at_duration_mapping(
 
 def _validate_state_payments(
     state_space: StateSpace,
-    payments: Mapping[object, Payment],
+    payments: Mapping[object, Payment | Scaled],
 ) -> None:
     for state in payments:
         state_space._check_state(cast(str, state))
@@ -192,6 +221,8 @@ def _normalise_weight(
 ) -> Weight | Scalar | None:
     if weight is None:
         return None
+    if isinstance(weight, Number):
+        return cast(Scalar, weight)
     if _is_scalar_array_like(weight):
         return cast(Scalar, jnp.asarray(weight).item())
     return cast(Weight, weight)
@@ -201,10 +232,20 @@ def validate_cashflow_components(
     state_space: StateSpace,
     components: Mapping[str, CashflowComponent],
     derived: Derived | None = None,
+    *,
+    cores: Mapping[str, Payment] | None = None,
 ) -> CashflowDeclaration:
     """Validate and freeze a component mapping for a state space."""
     if not isinstance(components, Mapping) or not components:  # pyright: ignore[reportUnnecessaryIsInstance]
         raise ValueError("cashflows() requires a non-empty component mapping.")
+
+    if cores is not None and not isinstance(cores, Mapping):  # pyright: ignore[reportUnnecessaryIsInstance]
+        raise TypeError("cashflow cores must be a mapping or None.")
+    frozen_cores = dict(cores) if cores is not None else {}
+    for name, core in frozen_cores.items():
+        if not isinstance(name, str) or not name:  # pyright: ignore[reportUnnecessaryIsInstance]
+            raise ValueError("cashflow core names must be non-empty strings.")
+        _check_callable(core, f"Cashflow core {name!r}")
 
     frozen: list[tuple[str, CashflowComponent]] = []
     seen: set[str] = set()
@@ -218,13 +259,17 @@ def validate_cashflow_components(
             payments = _validate_payment_mapping(
                 component.payments,
                 f"StateRate('{name}').payments",
+                frozen_cores,
             )
             _validate_state_payments(state_space, payments)
-            frozen_component = StateRate(payments=cast(Mapping[str, Payment], payments))
+            frozen_component = StateRate(
+                payments=cast(Mapping[str, Payment | Scaled], payments)
+            )
         elif isinstance(component, TransitionLump):
             payments = _validate_payment_mapping(
                 component.payments,
                 f"TransitionLump('{name}').payments",
+                frozen_cores,
             )
             for transition in payments:
                 parts = (
@@ -246,18 +291,19 @@ def validate_cashflow_components(
                         f"transition {transition!r}."
                     )
             frozen_component = TransitionLump(
-                payments=cast(Mapping[tuple[str, str], Payment], payments)
+                payments=cast(Mapping[tuple[str, str], Payment | Scaled], payments)
             )
         elif isinstance(component, ScheduledEvent):
             _check_callable(component.when, f"ScheduledEvent('{name}').when")
             payments = _validate_payment_mapping(
                 component.payments,
                 f"ScheduledEvent('{name}').payments",
+                frozen_cores,
             )
             _validate_state_payments(state_space, payments)
             frozen_component = ScheduledEvent(
                 when=component.when,
-                payments=cast(Mapping[str, Payment], payments),
+                payments=cast(Mapping[str, Payment | Scaled], payments),
             )
         elif isinstance(component, DurationEvent):  # pyright: ignore[reportUnnecessaryIsInstance]
             at_durations = _validate_at_duration_mapping(
@@ -267,6 +313,7 @@ def validate_cashflow_components(
             payments = _validate_payment_mapping(
                 component.payments,
                 f"DurationEvent('{name}').payments",
+                frozen_cores,
             )
             for state in at_durations:
                 state_space._check_state(cast(str, state))
@@ -278,7 +325,7 @@ def validate_cashflow_components(
                 )
             frozen_component = DurationEvent(
                 at_durations=cast(Mapping[str, ArrayLike | DurationAt], at_durations),
-                payments=cast(Mapping[str, Payment], payments),
+                payments=cast(Mapping[str, Payment | Scaled], payments),
             )
         else:
             raise TypeError(
@@ -288,19 +335,25 @@ def validate_cashflow_components(
         frozen.append((name, frozen_component))
 
     return CashflowDeclaration(
-        state_space=state_space, components=tuple(frozen), derived=dict(derived or {})
+        state_space=state_space,
+        components=tuple(frozen),
+        derived=dict(derived or {}),
+        cores=frozen_cores,
     )
 
 
 def _validate_view_common(view: CashflowView) -> None:
     if not isinstance(view.terminal, bool):  # pyright: ignore[reportUnnecessaryIsInstance]
         raise TypeError("cashflow view terminal must be a bool.")
-    weight = view.weight
+    _validate_weight(view.weight, "cashflow view weight")
+
+
+def _validate_weight(weight: object, label: str) -> None:
     if weight is None or callable(weight) or isinstance(weight, Number):
         return
     if _is_scalar_array_like(weight):
         return
-    raise TypeError("cashflow view weight must be None, a scalar, or callable.")
+    raise TypeError(f"{label} must be None, a scalar, or callable.")
 
 
 class _NormalisedView(NamedTuple):

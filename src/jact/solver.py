@@ -24,6 +24,7 @@ from ._cashflow_ir import (
     DurationTargetPayment,
     FormattedCashflows,
     FormattedCashflowValue,
+    IdentityCallable,
     KindSource,
     PreparedCashflowView,
     PreparedCashflowViews,
@@ -51,10 +52,12 @@ from .cashflows import (
     Group,
     Raw,
     Scalar,
+    Scaled,
     ScheduledEvent,
     StateRate,
     Total,
     TransitionLump,
+    _normalise_weight,
     validate_cashflow_views,
 )
 from .initial_distribution import InitialDistribution, _CanonicalDistribution
@@ -178,9 +181,7 @@ def _evaluate_grid(
     return values[:, jnp.asarray(layout.gather, dtype=jnp.int32)]
 
 
-def _sampled_grid(
-    d: jnp.ndarray, layout: _EvaluationLayout | None
-) -> jnp.ndarray:
+def _sampled_grid(d: jnp.ndarray, layout: _EvaluationLayout | None) -> jnp.ndarray:
     if layout is None:
         return d
     compact = d[:, jnp.asarray(layout.indices, dtype=jnp.int32)]
@@ -845,6 +846,9 @@ def _compute_cashflow_step(
     t_mid = t + 0.5 * step_size
     n_steps = config.n_steps
     incoming_state_indices = _incoming_state_indices(row_hazards)
+    # This Python dictionary shares traced expressions within one scan body.
+    # Each expression is evaluated afresh at every numerical solver step.
+    core_values: dict[int, jnp.ndarray] = {}
 
     for component_index, component in enumerate(cashflow_components):
         component_total = jnp.zeros_like(template)
@@ -854,52 +858,70 @@ def _compute_cashflow_step(
             for attachment in component.payments:
                 state_index = attachment.state_index
                 payment_fn = attachment.payment
-                hz = row_hazards[state_index]
-                density_midpoint = densities[state_index] * hz.density_midpoint_factor
-                payment = _call_payment(
-                    payment_fn,
-                    t_mid,
-                    duration_mid,
-                    intensity_kwargs,
-                    (densities.shape[1], duration_mid.shape[-1]),
-                    payment_mid_layout,
-                    duration_limit=config.payment_limit,
-                )
-                contribution = step_size * jnp.sum(
-                    density_midpoint * payment,
-                    axis=-1,
-                )
-                if point_mask[state_index]:
-                    point_payment = _evaluate_intensity_at_point(
+                if attachment.task_id >= 0 and attachment.task_id in core_values:
+                    contribution = core_values[attachment.task_id]
+                else:
+                    hz = row_hazards[state_index]
+                    density_midpoint = (
+                        densities[state_index] * hz.density_midpoint_factor
+                    )
+                    payment = _call_payment(
                         payment_fn,
                         t_mid,
-                        point_d_0[state_index] + t_mid,
+                        duration_mid,
                         intensity_kwargs,
-                        config.payment_limit,
-                        _threshold_value(payment, payment_mid_layout),
-                        context_key=("source", state_index),
+                        (densities.shape[1], duration_mid.shape[-1]),
+                        payment_mid_layout,
+                        duration_limit=config.payment_limit,
                     )
-                    point_midpoint = point_initial_values[state_index] * jnp.exp(
-                        point_log_survivals[state_index] - 0.5 * hz.point_total
+                    contribution = step_size * jnp.sum(
+                        density_midpoint * payment,
+                        axis=-1,
                     )
-                    contribution = contribution + (
-                        step_size * point_midpoint * point_payment
-                    )
-                if state_index in incoming_state_indices:
-                    same_step_inflow = same_step_transfers.survived_inflow[state_index]
-                    same_step_payment = (
-                        _evaluate_intensity_at_point(
+                    if point_mask[state_index]:
+                        point_payment = _evaluate_intensity_at_point(
                             payment_fn,
                             t_mid,
-                            jnp.full_like(template, 0.5 * step_size),
+                            point_d_0[state_index] + t_mid,
                             intensity_kwargs,
-                            context_key=("inflow", state_index),
+                            config.payment_limit,
+                            _threshold_value(payment, payment_mid_layout),
+                            context_key=("source", state_index),
                         )
-                        if config.payment_limit is None
-                        else payment[:, 0]
-                    )
-                    contribution = contribution + (
-                        0.5 * step_size * same_step_inflow * same_step_payment
+                        point_midpoint = point_initial_values[state_index] * jnp.exp(
+                            point_log_survivals[state_index] - 0.5 * hz.point_total
+                        )
+                        contribution = contribution + (
+                            step_size * point_midpoint * point_payment
+                        )
+                    if state_index in incoming_state_indices:
+                        same_step_inflow = same_step_transfers.survived_inflow[
+                            state_index
+                        ]
+                        same_step_payment = (
+                            _evaluate_intensity_at_point(
+                                payment_fn,
+                                t_mid,
+                                jnp.full_like(template, 0.5 * step_size),
+                                intensity_kwargs,
+                                context_key=("inflow", state_index),
+                            )
+                            if config.payment_limit is None
+                            else payment[:, 0]
+                        )
+                        contribution = contribution + (
+                            0.5 * step_size * same_step_inflow * same_step_payment
+                        )
+                    if attachment.task_id >= 0:
+                        core_values[attachment.task_id] = contribution
+                if attachment.weight is not None:
+                    contribution = contribution * _evaluate_weight(
+                        attachment.weight,
+                        t_mid,
+                        intensity_kwargs,
+                        template,
+                        "mid",
+                        label=attachment.label + " weight",
                     )
                 component_total, by_state, by_kind = _add_cashflow_contribution(
                     component_total,
@@ -915,55 +937,69 @@ def _compute_cashflow_step(
                 source_index = attachment.source_index
                 hazard_slot = attachment.hazard_slot
                 payment_fn = attachment.payment
-                hz = row_hazards[source_index]
-                _, density_hazard = hz.density_hazards[hazard_slot]
-                payment = _call_payment(
-                    payment_fn,
-                    t_mid,
-                    duration_mid,
-                    intensity_kwargs,
-                    (densities.shape[1], duration_mid.shape[-1]),
-                    payment_mid_layout,
-                    duration_limit=config.payment_limit,
-                )
-                contribution = jnp.sum(
-                    densities[source_index]
-                    * density_hazard
-                    * hz.density_transfer_factor
-                    * payment,
-                    axis=-1,
-                )
-                if point_mask[source_index]:
-                    _, point_hazard = hz.point_hazards[hazard_slot]
-                    point_payment = _evaluate_intensity_at_point(
+                if attachment.task_id >= 0 and attachment.task_id in core_values:
+                    contribution = core_values[attachment.task_id]
+                else:
+                    hz = row_hazards[source_index]
+                    _, density_hazard = hz.density_hazards[hazard_slot]
+                    payment = _call_payment(
                         payment_fn,
                         t_mid,
-                        point_d_0[source_index] + t_mid,
+                        duration_mid,
                         intensity_kwargs,
-                        config.payment_limit,
-                        _threshold_value(payment, payment_mid_layout),
-                        context_key=("source", source_index),
+                        (densities.shape[1], duration_mid.shape[-1]),
+                        payment_mid_layout,
+                        duration_limit=config.payment_limit,
                     )
-                    contribution = contribution + (
-                        point_values[source_index]
-                        * point_hazard
-                        * hz.point_transfer_factor
-                        * point_payment
+                    contribution = jnp.sum(
+                        densities[source_index]
+                        * density_hazard
+                        * hz.density_transfer_factor
+                        * payment,
+                        axis=-1,
                     )
-                if source_index in incoming_state_indices:
-                    chained_exit = same_step_transfers.chained_by_source[source_index][
-                        hazard_slot
-                    ]
-                    chained_payment = _evaluate_intensity_at_point(
-                        payment_fn,
+                    if point_mask[source_index]:
+                        _, point_hazard = hz.point_hazards[hazard_slot]
+                        point_payment = _evaluate_intensity_at_point(
+                            payment_fn,
+                            t_mid,
+                            point_d_0[source_index] + t_mid,
+                            intensity_kwargs,
+                            config.payment_limit,
+                            _threshold_value(payment, payment_mid_layout),
+                            context_key=("source", source_index),
+                        )
+                        contribution = contribution + (
+                            point_values[source_index]
+                            * point_hazard
+                            * hz.point_transfer_factor
+                            * point_payment
+                        )
+                    if source_index in incoming_state_indices:
+                        chained_exit = same_step_transfers.chained_by_source[
+                            source_index
+                        ][hazard_slot]
+                        chained_payment = _evaluate_intensity_at_point(
+                            payment_fn,
+                            t_mid,
+                            jnp.zeros_like(template),
+                            intensity_kwargs,
+                            config.payment_limit,
+                            _threshold_value(payment, payment_mid_layout),
+                            context_key=("chained", source_index),
+                        )
+                        contribution = contribution + chained_exit * chained_payment
+                    if attachment.task_id >= 0:
+                        core_values[attachment.task_id] = contribution
+                if attachment.weight is not None:
+                    contribution = contribution * _evaluate_weight(
+                        attachment.weight,
                         t_mid,
-                        jnp.zeros_like(template),
                         intensity_kwargs,
-                        config.payment_limit,
-                        _threshold_value(payment, payment_mid_layout),
-                        context_key=("chained", source_index),
+                        template,
+                        "mid",
+                        label=attachment.label + " weight",
                     )
-                    contribution = contribution + chained_exit * chained_payment
                 component_total, by_state, by_kind = _add_cashflow_contribution(
                     component_total,
                     by_state,
@@ -998,33 +1034,47 @@ def _compute_cashflow_step(
             for attachment in component.payments:
                 state_index = attachment.state_index
                 payment_fn = attachment.payment
-                payment = _call_payment(
-                    payment_fn,
-                    t,
-                    duration_left,
-                    intensity_kwargs,
-                    (densities.shape[1], duration_left.shape[-1]),
-                    payment_left_layout,
-                    phase="left",
-                    duration_limit=config.payment_limit,
-                )
-                contribution = active * jnp.sum(
-                    densities[state_index] * payment,
-                    axis=-1,
-                )
-                if point_mask[state_index]:
-                    point_payment = _evaluate_intensity_at_point(
+                if attachment.task_id >= 0 and attachment.task_id in core_values:
+                    contribution = core_values[attachment.task_id]
+                else:
+                    payment = _call_payment(
                         payment_fn,
                         t,
-                        point_d_0[state_index] + t,
+                        duration_left,
                         intensity_kwargs,
-                        config.payment_limit,
-                        _threshold_value(payment, payment_left_layout),
-                        context_key=("source", state_index),
+                        (densities.shape[1], duration_left.shape[-1]),
+                        payment_left_layout,
                         phase="left",
+                        duration_limit=config.payment_limit,
                     )
-                    contribution = contribution + (
-                        active * point_values[state_index] * point_payment
+                    contribution = active * jnp.sum(
+                        densities[state_index] * payment,
+                        axis=-1,
+                    )
+                    if point_mask[state_index]:
+                        point_payment = _evaluate_intensity_at_point(
+                            payment_fn,
+                            t,
+                            point_d_0[state_index] + t,
+                            intensity_kwargs,
+                            config.payment_limit,
+                            _threshold_value(payment, payment_left_layout),
+                            context_key=("source", state_index),
+                            phase="left",
+                        )
+                        contribution = contribution + (
+                            active * point_values[state_index] * point_payment
+                        )
+                    if attachment.task_id >= 0:
+                        core_values[attachment.task_id] = contribution
+                if attachment.weight is not None:
+                    contribution = contribution * _evaluate_weight(
+                        attachment.weight,
+                        t,
+                        intensity_kwargs,
+                        template,
+                        "left",
+                        label=attachment.label + " weight",
                     )
                 component_total, by_state, by_kind = _add_cashflow_contribution(
                     component_total,
@@ -1056,60 +1106,79 @@ def _compute_cashflow_step(
                 at_duration_index = target.at_duration_index
                 effective_at_duration = target.effective_at_duration
                 payment_fn = target.payment
-                at_duration = _broadcast_vector_output(
-                    at_duration,
-                    template.shape,
-                    "Duration event target",
-                )
-                at_duration_index = _broadcast_vector_output(
-                    at_duration_index,
-                    template.shape,
-                    "Duration event index",
-                )
-                effective_at_duration = _broadcast_vector_output(
-                    effective_at_duration,
-                    template.shape,
-                    "Effective duration event target",
-                )
-                in_horizon = (at_duration >= 0) & (at_duration_index < n_steps)
-                safe_index = jnp.clip(at_duration_index, 0, config.width - 1)
-                density_at_duration = jnp.take_along_axis(
-                    densities[state_index],
-                    safe_index[:, None],
-                    axis=-1,
-                )[:, 0]
-                payment = _evaluate_intensity_at_point(
-                    payment_fn,
-                    t,
-                    effective_at_duration,
-                    intensity_kwargs,
-                    config.payment_limit,
-                    context_key=("duration_event", component_index, state_index),
-                    phase="left",
-                )
-                contribution = (in_horizon & (at_duration_index < config.width)).astype(
-                    template.dtype
-                ) * (density_at_duration * payment)
+                if target.task_id >= 0 and target.task_id in core_values:
+                    contribution = core_values[target.task_id]
+                else:
+                    at_duration = _broadcast_vector_output(
+                        at_duration,
+                        template.shape,
+                        "Duration event target",
+                    )
+                    at_duration_index = _broadcast_vector_output(
+                        at_duration_index,
+                        template.shape,
+                        "Duration event index",
+                    )
+                    effective_at_duration = _broadcast_vector_output(
+                        effective_at_duration,
+                        template.shape,
+                        "Effective duration event target",
+                    )
+                    in_horizon = (at_duration >= 0) & (at_duration_index < n_steps)
+                    safe_index = jnp.clip(at_duration_index, 0, config.width - 1)
+                    density_at_duration = jnp.take_along_axis(
+                        densities[state_index],
+                        safe_index[:, None],
+                        axis=-1,
+                    )[:, 0]
+                    payment = _evaluate_intensity_at_point(
+                        payment_fn,
+                        t,
+                        effective_at_duration,
+                        intensity_kwargs,
+                        config.payment_limit,
+                        context_key=(
+                            "duration_event",
+                            target.task_id,
+                            component_index,
+                            state_index,
+                        ),
+                        phase="left",
+                    )
+                    contribution = (
+                        in_horizon & (at_duration_index < config.width)
+                    ).astype(template.dtype) * (density_at_duration * payment)
 
-                if point_mask[state_index]:
-                    remaining = effective_at_duration - point_d_0[state_index]
-                    trigger_index = _scheduled_event_index(remaining, step_size)
-                    current_index = jnp.round(t / step_size).astype(jnp.int32)
-                    not_past_target = (remaining >= 0) | _is_near_grid_zero(
-                        remaining,
-                        step_size,
-                    )
-                    active_point = (
-                        in_horizon
-                        & not_past_target
-                        & (trigger_index == current_index)
-                        & (trigger_index < n_steps)
-                    )
-                    point_payment = payment
-                    contribution = contribution + (
-                        active_point.astype(template.dtype)
-                        * point_values[state_index]
-                        * point_payment
+                    if point_mask[state_index]:
+                        remaining = effective_at_duration - point_d_0[state_index]
+                        trigger_index = _scheduled_event_index(remaining, step_size)
+                        current_index = jnp.round(t / step_size).astype(jnp.int32)
+                        not_past_target = (remaining >= 0) | _is_near_grid_zero(
+                            remaining,
+                            step_size,
+                        )
+                        active_point = (
+                            in_horizon
+                            & not_past_target
+                            & (trigger_index == current_index)
+                            & (trigger_index < n_steps)
+                        )
+                        point_payment = payment
+                        contribution = contribution + (
+                            active_point.astype(template.dtype)
+                            * point_values[state_index]
+                            * point_payment
+                        )
+                    if target.task_id >= 0:
+                        core_values[target.task_id] = contribution
+                if target.weight is not None:
+                    contribution = contribution * _evaluate_weight(
+                        target.weight,
+                        t,
+                        intensity_kwargs,
+                        template,
+                        "left",
+                        label=target.label + " weight",
                     )
                 component_total, by_state, by_kind = _add_cashflow_contribution(
                     component_total,
@@ -1155,15 +1224,18 @@ def _compute_scheduled_events(
     intensity_kwargs: dict[str, jnp.ndarray],
 ) -> ResolvedScheduledEvents:
     scheduled_events: list[ResolvedScheduledEvent | None] = []
+    resolved: dict[IdentityCallable, ResolvedScheduledEvent] = {}
     for component in cashflow_components:
         if isinstance(component, ScheduledEventSpec):
-            event_time = jnp.asarray(component.when(**intensity_kwargs))
-            scheduled_events.append(
-                ResolvedScheduledEvent(
+            when = component.when
+            key = when if isinstance(when, IdentityCallable) else IdentityCallable(when)
+            if key not in resolved:
+                event_time = jnp.asarray(when(**intensity_kwargs))
+                resolved[key] = ResolvedScheduledEvent(
                     event_time=event_time,
                     event_index=_scheduled_event_index(event_time, step_size),
                 )
-            )
+            scheduled_events.append(resolved[key])
         else:
             scheduled_events.append(None)
     return tuple(scheduled_events)
@@ -1175,20 +1247,34 @@ def _compute_duration_events(
     intensity_kwargs: dict[str, jnp.ndarray],
 ) -> ResolvedDurationEvents:
     duration_events: list[ResolvedDurationEvent | None] = []
+    resolved: dict[object, tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]] = {}
     for component in cashflow_components:
         if isinstance(component, DurationEventSpec):
             targets: list[ResolvedDurationTarget] = []
             for attachment in component.targets:
                 at_duration_source = attachment.at_duration
-                at_duration = (
-                    jnp.asarray(at_duration_source(**intensity_kwargs))
+                key = (
+                    IdentityCallable(at_duration_source)
                     if callable(at_duration_source)
-                    else jnp.asarray(at_duration_source)
+                    and not isinstance(at_duration_source, IdentityCallable)
+                    else at_duration_source
                 )
-                at_duration_index, effective_at_duration = _duration_event_index(
-                    at_duration,
-                    step_size,
-                )
+                if key not in resolved:
+                    at_duration = (
+                        jnp.asarray(at_duration_source(**intensity_kwargs))
+                        if callable(at_duration_source)
+                        else jnp.asarray(at_duration_source)
+                    )
+                    at_duration_index, effective_at_duration = _duration_event_index(
+                        at_duration,
+                        step_size,
+                    )
+                    resolved[key] = (
+                        at_duration,
+                        at_duration_index,
+                        effective_at_duration,
+                    )
+                at_duration, at_duration_index, effective_at_duration = resolved[key]
                 targets.append(
                     ResolvedDurationTarget(
                         state_index=attachment.state_index,
@@ -1196,6 +1282,9 @@ def _compute_duration_events(
                         at_duration_index=at_duration_index,
                         effective_at_duration=effective_at_duration,
                         payment=attachment.payment,
+                        task_id=attachment.task_id,
+                        weight=attachment.weight,
+                        label=attachment.label,
                     )
                 )
             duration_events.append(ResolvedDurationEvent(targets=tuple(targets)))
@@ -1229,16 +1318,24 @@ def _evaluate_weight(
     intensity_kwargs: FieldRuntime,
     template: jnp.ndarray,
     phase: str,
+    *,
+    label: str = "Cashflow view weight",
 ) -> jnp.ndarray:
     if weight is None:
         return jnp.ones_like(template)
-    value = (
-        weight(t, **intensity_kwargs.resolve(("time", phase), t))
-        if callable(weight)
-        else weight
-    )
+    try:
+        value = (
+            weight(t, **intensity_kwargs.resolve(("time", phase), t))
+            if callable(weight)
+            else weight
+        )
+    except KeyError as exc:
+        raise ValueError(
+            f"{label} requested unavailable field {exc.args[0]!r}; weights receive "
+            "only solve inputs and duration-independent derived fields."
+        ) from exc
     arr = jnp.asarray(value, dtype=template.dtype)
-    return _broadcast_vector_output(arr, template.shape, "Cashflow view weight")
+    return _broadcast_vector_output(arr, template.shape, label)
 
 
 def _compute_cashflow_views(
@@ -1909,13 +2006,40 @@ def _prepare_cashflow_components(
                 transition_slot[(source_index, target_index)] = slot
                 slot += 1
 
+    # Names select shared computations within this declaration. Callable identity
+    # remains in the static records solely to keep JIT cache entries correct.
+    task_ids: dict[object, int] = {}
+
+    def bind(
+        value: Payment | Scaled,
+        context: tuple[object, ...],
+        label: str,
+    ) -> tuple[Payment, int, Weight | Scalar | None, str]:
+        if isinstance(value, Scaled):
+            key = (value.core, context)
+            core = declaration.cores[value.core]
+            weight = _normalise_weight(value.weight)
+            if callable(weight):
+                weight = IdentityCallable(weight)
+            elif weight == 1:
+                weight = None
+        else:
+            key = object()  # Ordinary attachments do not implicitly share.
+            core = value
+            weight = None
+        task_id = task_ids.setdefault(key, len(task_ids))
+        return IdentityCallable(core), task_id, weight, label
+
     prepared: list[
         StateRateSpec | TransitionLumpSpec | ScheduledEventSpec | DurationEventSpec
     ] = []
-    for _name, component in declaration.components:
+    for name, component in declaration.components:
         if isinstance(component, StateRate):
             payments = tuple(
-                StatePayment(state_index=state_index[state], payment=fn)
+                StatePayment(
+                    state_index[state],
+                    *bind(fn, ("state_rate", state), f"StateRate({name!r})[{state!r}]"),
+                )
                 for state, fn in component.payments.items()
                 if state in state_index
             )
@@ -1923,34 +2047,52 @@ def _prepare_cashflow_components(
         elif isinstance(component, TransitionLump):
             payments = tuple(
                 TransitionPayment(
-                    source_index=state_index[source],
-                    hazard_slot=transition_slot[
-                        (state_index[source], state_index[target])
-                    ],
-                    payment=fn,
+                    state_index[source],
+                    transition_slot[(state_index[source], state_index[target])],
+                    *bind(
+                        fn,
+                        ("transition_lump", source, target),
+                        f"TransitionLump({name!r})[{(source, target)!r}]",
+                    ),
                 )
                 for (source, target), fn in component.payments.items()
                 if source in state_index and target in state_index
             )
             prepared.append(TransitionLumpSpec(payments=payments))
         elif isinstance(component, ScheduledEvent):
+            when = IdentityCallable(component.when)
             payments = tuple(
-                StatePayment(state_index=state_index[state], payment=fn)
-                for state, fn in component.payments.items()
-                if state in state_index
-            )
-            prepared.append(ScheduledEventSpec(when=component.when, payments=payments))
-        elif isinstance(component, DurationEvent):  # pyright: ignore[reportUnnecessaryIsInstance]
-            targets = tuple(
-                DurationTargetPayment(
-                    state_index=state_index[state],
-                    at_duration=component.at_durations[state],
-                    payment=fn,
+                StatePayment(
+                    state_index[state],
+                    *bind(
+                        fn,
+                        ("scheduled_event", state, when),
+                        f"ScheduledEvent({name!r})[{state!r}]",
+                    ),
                 )
                 for state, fn in component.payments.items()
                 if state in state_index
             )
-            prepared.append(DurationEventSpec(targets=targets))
+            prepared.append(ScheduledEventSpec(when=when, payments=payments))
+        elif isinstance(component, DurationEvent):  # pyright: ignore[reportUnnecessaryIsInstance]
+            targets: list[DurationTargetPayment] = []
+            for state, fn in component.payments.items():
+                if state not in state_index:
+                    continue
+                at = component.at_durations[state]
+                target = IdentityCallable(at) if callable(at) else cast(Scalar, at)
+                targets.append(
+                    DurationTargetPayment(
+                        state_index[state],
+                        target,
+                        *bind(
+                            fn,
+                            ("duration_event", state, target),
+                            f"DurationEvent({name!r})[{state!r}]",
+                        ),
+                    )
+                )
+            prepared.append(DurationEventSpec(targets=tuple(targets)))
     return tuple(prepared)
 
 

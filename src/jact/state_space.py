@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Hashable, Iterable, Mapping, Sequence, TypeVar
 import jax.numpy as jnp
 
 from .initial_distribution import InitialDistribution
-from .typing import ArrayLike, Derived, GroupedIntensity, Intensity
+from .typing import ArrayLike, Derived, GroupedIntensity, Intensity, Payment
 
 if TYPE_CHECKING:
     from .cashflows import CashflowComponent, CashflowDeclaration
@@ -304,11 +304,19 @@ class StateSpace:
         self,
         components: Mapping[str, CashflowComponent],
         derived: Derived | None = None,
+        *,
+        cores: Mapping[str, Payment] | None = None,
     ) -> CashflowDeclaration:
-        """Create a validated cashflow declaration for this state space."""
+        """Create a validated cashflow declaration for this state space.
+
+        ``cores`` defines named payment functions referenced by
+        ``jact.cashflows.Scaled``. Compatible references share integration.
+        """
         from .cashflows import validate_cashflow_components
 
-        return validate_cashflow_components(self, components, derived=derived)
+        return validate_cashflow_components(
+            self, components, derived=derived, cores=cores
+        )
 
     # ------------------------------------------------------------------ #
     # InitialDistribution helpers                                         #
