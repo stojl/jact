@@ -361,13 +361,13 @@ def test_jit_and_gradients_match_unfactored_payments():
 
 
 def _count_primitive(value, name):
-    if hasattr(value, "jaxpr"):
-        return _count_primitive(value.jaxpr, name)
     if hasattr(value, "eqns"):
         return sum(
             (eq.primitive.name == name) + _count_primitive(eq.params, name)
             for eq in value.eqns
         )
+    if hasattr(value, "jaxpr"):
+        return _count_primitive(value.jaxpr, name)
     if isinstance(value, dict):
         return sum(_count_primitive(v, name) for v in value.values())
     if isinstance(value, (tuple, list)):
