@@ -157,23 +157,38 @@ def _evaluate_grid(
     phase: str = "mid",
     limit: float | None = None,
 ) -> jnp.ndarray:
+    key = ("grid", phase, limit)
     if layout is None:
         return _broadcast_grid_output(
-            fn(t, d, **kwargs.resolve(("grid", phase, limit), t, d)),
+            fn(t, d, **kwargs.resolve(key, t, d)),
             (batch_size, d.shape[-1]),
             label,
         )
+    compact = cast(
+        jnp.ndarray,
+        kwargs.grid_durations[key]
+        if key in kwargs.grid_durations
+        else _sampled_grid(d, layout),
+    )
+    values = _broadcast_grid_output(
+        fn(t, compact, **kwargs.resolve(key, t, compact)),
+        (batch_size, compact.shape[-1]),
+        label,
+    )
+    return values[:, jnp.asarray(layout.gather, dtype=jnp.int32)]
+
+
+def _sampled_grid(
+    d: jnp.ndarray, layout: _EvaluationLayout | None
+) -> jnp.ndarray:
+    if layout is None:
+        return d
     compact = d[:, jnp.asarray(layout.indices, dtype=jnp.int32)]
     if layout.threshold is not None:
         compact = jnp.concatenate(
             (compact, jnp.full((1, 1), layout.threshold, dtype=d.dtype)), axis=-1
         )
-    values = _broadcast_grid_output(
-        fn(t, compact, **kwargs.resolve(("grid", phase, limit), t, compact)),
-        (batch_size, compact.shape[-1]),
-        label,
-    )
-    return values[:, jnp.asarray(layout.gather, dtype=jnp.int32)]
+    return compact
 
 
 def _threshold_value(
@@ -1532,6 +1547,60 @@ def _midpoint_solver(
     block_0 = _zero_view_values(cashflow_views, value_template)
     terminal_0 = _zero_view_values(cashflow_views, value_template)
     input_fields = field_graph.input_only(intensity_kwargs)
+    grid_fields: dict[object, dict[str, jnp.ndarray]] = {}
+    grid_durations: dict[object, jnp.ndarray] = {}
+    if any(node.needs_duration and not node.needs_time for node in field_graph.nodes):
+        prepared_layouts: dict[
+            tuple[str, _EvaluationLayout | None],
+            tuple[jnp.ndarray, dict[str, jnp.ndarray]],
+        ] = {}
+        grid_contexts: list[
+            tuple[tuple[str, str, float | None], jnp.ndarray, _EvaluationLayout | None]
+        ] = []
+        if any(fn is not None for row in solver_matrix for fn in row):
+            grid_contexts.append(
+                (
+                    ("grid", "mid", config.intensity_limit),
+                    duration_mid,
+                    intensity_layout,
+                )
+            )
+        if any(
+            isinstance(component, (StateRateSpec, TransitionLumpSpec))
+            and component.payments
+            for component in cashflow_components
+        ):
+            grid_contexts.append(
+                (
+                    ("grid", "mid", config.payment_limit),
+                    duration_mid,
+                    payment_mid_layout,
+                )
+            )
+        if any(
+            isinstance(component, ScheduledEventSpec) and component.payments
+            for component in cashflow_components
+        ):
+            grid_contexts.append(
+                (
+                    ("grid", "left", config.payment_limit),
+                    duration_left,
+                    payment_left_layout,
+                )
+            )
+        for key, d, layout in grid_contexts:
+            if key not in grid_fields:
+                phase = key[1]
+                layout_key = (phase, layout)
+                if layout_key not in prepared_layouts:
+                    sampled = _sampled_grid(d, layout)
+                    prepared_layouts[layout_key] = (
+                        sampled,
+                        field_graph.duration_only(input_fields, sampled),
+                    )
+                sampled, resolved = prepared_layouts[layout_key]
+                grid_durations[key] = sampled
+                grid_fields[key] = resolved
     scheduled_events = _compute_scheduled_events(
         cashflow_components,
         step_size,
@@ -1570,7 +1639,9 @@ def _midpoint_solver(
         ]:
             inner_state, block_cashflows, terminal_cashflows = inner_carry
             current_t = block_start + offset * step_size
-            fields = FieldRuntime(field_graph, input_fields)
+            fields = FieldRuntime(
+                field_graph, input_fields, grid_fields, grid_durations
+            )
 
             dynamics = _solver_step_dynamics(
                 inner_state,

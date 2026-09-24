@@ -162,13 +162,36 @@ class FieldGraph:
                 )
         return values
 
+    def duration_only(
+        self, inputs: dict[str, jnp.ndarray], d: jnp.ndarray
+    ) -> dict[str, jnp.ndarray]:
+        """Resolve fields fixed by one canonical duration grid."""
+        values = {**inputs, "d": d}
+        resolved: dict[str, jnp.ndarray] = {}
+        for node in self.nodes:
+            if node.needs_duration and not node.needs_time:
+                value = jnp.asarray(
+                    node.fn(**{dep: values[dep] for dep in node.dependencies})
+                )
+                values[node.name] = value
+                resolved[node.name] = value
+        return resolved
+
 
 class FieldRuntime:
     """A step-local cache; graph functions execute once per requested context."""
 
-    def __init__(self, graph: FieldGraph, inputs: dict[str, jnp.ndarray]):
+    def __init__(
+        self,
+        graph: FieldGraph,
+        inputs: dict[str, jnp.ndarray],
+        grid_fields: Mapping[object, dict[str, jnp.ndarray]] | None = None,
+        grid_durations: Mapping[object, jnp.ndarray] | None = None,
+    ):
         self.graph = graph
         self.inputs = inputs
+        self.grid_fields = grid_fields if grid_fields is not None else {}
+        self.grid_durations = grid_durations if grid_durations is not None else {}
         self.cache: dict[object, dict[str, jnp.ndarray]] = {}
 
     def resolve(
@@ -185,6 +208,8 @@ class FieldRuntime:
             if d is not None and t is not None
             else dict(self.inputs)
         )
+        if d is not None:
+            values.update(self.grid_fields.get(key, {}))
         if t is not None:
             values["t"] = t
         if d is not None:

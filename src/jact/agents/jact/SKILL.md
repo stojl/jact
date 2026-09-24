@@ -145,6 +145,62 @@ Do not suggest variable-size chunks for large workloads unless compile overhead
 is irrelevant. If batch sizes must vary, explain that shape changes may trigger
 additional JIT compilation.
 
+## Shared Derived Fields
+
+Use `derived={...}` to share expensive exogenous features across transition
+intensities and cashflows. Fields may be declared on `StateSpace.build(...)`,
+`StateSpace.cashflows(...)`, or an individual `solve(...)`. A field function's
+named parameters declare its dependencies on solve inputs, `t`, `d`, or other
+fields; its calculation should use pure JAX operations.
+
+For compiled performance, separate an expensive duration-only calculation from
+any time-dependent calculation that consumes it. On fixed density grids, `jact`
+resolves a field that depends on `d` but not `t` once per distinct grid before
+the solver scan and reuses it across steps and consumers. A field that also
+depends on `t` still runs per step, using its prepared duration-only inputs.
+Point-mass duration changes with time, so the same duration field is evaluated
+on each point context.
+
+```python
+import jax.numpy as jnp
+import jact
+
+state_space = jact.StateSpace(
+    states=["active", "dead"], transitions=[("active", "dead")]
+)
+
+
+def duration_basis(d, scale):
+    return jnp.sin(d * scale[:, None])
+
+
+def mortality(t, d, **kwargs):
+    return 0.02 + 0.01 * kwargs["duration_basis"] + 0.001 * t
+
+
+model = state_space.build(
+    transitions={("active", "dead"): mortality},
+    derived={"duration_basis": duration_basis},
+)
+cashflows = state_space.cashflows(
+    {
+        "premium": jact.cashflows.StateRate(
+            {"active": lambda t, d, **kw: 1_000 * (1 + 0.1 * kw["duration_basis"])}
+        )
+    }
+)
+result = model.solve(
+    initial="active", horizon=20, steps_per_unit=12,
+    cashflows=cashflows,
+    scale=jnp.array([0.8, 1.2]),
+)
+```
+
+Pass batched inputs such as `scale` to `solve` so they remain dynamic JAX values
+and establish the batch size. Consider this pattern when several callables use
+the same costly feature; compare warmed, synchronized solves to confirm a
+speedup for the actual workload.
+
 ## Initial Conditions
 
 Use the simplest initial condition that represents the problem:
