@@ -22,7 +22,7 @@ Use `import jact` for the main surface. The top-level names are
 helpers live under public submodules:
 
 - `jact.cashflows` — declarations (`StateRate`, `TransitionLump`,
-  `ScheduledEvent`, `DurationEvent`, `CashflowDeclaration`) and views (`Raw`,
+  `ScheduledEvent`, `DurationEvent`, `Scaled`, `CashflowDeclaration`) and views (`Raw`,
   `Group`, `Total`, `ByState`, `ByKind`), plus the `CashflowComponent` and
   `CashflowView` unions.
 - `jact.probability` — output reducers (`StateProbability`,
@@ -83,7 +83,7 @@ Surface:
 | `state_index(state)` | Zero-based index in `states` |
 | `reachable_from(state)` | Starting state first, then reachable states in original state order |
 | `build(transitions=..., exits=..., groups=..., derived=...)` | Create a `Model` |
-| `cashflows({...}, derived=...)` | Create a `CashflowDeclaration` |
+| `cashflows({...}, derived=..., cores=...)` | Create a `CashflowDeclaration` |
 | `initial_at(state, duration=0.0)` | Create an `InitialDistribution` |
 | `initial_distribution(components=..., normalise=True)` | Create an `InitialDistribution` |
 | `initial_per_individual(...)` | Create an `InitialDistribution` from per-individual initial states |
@@ -525,6 +525,7 @@ cashflows.state_space
 cashflows.names
 cashflows.component("premium")
 cashflows.derived
+cashflows.cores
 ```
 
 Validation is structural:
@@ -536,8 +537,8 @@ Validation is structural:
 - `ScheduledEvent.payments` keys must be declared states,
 - `DurationEvent.at_durations` and `DurationEvent.payments` keys must be the
   same declared states,
-- every payment callable and every `ScheduledEvent.when` callable must be
-  callable,
+- every payment value must be a callable or a `Scaled` reference to a defined
+  core; every `ScheduledEvent.when` must be callable,
 - every `DurationEvent.at_durations` value must be a scalar or callable.
 
 ### Component kinds
@@ -554,6 +555,80 @@ Validation is structural:
   target duration.
 
 `StateRate` and `TransitionLump` take their `payments` mapping positionally.
+
+### Named payment cores
+
+Use `Scaled(core: str, *, weight=1.0)` in any payment mapping to reuse the
+integrated contribution of a named payment function:
+
+```python
+from jact import cashflows as cf
+
+def eligible(t, d, **kwargs):
+    return jnp.where(d >= 0.5, 1.0, 0.0)
+
+cashflows = state_space.cashflows(
+    {
+        "income": cf.StateRate({
+            "disabled": cf.Scaled(
+                "eligible", weight=lambda t, **kw: 0.60 * kw["salary"],
+            ),
+        }),
+        "pension": cf.StateRate({
+            "disabled": cf.Scaled(
+                "eligible", weight=lambda t, **kw: 0.10 * kw["salary"],
+            ),
+        }),
+    },
+    cores={"eligible": eligible},
+)
+```
+
+`cores` is an optional keyword-only mapping of non-empty names to ordinary
+`jact.typing.Payment` callables. Its entries are copied into an immutable
+`CashflowDeclaration.cores` mapping. Names are local to that declaration and
+independent of component and derived-field names. Each reference selects the
+single registered definition; independently constructed payment declarations
+can share by name without reusing a callable object. Unknown references are
+rejected during declaration validation, including on unreachable attachments.
+Unused definitions are allowed and are not evaluated.
+
+The same core name shares a complete base contribution within each compatible
+attachment context, once per inner step:
+
+| Component kind | Additional context required for sharing |
+| --- | --- |
+| `StateRate` | Same occupied state |
+| `TransitionLump` | Same transition |
+| `ScheduledEvent` | Same occupied state and same `when` callable object |
+| `DurationEvent` | Same occupied state and same scalar target value or target callable object |
+
+Different kinds never share contributions. Distinct core names remain distinct,
+even if they map to the same function. Ordinary payment callables continue to be
+evaluated per attachment; use `Scaled("eligible")` for a unit-weight use of a
+named core. The core itself is not an output component. Scaled consumers remain
+separate named components for all views, including totals and attribution.
+
+The weight may be `None` (unity), a Python scalar, a rank-zero array, or a
+`jact.typing.Weight` callable `(t, **kwargs)` returning a scalar or a value
+broadcastable to `(batch,)`. Per-individual weights are passed as solve inputs
+and returned by a callable. Weight callables receive inputs and time-only
+derived fields, without `d` or fields depending directly or indirectly on `d`.
+Negative and zero weights are allowed.
+
+Weights multiply the complete base contribution, including point masses and
+same-step transfer corrections, before component aggregation and before view
+weights. State-rate and transition-lump weights use the inner-step midpoint;
+scheduled-event and duration-event weights use the step left endpoint under
+the existing event rounding rules. Weights are applied before `record_every`
+or terminal accumulation, so time-varying factors retain their inner-step
+sampling. Payment duration limits apply to core evaluation as for ordinary
+payments. Moving multiplication outside a reduction may change floating-point
+rounding slightly.
+
+`Scaled` is a declaration, not a callable. Its `core` must be a name; nested
+wrappers and references inside `cores` are not supported. Core definitions must
+follow the same pure, JAX-compatible callable conventions as ordinary payments.
 
 ### Callable protocols
 
@@ -1053,6 +1128,7 @@ Static at trace time:
 - declared initial-state set,
 - `step_size`, `record_every`, and all three duration limits,
 - cashflow component names, kinds, and attachment points,
+- named-core references and their callable definitions,
 - payment, `when`, and weight callable identities,
 - derived graph names, dependencies, and callable identities,
 - cashflow view names, kinds, and `terminal` flags.

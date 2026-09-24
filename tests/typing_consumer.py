@@ -10,6 +10,28 @@ from typing_extensions import assert_type
 import jact
 
 
+def _check_scaled_declaration(
+    space: jact.StateSpace,
+    payment: jact.typing.Payment,
+    weight: jact.typing.Weight,
+    when: jact.typing.When,
+) -> None:
+    scaled = jact.cashflows.Scaled("core", weight=weight)
+    declaration = space.cashflows(
+        {
+            "rate": jact.cashflows.StateRate({"healthy": scaled}),
+            "lump": jact.cashflows.TransitionLump({("healthy", "dead"): scaled}),
+            "event": jact.cashflows.ScheduledEvent(when, {"healthy": scaled}),
+            "duration": jact.cashflows.DurationEvent(
+                {"healthy": 0.5}, {"healthy": scaled},
+            ),
+        },
+        cores={"core": payment},
+    )
+    assert_type(declaration, jact.cashflows.CashflowDeclaration)
+    assert_type(declaration.cores["core"], jact.typing.Payment)
+
+
 def _custom_probability(
     state: Any,
 ) -> dict[str, tuple[jax.Array, list[jax.Array]]]:

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add declaration-local named payment `cores` and `cashflows.Scaled` references.
+  Compatible payments share their complete integrated core contribution before
+  applying individual duration-independent weights, across all cashflow kinds.
 - Preserve probability mass when initial masses or per-individual durations
   are supplied as integers.
 - Keep probability and cashflow gradients finite and correct at zero initial
