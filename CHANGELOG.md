@@ -1,5 +1,12 @@
 # Release notes
 
+## Unreleased
+
+- Preserve probability mass when initial masses or per-individual durations
+  are supplied as integers.
+- Keep probability and cashflow gradients finite and correct at zero initial
+  mass by tracking initial mass separately from accumulated survival.
+
 ## 0.1.13
 
 - Reuse duration-only derived fields across solver steps on fixed density grids,
