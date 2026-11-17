@@ -70,7 +70,8 @@ include = ["jact*"]
 [tool.pyright]
 include = ["src/jact", "tests"]
 extraPaths = ["src"]
-pythonVersion = "3.10"
+# Current JAX stubs use typing.Self, which is available from Python 3.11.
+pythonVersion = "3.11"
 typeCheckingMode = "standard"
 reportMissingImports = false
 reportMissingTypeStubs = false

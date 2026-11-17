@@ -7,7 +7,7 @@ import math
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from numbers import Integral
-from typing import Any, NamedTuple, TypeAlias, TypeVar, cast, overload
+from typing import Any, NamedTuple, Protocol, TypeAlias, TypeVar, cast, overload
 
 import jax
 import jax.numpy as jnp
@@ -94,6 +94,10 @@ _KIND_DURATION_EVENT = 3
 _ProbabilityTree: TypeAlias = Any
 _DType: TypeAlias = np.dtype[np.generic]
 _PyTreeT = TypeVar("_PyTreeT")
+
+
+class _CovariateTreeDef(Protocol):
+    def unflatten(self, leaves: tuple[jnp.ndarray, ...], /) -> dict[str, Any]: ...
 
 
 class _DurationConfig(NamedTuple):
@@ -1454,13 +1458,13 @@ def _shard_batch_tree(
 
 def _shard_covariate_tree(
     kwargs: dict[str, Any], device_count: int
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Shard batched leaves and broadcast scalar leaves of structured inputs."""
+) -> tuple[tuple[jnp.ndarray, ...], tuple[int | None, ...], _CovariateTreeDef]:
+    """Prepare flat covariate leaves and their device axes for pmap."""
     leaves, treedef = cast(
-        tuple[list[Any], Any], jax.tree_util.tree_flatten(kwargs)
+        tuple[list[Any], _CovariateTreeDef], jax.tree_util.tree_flatten(kwargs)
     )
-    sharded_leaves = []
-    axes = []
+    sharded_leaves: list[jnp.ndarray] = []
+    axes: list[int | None] = []
     for leaf in leaves:
         array = jnp.asarray(leaf)
         if array.ndim == 0:
@@ -1469,7 +1473,7 @@ def _shard_covariate_tree(
         else:
             sharded_leaves.append(_shard_batch_array(array, device_count)[0])
             axes.append(0)
-    return treedef.unflatten(sharded_leaves), treedef.unflatten(axes)
+    return tuple(sharded_leaves), tuple(axes), treedef
 
 
 def _unshard_batch_array(value: jnp.ndarray, original_batch_size: int) -> jnp.ndarray:
@@ -1583,13 +1587,13 @@ def _midpoint_solver_pmapped_all_devices(
 
 def _midpoint_solver_pmapped_on_devices(
     devices: tuple[Any, ...],
-    covariate_axes: Any = 0,
+    covariate_axes: int | tuple[int | None, ...] = 0,
 ) -> Callable[..., _SolverResult]:
-    in_axes = _PMAP_IN_AXES[:5] + (covariate_axes,) + _PMAP_IN_AXES[6:]
+    in_axes = _PMAP_IN_AXES[:5] + (covariate_axes,) + _PMAP_IN_AXES[6:] + (None,)
     return jax.pmap(
         _midpoint_solver_pmapped_wrapper,
         in_axes=in_axes,
-        static_broadcasted_argnums=_PMAP_STATIC_ARGNUMS,
+        static_broadcasted_argnums=(*_PMAP_STATIC_ARGNUMS, 13),
         devices=devices,
     )
 
@@ -1600,15 +1604,22 @@ def _midpoint_solver_pmapped_wrapper(
     duration_left: jnp.ndarray,
     step_size: float,
     solver_matrix: Sequence[Sequence[Intensity | None]],
-    batch_kwargs: dict[str, jnp.ndarray],
+    batch_kwargs: dict[str, jnp.ndarray] | tuple[jnp.ndarray, ...],
     scalar_kwargs: dict[str, jnp.ndarray],
     prob_callback: CallbackFn,
     record_every: int,
-    cashflow_components: CashflowComponentSpecs = (),
-    cashflow_views: PreparedCashflowViews = (),
-    duration_config: _DurationConfig | None = None,
-    field_graph: FieldGraph = FieldGraph(()),
+    cashflow_components: CashflowComponentSpecs,
+    cashflow_views: PreparedCashflowViews,
+    duration_config: _DurationConfig | None,
+    field_graph: FieldGraph,
+    covariate_treedef: _CovariateTreeDef | None,
 ) -> _SolverResult:
+    if isinstance(batch_kwargs, dict):
+        intensity_kwargs = {**scalar_kwargs, **batch_kwargs}
+    else:
+        assert covariate_treedef is not None
+        # Rebuild domain objects with per-device values inside the mapped call.
+        intensity_kwargs = covariate_treedef.unflatten(batch_kwargs)
     return cast(
         _SolverResult,
         _midpoint_solver(
@@ -1617,7 +1628,7 @@ def _midpoint_solver_pmapped_wrapper(
             duration_left,
             step_size,
             solver_matrix,
-            {**scalar_kwargs, **batch_kwargs},
+            intensity_kwargs,
             prob_callback,
             record_every,
             cashflow_components,
@@ -2286,7 +2297,7 @@ def _run_midpoint_solver(
         not isinstance(value, jax.Array)  # pyright: ignore[reportUnnecessaryIsInstance]
         for value in intensity_kwargs.values()
     ):
-        sharded_kwargs, covariate_axes = _shard_covariate_tree(
+        sharded_leaves, covariate_axes, covariate_treedef = _shard_covariate_tree(
             intensity_kwargs, len(devices)
         )
         sharded_result = _midpoint_solver_pmapped_on_devices(
@@ -2297,7 +2308,7 @@ def _run_midpoint_solver(
             duration_left,
             step_size,
             solver_matrix,
-            sharded_kwargs,
+            sharded_leaves,
             {},
             prob_callback,
             record_every,
@@ -2305,6 +2316,7 @@ def _run_midpoint_solver(
             cashflow_views,
             duration_config,
             field_graph,
+            covariate_treedef,
         )
         return _unshard_batch_tree(sharded_result, batch_size)
     scalar_kwargs, batch_kwargs = _split_scalar_and_batch_kwargs(intensity_kwargs)
@@ -2349,6 +2361,7 @@ def _run_midpoint_solver(
             cashflow_views,
             duration_config,
             field_graph,
+            None,
         )
     return _unshard_batch_tree(sharded_result, batch_size)
 

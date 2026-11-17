@@ -63,8 +63,8 @@ def test_pytree_inputs_and_derived_fields_match_flat_inputs_under_jit():
 
     np.testing.assert_allclose(jax.jit(run_structured)(rate), jax.jit(run_flat)(rate))
     np.testing.assert_allclose(
-        jax.grad(lambda r: jnp.sum(run_structured(r)))(rate),
-        jax.grad(lambda r: jnp.sum(run_flat(r)))(rate),
+        jax.grad(lambda r: jnp.sum(run_structured(r)[-1, :, 0]))(rate),
+        jax.grad(lambda r: jnp.sum(run_flat(r)[-1, :, 0]))(rate),
         rtol=1e-5,
     )
 
@@ -119,19 +119,30 @@ def test_registered_domain_class_and_duration_derived_tree():
     np.testing.assert_allclose(actual.probability, expected.probability)
 
 
-def test_pytree_input_with_scalar_leaf_shards_across_devices():
+def test_registered_pytree_input_with_scalar_leaf_shards_across_devices():
     env = os.environ.copy()
     env["PYTHONPATH"] = os.path.join(os.path.dirname(__file__), "..", "src")
+    env["JAX_PLATFORMS"] = "cpu"
     env["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
     code = '''
 import jax
 import jax.numpy as jnp
 import numpy as np
 import jact
-from typing import NamedTuple
-class Policy(NamedTuple):
-    rate: object
-    factor: object
+
+@jax.tree_util.register_pytree_node_class
+class Policy:
+    def __init__(self, rate, factor):
+        self.rate = jnp.asarray(rate)
+        self.factor = jnp.asarray(factor)
+
+    def tree_flatten(self):
+        return (self.rate, self.factor), None
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        return cls(*children)
+
 ss = jact.StateSpace(["active", "dead"], [("active", "dead")])
 model = ss.build(transitions={
     ("active", "dead"): lambda t, d, **kw:
