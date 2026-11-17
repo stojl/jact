@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.1.15
+
+- Accept JAX pytrees as named solve inputs, preserving their structure in
+  callbacks and derived fields. Validate numeric leaves and report input paths
+  when batch sizes disagree.
+- Preserve structured derived-field values through dependent fields and solver
+  evaluations, including JIT and multi-device solves.
+
+## 0.1.14
+
 - Add declaration-local named payment `cores` and `cashflows.Scaled` references.
   Compatible payments share their complete integrated core contribution before
   applying individual duration-independent weights, across all cashflow kinds.
