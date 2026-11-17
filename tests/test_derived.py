@@ -4,7 +4,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -12,6 +12,139 @@ import numpy as np
 import pytest
 
 import jact
+
+
+class Policy(NamedTuple):
+    age: Any
+    rate: Any
+    factor: Any
+
+
+def test_pytree_inputs_and_derived_fields_match_flat_inputs_under_jit():
+    ss = jact.StateSpace(["active", "dead"], [("active", "dead")])
+
+    def structured_intensity(t, d, **kw):
+        return kw["risk"]["hazard"][:, None] + 0 * d
+
+    structured = ss.build(
+        transitions={("active", "dead"): structured_intensity},
+        derived={
+            "profile": lambda policy: Policy(
+                policy.age + 0, policy.rate * policy.factor, policy.factor
+            ),
+            "risk": lambda t, profile: {
+                "hazard": profile.rate + 0.001 * (profile.age + t)
+            },
+        },
+    )
+    flat = ss.build(
+        transitions={
+            ("active", "dead"): lambda t, d, **kw: (
+                kw["rate"] * kw["factor"] + 0.001 * (kw["age"] + t)
+            )[:, None]
+            + 0 * d
+        }
+    )
+    age = jnp.array([35.0, 45.0, 55.0])
+    rate = jnp.array([0.01, 0.02, 0.03])
+    factor = 1.5
+
+    def run_structured(r):
+        return structured.solve(
+            initial="active", horizon=1, steps_per_unit=2,
+            policy=Policy(age, r, factor),
+        ).probability
+
+    def run_flat(r):
+        return flat.solve(
+            initial="active", horizon=1, steps_per_unit=2,
+            age=age, rate=r, factor=factor,
+        ).probability
+
+    np.testing.assert_allclose(jax.jit(run_structured)(rate), jax.jit(run_flat)(rate))
+    np.testing.assert_allclose(
+        jax.grad(lambda r: jnp.sum(run_structured(r)))(rate),
+        jax.grad(lambda r: jnp.sum(run_flat(r)))(rate),
+        rtol=1e-5,
+    )
+
+
+def test_pytree_input_batch_error_identifies_leaf():
+    ss = jact.StateSpace(["active", "dead"], [("active", "dead")])
+    model = ss.build(transitions={("active", "dead"): lambda t, d, **kw: 0.1})
+    with pytest.raises(ValueError, match=r"policy.*rate.*size 2, expected 3"):
+        model.solve(
+            initial="active", horizon=1, steps_per_unit=2,
+            policy=Policy(jnp.ones(3), jnp.ones(2), 1.0),
+        )
+
+
+def test_registered_domain_class_and_duration_derived_tree():
+    @jax.tree_util.register_pytree_node_class
+    @dataclass(frozen=True)
+    class PolicyRecord:
+        rate: Any
+
+        def tree_flatten(self):
+            return (self.rate,), None
+
+        @classmethod
+        def tree_unflatten(cls, aux, children):
+            return cls(*children)
+
+    ss = jact.StateSpace(["active", "dead"], [("active", "dead")])
+    structured = ss.build(
+        transitions={
+            ("active", "dead"): lambda t, d, **kw: kw["surface"]["hazard"]
+        },
+        derived={
+            "surface": lambda d, policy: {
+                "hazard": policy.rate[:, None] * (1 + d)
+            }
+        },
+    )
+    flat = ss.build(
+        transitions={
+            ("active", "dead"): lambda t, d, **kw: kw["rate"][:, None]
+            * (1 + d)
+        }
+    )
+    rate = jnp.array([0.1, 0.2])
+    actual = structured.solve(
+        initial="active", horizon=1, steps_per_unit=2, policy=PolicyRecord(rate)
+    )
+    expected = flat.solve(
+        initial="active", horizon=1, steps_per_unit=2, rate=rate
+    )
+    np.testing.assert_allclose(actual.probability, expected.probability)
+
+
+def test_pytree_input_with_scalar_leaf_shards_across_devices():
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.path.join(os.path.dirname(__file__), "..", "src")
+    env["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
+    code = '''
+import jax
+import jax.numpy as jnp
+import numpy as np
+import jact
+from typing import NamedTuple
+class Policy(NamedTuple):
+    rate: object
+    factor: object
+ss = jact.StateSpace(["active", "dead"], [("active", "dead")])
+model = ss.build(transitions={
+    ("active", "dead"): lambda t, d, **kw:
+        kw["policy"].rate[:, None] * kw["policy"].factor + 0 * d
+})
+policy = Policy(jnp.array([0.1, 0.2, 0.3]), jnp.array(2.0))
+serial = model.solve(initial="active", horizon=1, steps_per_unit=2, policy=policy)
+parallel = model.solve(
+    initial="active", horizon=1, steps_per_unit=2, policy=policy, devices=2
+)
+np.testing.assert_allclose(serial.probability, parallel.probability, rtol=1e-6)
+'''
+    subprocess.run([sys.executable, "-c", code], env=env, check=True)
 
 
 def _space():

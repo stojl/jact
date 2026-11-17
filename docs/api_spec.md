@@ -170,9 +170,22 @@ dependency. Fields must return JAX-compatible values.
 Before numerical solving, the combined graph rejects duplicate field names,
 names colliding with solve inputs or `t`, `d`, `initial`, or
 `initial_duration`, missing required dependencies, and cycles. Definitions do
-not override one another. Inputs and derived values keep their declared shapes;
+not override one another. Inputs and derived values keep their declared shapes
+and JAX pytree structure;
 callables should add a duration axis explicitly when needed, such as
 `kwargs["age"][:, None]`.
+
+Named solve inputs may be JAX pytrees, including dictionaries, named tuples,
+and registered classes. Their leaves must be numeric array-compatible values.
+Scalar leaves are shared. Every nonscalar input leaf uses axis 0 as the batch
+axis, and all such leaves must have the same batch size. Errors identify the
+input and leaf path. A scalar-only or empty tree does not establish a batch
+size. Homogeneous Python lists and tuples retain their array-input behavior;
+use a named tuple or registered class when their structure matters. A shared
+nonscalar parameter array cannot be distinguished from a batch input by shape
+and is not supported as a solve-input leaf. Derived fields may return pytrees
+with numeric leaves; their structure reaches dependent fields and callables
+unchanged. Duration-derived leaves may have duration-grid dimensions.
 
 Input-only fields are resolved once per solve or device shard. Time and duration
 fields are resolved in the relevant solver evaluation context and reused by
@@ -378,15 +391,16 @@ Arguments:
 |---|---|---|
 | `t` | scalar float | Clock time |
 | `d` | `(1, D)` | Duration grid broadcast over batch |
-| `**kwargs` | scalar or `(batch, ...)` arrays | Solve inputs and resolved derived fields |
+| `**kwargs` | arrays or JAX pytrees of arrays | Solve inputs and resolved derived fields |
 
 Interpretation:
 
 - `t` is clock time,
 - `d` is duration in the current state,
-- `**kwargs` include solve inputs and derived fields. Scalars with shape `()` are replicated
-  constants and do not define batch size. Non-scalar covariates use axis 0 as
-  the batch axis. A rank-1 value such as `jnp.arange(batch_size)` is batched
+- `**kwargs` include solve inputs and derived fields. Scalar input leaves with
+  shape `()` are replicated constants and do not define batch size. Non-scalar
+  input leaves use axis 0 as the batch axis. A rank-1 value such as
+  `jnp.arange(batch_size)` is batched
   with one scalar per individual; a value with shape `(batch_size, 1)` is also
   batched, with one length-1 vector per individual.
 - Batch size is inferred only from solver inputs: `InitialDistribution`

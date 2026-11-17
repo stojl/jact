@@ -43,6 +43,7 @@ from ._cashflow_ir import (
     TransitionPayment,
 )
 from ._derived import FieldGraph, FieldRuntime
+from ._field_values import as_field_value
 from .cashflows import (
     ByKind,
     ByState,
@@ -1451,6 +1452,26 @@ def _shard_batch_tree(
     return sharded, batch_size
 
 
+def _shard_covariate_tree(
+    kwargs: dict[str, Any], device_count: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Shard batched leaves and broadcast scalar leaves of structured inputs."""
+    leaves, treedef = cast(
+        tuple[list[Any], Any], jax.tree_util.tree_flatten(kwargs)
+    )
+    sharded_leaves = []
+    axes = []
+    for leaf in leaves:
+        array = jnp.asarray(leaf)
+        if array.ndim == 0:
+            sharded_leaves.append(array)
+            axes.append(None)
+        else:
+            sharded_leaves.append(_shard_batch_array(array, device_count)[0])
+            axes.append(0)
+    return treedef.unflatten(sharded_leaves), treedef.unflatten(axes)
+
+
 def _unshard_batch_array(value: jnp.ndarray, original_batch_size: int) -> jnp.ndarray:
     if value.ndim < 2:
         return value
@@ -1562,10 +1583,12 @@ def _midpoint_solver_pmapped_all_devices(
 
 def _midpoint_solver_pmapped_on_devices(
     devices: tuple[Any, ...],
+    covariate_axes: Any = 0,
 ) -> Callable[..., _SolverResult]:
+    in_axes = _PMAP_IN_AXES[:5] + (covariate_axes,) + _PMAP_IN_AXES[6:]
     return jax.pmap(
         _midpoint_solver_pmapped_wrapper,
-        in_axes=_PMAP_IN_AXES,
+        in_axes=in_axes,
         static_broadcasted_argnums=_PMAP_STATIC_ARGNUMS,
         devices=devices,
     )
@@ -1624,7 +1647,7 @@ def _midpoint_solver(
     duration_left: jnp.ndarray,
     step_size: float,
     solver_matrix: Sequence[Sequence[Intensity | None]],
-    intensity_kwargs: dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, Any],
     prob_callback: CallbackFn,
     record_every: int,
     cashflow_components: CashflowComponentSpecs = (),
@@ -1865,18 +1888,25 @@ def _midpoint_solver(
     )
 
 
-def _get_covariate_batch_size(
-    kwargs: Mapping[str, jnp.ndarray],
-) -> int | None:
+def _get_covariate_batch_size(kwargs: Mapping[str, Any]) -> int | None:
     batch_size = None
-    for value in kwargs.values():
-        shape = jnp.shape(value)
-        if len(shape) == 0:
-            continue
-        if batch_size is None:
-            batch_size = shape[0]
-        elif batch_size != shape[0]:
-            raise ValueError("Covariate batch dimensions must match.")
+    for name, value in kwargs.items():
+        paths = cast(
+            list[tuple[tuple[Any, ...], Any]],
+            jax.tree_util.tree_flatten_with_path(value)[0],
+        )
+        for path, leaf in paths:
+            shape = jnp.shape(leaf)
+            if len(shape) == 0:
+                continue
+            if batch_size is None:
+                batch_size = shape[0]
+            elif batch_size != shape[0]:
+                location = f"{name}{jax.tree_util.keystr(path)}"
+                raise ValueError(
+                    f"Covariate batch dimensions must match: {location} "
+                    f"has size {shape[0]}, expected {batch_size}."
+                )
     return batch_size
 
 
@@ -1896,14 +1926,14 @@ def _split_scalar_and_batch_kwargs(
 
 def _solver_value_dtype(
     canonical: _CanonicalDistribution,
-    kwargs: Mapping[str, jnp.ndarray],
+    kwargs: Mapping[str, Any],
 ) -> _DType:
     leaves = [
         jnp.asarray(value)
         for value in (
             *canonical.masses,
             *canonical.durations,
-            *kwargs.values(),
+            *jax.tree_util.tree_leaves(kwargs),
         )
     ]
     float_leaves = [leaf for leaf in leaves if jnp.issubdtype(leaf.dtype, jnp.inexact)]
@@ -2223,7 +2253,7 @@ def _run_midpoint_solver(
     duration_left: jnp.ndarray,
     step_size: float,
     solver_matrix: Sequence[Sequence[Intensity | None]],
-    intensity_kwargs: dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, Any],
     prob_callback: CallbackFn,
     record_every: int,
     cashflow_components: CashflowComponentSpecs,
@@ -2252,6 +2282,31 @@ def _run_midpoint_solver(
         )
 
     sharded_state_0, batch_size = _shard_batch_tree(state_0, len(devices))
+    if any(
+        not isinstance(value, jax.Array)  # pyright: ignore[reportUnnecessaryIsInstance]
+        for value in intensity_kwargs.values()
+    ):
+        sharded_kwargs, covariate_axes = _shard_covariate_tree(
+            intensity_kwargs, len(devices)
+        )
+        sharded_result = _midpoint_solver_pmapped_on_devices(
+            devices, covariate_axes
+        )(
+            sharded_state_0,
+            duration_mid,
+            duration_left,
+            step_size,
+            solver_matrix,
+            sharded_kwargs,
+            {},
+            prob_callback,
+            record_every,
+            cashflow_components,
+            cashflow_views,
+            duration_config,
+            field_graph,
+        )
+        return _unshard_batch_tree(sharded_result, batch_size)
     scalar_kwargs, batch_kwargs = _split_scalar_and_batch_kwargs(intensity_kwargs)
     if batch_kwargs:
         sharded_batch_kwargs, kwargs_batch_size = _shard_batch_tree(
@@ -2640,7 +2695,9 @@ def solve(
     )
 
     distribution_batch = canonical.batch_size
-    intensity_kwargs = {name: jnp.asarray(value) for name, value in kwargs.items()}
+    intensity_kwargs = {
+        name: as_field_value(value, name) for name, value in kwargs.items()
+    }
     covariate_batch = _get_covariate_batch_size(intensity_kwargs)
     if (
         distribution_batch is not None

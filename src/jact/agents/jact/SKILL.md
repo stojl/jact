@@ -20,7 +20,7 @@ When helping a user, first identify:
 
 - states and allowed transitions,
 - which transitions have known formulas versus fitted models,
-- covariates and their batch shape,
+- covariates, their JAX pytree structure, and leaf batch shapes,
 - the initial condition and any starting durations,
 - whether the user needs one solve or repeated fixed-shape batch processing,
 - whether the desired output is state occupancy, duration diagnostics,
@@ -108,12 +108,15 @@ reachable_states = result.states
 - `t` is scalar-like for the current solver time. `d` is the duration grid with
   the duration axis last; use `d.shape[-1]` for `D`.
 - User covariates are passed as keyword arguments to `solve`, then forwarded to
-  intensity and cashflow callables. Batched covariates use leading shape
-  `(batch, ...)`; scalar covariates with shape `()` are replicated constants and
-  do not define batch size.
+  intensity and cashflow callables. A named input may be a JAX pytree, such as a
+  dictionary, named tuple, or registered domain class. Its numeric leaves keep
+  their structure. Every nonscalar solve-input leaf uses leading shape
+  `(batch, ...)`, and all such leaves must agree on batch size. Scalar leaves
+  with shape `()` are shared constants and do not define batch size.
 - Batch size is inferred from initial masses/durations, per-individual initial
-  states, `initial_duration`, and non-scalar covariates. Callable outputs never
-  determine batch size; scalar-only inputs solve one individual.
+  states, `initial_duration`, and nonscalar solve-input leaves. Derived fields
+  and callable outputs do not determine batch size; scalar-only inputs solve one
+  individual.
 - Recorded probability outputs and streamed cashflow outputs use time as the
   leading axis. Probability snapshots include `t=0`; streamed cashflows do not.
 - `result.states` gives the reachable-state order used by probability tensors.
@@ -133,8 +136,8 @@ inputs fixed:
 - output structure: probability reducer, cashflow declarations, and cashflow
   views,
 - execution mode: selected devices,
-- covariate and initial-condition array shapes, especially the leading batch
-  dimension.
+- covariate tree structure, leaf array shapes, and initial-condition shapes,
+  especially the leading batch dimension.
 
 When the dataset is too large to solve in one call, process it in fixed-size
 batches with the same leading batch dimension. Pad the final partial batch to
@@ -160,6 +163,34 @@ the solver scan and reuses it across steps and consumers. A field that also
 depends on `t` still runs per step, using its prepared duration-only inputs.
 Point-mass duration changes with time, so the same duration field is evaluated
 on each point context.
+
+Inputs and derived fields may hold pytrees. A field still depends on a whole
+named input or field; dependent fields and intensity or payment callables receive
+the returned tree intact. For example, a `policy` named tuple with batched
+`age` and `rate` leaves can feed a structured field:
+
+```python
+from typing import NamedTuple
+import jax.numpy as jnp
+
+class Policy(NamedTuple):
+    age: jnp.ndarray
+    rate: jnp.ndarray
+
+derived = {
+    "risk": lambda t, policy: {
+        "hazard": policy.rate + 0.001 * (policy.age + t)
+    }
+}
+# An intensity can read kw["risk"]["hazard"][:, None] + 0 * d.
+```
+
+Register custom domain classes as JAX pytrees. Keep their tree structure stable
+across JIT calls. Homogeneous Python lists and tuples retain their existing
+array-input behavior; use a named tuple or registered class when their
+structure matters. A nonscalar shared parameter array is interpreted as a
+batched solve-input leaf, so do not put one inside a solve-input tree. Derived
+values involving `d` may contain duration-grid leaves such as `(1, D)`.
 
 ```python
 import jax.numpy as jnp
@@ -360,8 +391,9 @@ state-space topology:
 - For grouped, exit, or fitted multi-output models, normalize to
   a leading output axis of length `K`. If the fitted model emits
   `(batch, D, K)`, use `jact.wrappers.bind_grouped_intensity(..., output_axis=-1)`.
-- All non-scalar covariates passed to `solve` must agree on the leading batch
-  dimension. Scalar covariates are constants.
+- All nonscalar leaves of covariates passed to `solve` must agree on the leading
+  batch dimension. Scalar leaves are shared constants; a mismatch error names
+  the input and leaf path.
 
 ## Cashflow Guidance
 
