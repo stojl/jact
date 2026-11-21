@@ -1115,6 +1115,13 @@ A state with no incoming transitions can only carry its initial point mass.
 For these same outputs, the solver can skip its empty continuous grid while
 still evaluating point-mass transitions and payments at their durations.
 
+The solver can also accumulate the continuous marginal of a state whose exit
+intensities and attached payment amounts all broadcast from a single value
+along the duration axis. For example, a callable may return a scalar or
+`(batch, 1)` array. The solver uses the usual grid inputs to determine this
+from output shapes during JIT tracing. A duration event on the state requires
+its grid, even when its payment amount broadcasts across duration.
+
 Custom probability callables have signature
 `(state: tuple[StateCarry, ...]) -> PyTree`. Their returned PyTree is
 stacked by `jax.lax.scan` along a new leading time axis. `StateCarry` and

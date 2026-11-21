@@ -12,7 +12,7 @@ import pytest
 import jact
 from jact import cashflows as cf
 from jact import probability as pr
-from jact.solver import _accumulate_absorbing_mass
+from jact.solver import _accumulate_marginal_mass
 
 
 def _model():
@@ -147,7 +147,7 @@ def test_absorbing_accumulator_retains_small_inflows_over_many_steps():
     @jax.jit
     def accumulate(mass):
         def step(carry, _):
-            return _accumulate_absorbing_mass(carry, inflow), None
+            return _accumulate_marginal_mass(carry, inflow), None
 
         final, _ = jax.lax.scan(step, mass, None, length=steps)
         return jnp.sum(final, axis=-1)

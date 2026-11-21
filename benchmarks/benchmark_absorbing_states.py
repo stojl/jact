@@ -7,6 +7,8 @@ Extract the baseline package first, then run the benchmark against it.
     git archive 3a21b27 src/jact | tar -x -C /tmp/jact-before
     PYTHONPATH=src python benchmarks/benchmark_absorbing_states.py \
         --baseline-src /tmp/jact-before/src
+
+Pass --duration-uniform for hazards and payments that broadcast over duration.
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ def load_baseline(source: Path):
     return module
 
 
-def make_solve(lib, scenario, horizon, steps_per_unit, limit):
+def make_solve(lib, scenario, horizon, steps_per_unit, limit, duration_uniform):
     edges = (
         ("active", "disabled"),
         ("active", "dead"),
@@ -53,9 +55,10 @@ def make_solve(lib, scenario, horizon, steps_per_unit, limit):
 
     def hazard(scale):
         def evaluate(t, d, *, age, **kwargs):
-            return scale * (
-                0.035 + 0.003 * t + 0.0003 * age[:, None] + 0.06 * jnp.exp(-d)
-            )
+            rate = 0.035 + 0.003 * t + 0.0003 * age[:, None]
+            if not duration_uniform:
+                rate = rate + 0.06 * jnp.exp(-d)
+            return scale * rate
 
         return evaluate
 
@@ -71,8 +74,13 @@ def make_solve(lib, scenario, horizon, steps_per_unit, limit):
         }
     )
 
-    def benefit(t, d, *, age, **kwargs):
+    def duration_benefit(t, d, *, age, **kwargs):
         return (0.8 + 0.15 * jnp.exp(-0.2 * d)) * (1 + 0.004 * age[:, None])
+
+    def benefit(t, d, *, age, **kwargs):
+        if duration_uniform:
+            return 0.95 * (1 + 0.004 * age[:, None])
+        return duration_benefit(t, d, age=age, **kwargs)
 
     def discount(t, **kwargs):
         return jnp.exp(-0.025 * t)
@@ -83,7 +91,7 @@ def make_solve(lib, scenario, horizon, steps_per_unit, limit):
         rates = {"disabled": benefit}
         if scenario == "observed":
             # A duration-dependent payment in the absorbing state keeps its grid.
-            rates["dead"] = benefit
+            rates["dead"] = duration_benefit
         cashflows = space.cashflows(
             {
                 "benefit": cf.StateRate(rates),
@@ -118,7 +126,14 @@ def benchmark(libraries, inputs, scenario, limit, args):
     reference = None
     max_abs_diff = 0.0
     for label, lib in libraries.items():
-        solve = make_solve(lib, scenario, args.horizon, args.steps_per_unit, limit)
+        solve = make_solve(
+            lib,
+            scenario,
+            args.horizon,
+            args.steps_per_unit,
+            limit,
+            args.duration_uniform,
+        )
         start = time.perf_counter()
         executable = solve.lower(inputs).compile()
         compile_seconds = time.perf_counter() - start
@@ -174,6 +189,11 @@ def main():
     parser.add_argument("--steps-per-unit", type=int, default=12)
     parser.add_argument("--compression-limit", type=float, default=2.0)
     parser.add_argument(
+        "--duration-uniform",
+        action="store_true",
+        help="Use hazards and payments with a single output value across duration.",
+    )
+    parser.add_argument(
         "--scenarios",
         nargs="+",
         choices=["probability", "combined", "terminal", "observed"],
@@ -190,6 +210,7 @@ def main():
         "gpu": jax.devices()[0].device_kind,
         "horizon": args.horizon,
         "steps_per_unit": args.steps_per_unit,
+        "duration_uniform": args.duration_uniform,
         "warmups": args.warmups,
         "repeats": args.repeats,
     }
