@@ -63,6 +63,14 @@ result = model.solve(
 `derived` is also accepted by `state_space.cashflows(...)` and `model.solve(...)`.
 The combined field graph rejects duplicate names, missing inputs, and cycles.
 
+Solve inputs and derived fields can also be JAX pytrees, so callbacks can use
+named domain data instead of packed feature arrays. For example, a named tuple
+or registered pytree class passed as `policy=...` is available to a field as
+`lambda policy: policy.salary`. Scalar leaves are shared across individuals;
+every nonscalar solve-input leaf must have the same leading batch size. Derived
+fields preserve their returned tree structure for dependent fields and
+callbacks.
+
 ## Shared payment cores
 
 When payments share a duration-dependent function, define it once in `cores`

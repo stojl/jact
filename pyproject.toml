@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jact"
-version = "0.1.14"
+version = "0.1.16"
 description = "JAX-based transition probability computation for multi-state models"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -70,7 +70,8 @@ include = ["jact*"]
 [tool.pyright]
 include = ["src/jact", "tests"]
 extraPaths = ["src"]
-pythonVersion = "3.10"
+# Current JAX stubs use typing.Self, which is available from Python 3.11.
+pythonVersion = "3.11"
 typeCheckingMode = "standard"
 reportMissingImports = false
 reportMissingTypeStubs = false

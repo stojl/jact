@@ -20,12 +20,15 @@ def _model():
     edges = (("active", "disabled"), ("disabled", "active"), ("disabled", "dead"))
     space = jact.StateSpace(("active", "disabled", "dead"), edges)
 
-    def hazard(t, d, *, rate, age, **kwargs):
+    def hazard(t, d, *, rate, pricing, **kwargs):
         # Each output is uniform on its given grid, but changing that grid
         # or reusing its value for every point evaluation would be incorrect.
-        return rate * (1 + 0.1 * t + d.mean() + 0.01 * age[:, None])
+        return rate * (1 + 0.1 * t + d.mean() + 0.01 * pricing["age"][:, None])
 
-    model = space.build(transitions=dict.fromkeys(edges, hazard))
+    model = space.build(
+        transitions=dict.fromkeys(edges, hazard),
+        derived={"pricing": lambda policy: {"age": policy["age"]}},
+    )
     return space, model
 
 
@@ -51,8 +54,8 @@ def test_uniform_states_agree_with_full_grid(limit, observed, monkeypatch):
 
     monkeypatch.setattr(solver, "_plan_uniform_densities", record_selection)
 
-    def uniform_payment(t, d, *, age, **kwargs):
-        return 1 + t + d.mean() + 0.02 * age[:, None]
+    def uniform_payment(t, d, *, pricing, **kwargs):
+        return 1 + t + d.mean() + 0.02 * pricing["age"][:, None]
 
     def duration_payment(t, d, **kwargs):
         return 1 + d * d
@@ -88,7 +91,7 @@ def test_uniform_states_agree_with_full_grid(limit, observed, monkeypatch):
         cashflows=cashflows,
         cashflow_views={"raw": cf.Raw(), "pv": cf.Total(terminal=True)},
         rate=0.15,
-        age=jnp.array([34.0, 76.0]),
+        policy={"age": jnp.array([34.0, 76.0])},
         record_every=4,
         intensity_duration_limit=0.8,
         payment_duration_limit=1.0,
@@ -130,7 +133,7 @@ def test_uniform_states_support_reverse_mode():
     def objective(rate, *, full_grid):
         options: dict[str, Any] = dict(
             rate=rate,
-            age=jnp.array([28.0, 58.0]),
+            policy={"age": jnp.array([28.0, 58.0])},
             record_every=4,
         )
         if full_grid:

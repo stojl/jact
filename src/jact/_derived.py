@@ -9,6 +9,8 @@ from typing import Any
 
 import jax.numpy as jnp
 
+from ._field_values import as_field_value
+
 Derived = Mapping[str, Callable[..., Any]]
 _RESERVED = frozenset({"t", "d", "initial", "initial_duration"})
 
@@ -153,25 +155,27 @@ class FieldGraph:
             visit(field)
         return cls(tuple(ordered))
 
-    def input_only(self, inputs: dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
+    def input_only(self, inputs: dict[str, Any]) -> dict[str, Any]:
         values = dict(inputs)
         for node in self.nodes:
             if not node.needs_time and not node.needs_duration:
-                values[node.name] = jnp.asarray(
-                    node.fn(**{dep: values[dep] for dep in node.dependencies})
+                values[node.name] = as_field_value(
+                    node.fn(**{dep: values[dep] for dep in node.dependencies}),
+                    f"Derived field {node.name!r}",
                 )
         return values
 
     def duration_only(
-        self, inputs: dict[str, jnp.ndarray], d: jnp.ndarray
-    ) -> dict[str, jnp.ndarray]:
+        self, inputs: dict[str, Any], d: jnp.ndarray
+    ) -> dict[str, Any]:
         """Resolve fields fixed by one canonical duration grid."""
         values = {**inputs, "d": d}
-        resolved: dict[str, jnp.ndarray] = {}
+        resolved: dict[str, Any] = {}
         for node in self.nodes:
             if node.needs_duration and not node.needs_time:
-                value = jnp.asarray(
-                    node.fn(**{dep: values[dep] for dep in node.dependencies})
+                value = as_field_value(
+                    node.fn(**{dep: values[dep] for dep in node.dependencies}),
+                    f"Derived field {node.name!r}",
                 )
                 values[node.name] = value
                 resolved[node.name] = value
@@ -184,8 +188,8 @@ class FieldRuntime:
     def __init__(
         self,
         graph: FieldGraph,
-        inputs: dict[str, jnp.ndarray],
-        grid_fields: Mapping[object, dict[str, jnp.ndarray]] | None = None,
+        inputs: dict[str, Any],
+        grid_fields: Mapping[object, dict[str, Any]] | None = None,
         grid_durations: Mapping[object, jnp.ndarray] | None = None,
         grid_outputs: Mapping[object, jnp.ndarray] | None = None,
     ):
@@ -196,14 +200,14 @@ class FieldRuntime:
         self.grid_outputs: Mapping[object, jnp.ndarray] = (
             grid_outputs if grid_outputs is not None else {}
         )
-        self.cache: dict[object, dict[str, jnp.ndarray]] = {}
+        self.cache: dict[object, dict[str, Any]] = {}
 
     def resolve(
         self,
         key: object,
         t: jnp.ndarray | None = None,
         d: jnp.ndarray | None = None,
-    ) -> dict[str, jnp.ndarray]:
+    ) -> dict[str, Any]:
         if key in self.cache:
             return self.cache[key]
         phase = key[1] if isinstance(key, tuple) and len(key) > 1 else key
@@ -223,8 +227,9 @@ class FieldRuntime:
                 continue
             if (node.needs_time and t is None) or (node.needs_duration and d is None):
                 continue
-            values[node.name] = jnp.asarray(
-                node.fn(**{dep: values[dep] for dep in node.dependencies})
+            values[node.name] = as_field_value(
+                node.fn(**{dep: values[dep] for dep in node.dependencies}),
+                f"Derived field {node.name!r}",
             )
         values.pop("t", None)
         values.pop("d", None)

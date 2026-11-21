@@ -21,7 +21,7 @@ ArrayLike: TypeAlias = (
     | float
     | complex
 )
-Derived: TypeAlias = Mapping[str, Callable[..., ArrayLike]]
+Derived: TypeAlias = Mapping[str, Callable[..., Any]]
 
 __all__ = [
     "ArrayLike",
