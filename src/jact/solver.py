@@ -90,6 +90,7 @@ _KIND_STATE_RATE = 0
 _KIND_TRANSITION_LUMP = 1
 _KIND_SCHEDULED_EVENT = 2
 _KIND_DURATION_EVENT = 3
+_MARGINAL_MASS_WIDTH = 2
 
 _ProbabilityTree: TypeAlias = Any
 _DType: TypeAlias = np.dtype[np.generic]
@@ -108,6 +109,10 @@ class _DurationConfig(NamedTuple):
     intensity_limit: float | None
     payment_limit: float | None
     probability_limit: float | None
+    marginal_states: frozenset[int] = frozenset()
+    empty_density_states: frozenset[int] = frozenset()
+    allow_uniform_states: bool = False
+    uniform_states: frozenset[int] = frozenset()
 
 
 class _EvaluationLayout(NamedTuple):
@@ -117,6 +122,20 @@ class _EvaluationLayout(NamedTuple):
     gather: tuple[int, ...]
     threshold: float | None
     threshold_output_index: int | None
+
+
+class _GridContext(NamedTuple):
+    durations: jnp.ndarray
+    layout: _EvaluationLayout | None
+    phase: str
+    limit: float | None
+
+
+def _grid_output_key(
+    fn: Intensity, phase: str, limit: float | None
+) -> tuple[IdentityCallable, str, float | None]:
+    identity = fn if isinstance(fn, IdentityCallable) else IdentityCallable(fn)
+    return identity, phase, limit
 
 
 def _evaluation_layout(
@@ -154,6 +173,32 @@ def _evaluation_layout(
     )
 
 
+def _grid_callable_output(
+    fn: Intensity,
+    t: jnp.ndarray,
+    d: jnp.ndarray,
+    kwargs: FieldRuntime,
+    layout: _EvaluationLayout | None,
+    phase: str,
+    limit: float | None,
+) -> tuple[jnp.ndarray, int]:
+    key = ("grid", phase, limit)
+    compact = cast(
+        jnp.ndarray,
+        kwargs.grid_durations[key]
+        if key in kwargs.grid_durations
+        else _sampled_grid(d, layout),
+    )
+    if kwargs.grid_outputs:
+        output_key = _grid_output_key(fn, phase, limit)
+        if output_key in kwargs.grid_outputs:
+            return kwargs.grid_outputs[output_key], compact.shape[-1]
+    return (
+        jnp.asarray(fn(t, compact, **kwargs.resolve(key, t, compact))),
+        compact.shape[-1],
+    )
+
+
 def _evaluate_grid(
     fn: Intensity,
     t: jnp.ndarray,
@@ -164,25 +209,15 @@ def _evaluate_grid(
     layout: _EvaluationLayout | None,
     phase: str = "mid",
     limit: float | None = None,
+    *,
+    uniform: bool = False,
 ) -> jnp.ndarray:
-    key = ("grid", phase, limit)
-    if layout is None:
-        return _broadcast_grid_output(
-            fn(t, d, **kwargs.resolve(key, t, d)),
-            (batch_size, d.shape[-1]),
-            label,
-        )
-    compact = cast(
-        jnp.ndarray,
-        kwargs.grid_durations[key]
-        if key in kwargs.grid_durations
-        else _sampled_grid(d, layout),
-    )
+    values, width = _grid_callable_output(fn, t, d, kwargs, layout, phase, limit)
     values = _broadcast_grid_output(
-        fn(t, compact, **kwargs.resolve(key, t, compact)),
-        (batch_size, compact.shape[-1]),
-        label,
+        values, (batch_size, 1 if uniform else width), label
     )
+    if uniform or layout is None:
+        return values
     return values[:, jnp.asarray(layout.gather, dtype=jnp.int32)]
 
 
@@ -203,7 +238,8 @@ def _threshold_value(
 ) -> jnp.ndarray | None:
     if layout is None or layout.threshold_output_index is None:
         return None
-    return values[:, layout.threshold_output_index]
+    index = 0 if values.shape[-1] == 1 else layout.threshold_output_index
+    return values[:, index]
 
 
 class _RowHazards(NamedTuple):
@@ -236,17 +272,14 @@ class _SolverResult(NamedTuple):
     cashflow_terminal: CashflowViewValues | None
 
 
-def _stack_state_densities(state: tuple[StateCarry, ...]) -> jnp.ndarray:
+def _state_densities(state: tuple[StateCarry, ...]) -> tuple[jnp.ndarray, ...]:
     # Treat the fixed tail as the final cell during survival and transfers.
     # Only the regular cells shift; the final cell accumulates survivors.
-    return jnp.stack(
-        tuple(
-            carry.density
-            if carry.tail is None
-            else jnp.concatenate((carry.density, carry.tail.mass[:, None]), axis=-1)
-            for carry in state
-        ),
-        axis=0,
+    return tuple(
+        carry.density
+        if carry.tail is None
+        else jnp.concatenate((carry.density, carry.tail.mass[:, None]), axis=-1)
+        for carry in state
     )
 
 
@@ -281,14 +314,14 @@ def _stack_point_masses(
     )
 
 
-def _dense_state_to_tuple(
-    densities: jnp.ndarray,
+def _restore_state(
+    densities: tuple[jnp.ndarray, ...],
     point_values: jnp.ndarray,
     point_d_0: jnp.ndarray,
     point_initial_values: jnp.ndarray,
     point_log_survivals: jnp.ndarray,
     point_mask: tuple[bool, ...],
-    tail_duration: float | None = None,
+    config: _DurationConfig,
 ) -> tuple[StateCarry, ...]:
     state: list[StateCarry] = []
     for i, has_point_mass in enumerate(point_mask):
@@ -302,10 +335,14 @@ def _dense_state_to_tuple(
             )
         density = densities[i]
         tail = None
-        if tail_duration is not None:
+        if (
+            config.probability_limit is not None
+            and i not in config.marginal_states
+            and i not in config.empty_density_states
+        ):
             tail = _TailProbability(
                 mass=density[:, -1],
-                duration=jnp.full_like(density[:, -1], tail_duration),
+                duration=jnp.full_like(density[:, -1], config.probability_limit),
             )
             density = density[:, :-1]
         state.append(StateCarry(density=density, point_mass=point_mass, tail=tail))
@@ -406,6 +443,8 @@ def _integrated_density_hazard(
     batch_size: int,
     layout: _EvaluationLayout | None = None,
     duration_limit: float | None = None,
+    *,
+    uniform: bool = False,
 ) -> jnp.ndarray:
     midpoint = _evaluate_grid(
         fn,
@@ -417,6 +456,7 @@ def _integrated_density_hazard(
         layout,
         "mid",
         duration_limit,
+        uniform=uniform,
     )
     return jnp.maximum(step_size * midpoint, 0.0)
 
@@ -502,6 +542,32 @@ def _split_midpoint_inflow(
     return half, inflow - half
 
 
+def _accumulate_marginal_mass(
+    mass: jnp.ndarray, inflow: jnp.ndarray
+) -> jnp.ndarray:
+    # Retain the rounding residual so small inflows survive long float32 runs.
+    total = mass[:, 0]
+    corrected = inflow + mass[:, 1]
+    next_total = total + corrected
+    residual = corrected - (next_total - total)
+    return jnp.stack((next_total, residual), axis=-1)
+
+
+def _survive_uniform_mass(mass: jnp.ndarray, hazard: jnp.ndarray) -> jnp.ndarray:
+    total = mass[:, 0]
+    decay = jnp.expm1(-hazard[:, 0])
+    loss = total * decay
+    survived = total + loss
+    # Retain rounding error from subtracting the loss and advance the
+    # existing residual with the same hazard as the rest of the mass.
+    residual = (loss - (survived - total)) + (mass[:, 1] + mass[:, 1] * decay)
+    return jnp.where(
+        survived[:, None] >= 0,
+        jnp.stack((survived, residual), axis=-1),
+        jnp.zeros_like(mass),
+    )
+
+
 def _incoming_state_indices(row_hazards: tuple[_RowHazards, ...]) -> frozenset[int]:
     return frozenset(
         target_index
@@ -554,6 +620,8 @@ def _call_payment(
     layout: _EvaluationLayout | None = None,
     phase: str = "mid",
     duration_limit: float | None = None,
+    *,
+    uniform: bool = False,
 ) -> jnp.ndarray:
     return _evaluate_grid(
         fn,
@@ -565,6 +633,7 @@ def _call_payment(
         layout,
         phase,
         duration_limit,
+        uniform=uniform,
     )
 
 
@@ -608,10 +677,10 @@ def _solver_step_dynamics(
     step_size: float,
     solver_matrix: Sequence[Sequence[Intensity | None]],
     intensity_kwargs: FieldRuntime,
-    intensity_limit: float | None = None,
-    intensity_layout: _EvaluationLayout | None = None,
+    config: _DurationConfig,
+    intensity_layout: _EvaluationLayout | None,
 ) -> tuple[
-    jnp.ndarray,
+    tuple[jnp.ndarray, ...],
     jnp.ndarray,
     jnp.ndarray,
     jnp.ndarray,
@@ -620,7 +689,8 @@ def _solver_step_dynamics(
     tuple[_RowHazards, ...],
     _SameStepTransfers,
 ]:
-    densities = _stack_state_densities(state)
+    densities = _state_densities(state)
+    batch_size = densities[0].shape[0]
     (
         point_values,
         point_d_0,
@@ -631,7 +701,10 @@ def _solver_step_dynamics(
     row_hazards_list: list[_RowHazards] = []
 
     for source_index, row in enumerate(solver_matrix):
-        density_total = jnp.zeros_like(densities[source_index])
+        track_density = source_index not in config.empty_density_states
+        uniform = source_index in config.uniform_states
+        density = densities[source_index]
+        density_total = jnp.zeros_like(density[:, :1] if uniform else density)
         point_total = jnp.zeros_like(point_values[source_index])
         density_hazards: list[tuple[int, jnp.ndarray]] = []
         point_hazards: list[tuple[int, jnp.ndarray]] = []
@@ -640,17 +713,21 @@ def _solver_step_dynamics(
             if fn is None:
                 continue
 
+            # Keep trace-time grid validation and the threshold sample used
+            # by point masses even when the state has no continuous mass.
             density_hazard = _integrated_density_hazard(
                 fn,
                 t,
                 duration_mid,
                 step_size,
                 intensity_kwargs,
-                densities.shape[1],
+                batch_size,
                 intensity_layout,
-                intensity_limit,
+                config.intensity_limit,
+                uniform=uniform,
             )
-            density_total = density_total + density_hazard
+            if track_density:
+                density_total = density_total + density_hazard
             density_hazards.append((target_index, density_hazard))
 
             if point_mask[source_index]:
@@ -660,7 +737,7 @@ def _solver_step_dynamics(
                     point_d_0[source_index],
                     step_size,
                     intensity_kwargs,
-                    intensity_limit,
+                    config.intensity_limit,
                     _threshold_value(density_hazard, intensity_layout),
                     source_index,
                 )
@@ -685,6 +762,7 @@ def _solver_step_dynamics(
         point_values,
         point_mask,
         row_hazards,
+        config.empty_density_states,
     )
 
     return (
@@ -700,19 +778,21 @@ def _solver_step_dynamics(
 
 
 def _compute_same_step_transfers(
-    densities: jnp.ndarray,
+    densities: tuple[jnp.ndarray, ...],
     point_values: jnp.ndarray,
     point_mask: tuple[bool, ...],
     row_hazards: tuple[_RowHazards, ...],
+    empty_density_states: frozenset[int],
 ) -> _SameStepTransfers:
-    raw_inflow = jnp.zeros(densities.shape[:-1], dtype=densities.dtype)
+    raw_inflow = jnp.zeros_like(point_values)
 
     for i, hz in enumerate(row_hazards):
-        for j, density_hazard in hz.density_hazards:
-            transferred = density_hazard * hz.density_transfer_factor
-            raw_inflow = raw_inflow.at[j].add(
-                jnp.sum(densities[i] * transferred, axis=-1)
-            )
+        if i not in empty_density_states:
+            for j, density_hazard in hz.density_hazards:
+                transferred = density_hazard * hz.density_transfer_factor
+                raw_inflow = raw_inflow.at[j].add(
+                    jnp.sum(densities[i] * transferred, axis=-1)
+                )
 
         if point_mask[i]:
             for j, point_hazard in hz.point_hazards:
@@ -766,7 +846,7 @@ def _compute_same_step_transfers(
 
 
 def _advance_solver_step_from_dynamics(
-    densities: jnp.ndarray,
+    densities: tuple[jnp.ndarray, ...],
     point_values: jnp.ndarray,
     point_d_0: jnp.ndarray,
     point_initial_values: jnp.ndarray,
@@ -774,8 +854,7 @@ def _advance_solver_step_from_dynamics(
     point_mask: tuple[bool, ...],
     row_hazards: tuple[_RowHazards, ...],
     same_step_transfers: _SameStepTransfers,
-    tail_duration: float | None = None,
-    tail_collects_mass: bool = True,
+    config: _DurationConfig,
 ) -> tuple[StateCarry, ...]:
     next_point_values = point_values
     next_point_log_survivals = point_log_survivals
@@ -792,16 +871,29 @@ def _advance_solver_step_from_dynamics(
 
     # A full-width grid has no omitted regular cells. Advance it with the
     # uncompressed transport rule and keep the requested tail empty.
-    empty_tail = tail_duration is not None and not tail_collects_mass
+    empty_tail = config.probability_limit is not None and config.width == config.n_steps
     next_densities: list[jnp.ndarray] = []
     for i, hz in enumerate(row_hazards):
+        if i in config.empty_density_states:
+            next_densities.append(densities[i])
+            continue
+        inflow_zero = same_step_transfers.next_inflow_zero[i]
+        inflow_one = same_step_transfers.next_inflow_one[i]
+        if i in config.marginal_states:
+            mass = densities[i]
+            if i in config.uniform_states and hz.density_hazards:
+                mass = _survive_uniform_mass(mass, hz.density_total)
+            next_densities.append(
+                _accumulate_marginal_mass(mass, inflow_zero + inflow_one)
+            )
+            continue
         density = densities[i][..., :-1] if empty_tail else densities[i]
         total_hazard = hz.density_total[..., :-1] if empty_tail else hz.density_total
         next_density = _advance_density(
             density,
             total_hazard,
-            same_step_transfers.next_inflow_zero[i],
-            same_step_transfers.next_inflow_one[i],
+            inflow_zero,
+            inflow_one,
         )
         if empty_tail:
             next_density = jnp.concatenate(
@@ -809,19 +901,19 @@ def _advance_solver_step_from_dynamics(
             )
         next_densities.append(next_density)
 
-    return _dense_state_to_tuple(
-        jnp.stack(tuple(next_densities), axis=0),
+    return _restore_state(
+        tuple(next_densities),
         next_point_values,
         point_d_0,
         point_initial_values,
         next_point_log_survivals,
         point_mask,
-        tail_duration,
+        config,
     )
 
 
 def _compute_cashflow_step(
-    densities: jnp.ndarray,
+    densities: tuple[jnp.ndarray, ...],
     point_values: jnp.ndarray,
     point_d_0: jnp.ndarray,
     point_initial_values: jnp.ndarray,
@@ -841,12 +933,13 @@ def _compute_cashflow_step(
     payment_mid_layout: _EvaluationLayout | None,
     payment_left_layout: _EvaluationLayout | None,
 ) -> StepAggregation:
-    template = densities[0, :, 0]
+    template = densities[0][:, 0]
+    batch_size = template.shape[0]
     by_component = _zero_leaves(len(cashflow_components), template)
-    by_state = _zero_leaves(densities.shape[0], template)
+    by_state = _zero_leaves(len(densities), template)
     by_kind = _zero_leaves(4, template)
     event_by_component = _zero_leaves(len(cashflow_components), template)
-    event_by_state = _zero_leaves(densities.shape[0], template)
+    event_by_state = _zero_leaves(len(densities), template)
     event_by_kind = _zero_leaves(4, template)
     t_mid = t + 0.5 * step_size
     n_steps = config.n_steps
@@ -867,22 +960,25 @@ def _compute_cashflow_step(
                     contribution = core_values[attachment.task_id]
                 else:
                     hz = row_hazards[state_index]
-                    density_midpoint = (
-                        densities[state_index] * hz.density_midpoint_factor
-                    )
                     payment = _call_payment(
                         payment_fn,
                         t_mid,
                         duration_mid,
                         intensity_kwargs,
-                        (densities.shape[1], duration_mid.shape[-1]),
+                        (batch_size, duration_mid.shape[-1]),
                         payment_mid_layout,
                         duration_limit=config.payment_limit,
+                        uniform=state_index in config.uniform_states,
                     )
-                    contribution = step_size * jnp.sum(
-                        density_midpoint * payment,
-                        axis=-1,
-                    )
+                    contribution = jnp.zeros_like(template)
+                    if state_index not in config.empty_density_states:
+                        density_midpoint = (
+                            densities[state_index] * hz.density_midpoint_factor
+                        )
+                        contribution = step_size * jnp.sum(
+                            density_midpoint * payment,
+                            axis=-1,
+                        )
                     if point_mask[state_index]:
                         point_payment = _evaluate_intensity_at_point(
                             payment_fn,
@@ -946,23 +1042,26 @@ def _compute_cashflow_step(
                     contribution = core_values[attachment.task_id]
                 else:
                     hz = row_hazards[source_index]
-                    _, density_hazard = hz.density_hazards[hazard_slot]
                     payment = _call_payment(
                         payment_fn,
                         t_mid,
                         duration_mid,
                         intensity_kwargs,
-                        (densities.shape[1], duration_mid.shape[-1]),
+                        (batch_size, duration_mid.shape[-1]),
                         payment_mid_layout,
                         duration_limit=config.payment_limit,
+                        uniform=source_index in config.uniform_states,
                     )
-                    contribution = jnp.sum(
-                        densities[source_index]
-                        * density_hazard
-                        * hz.density_transfer_factor
-                        * payment,
-                        axis=-1,
-                    )
+                    contribution = jnp.zeros_like(template)
+                    if source_index not in config.empty_density_states:
+                        _, density_hazard = hz.density_hazards[hazard_slot]
+                        contribution = jnp.sum(
+                            densities[source_index]
+                            * density_hazard
+                            * hz.density_transfer_factor
+                            * payment,
+                            axis=-1,
+                        )
                     if point_mask[source_index]:
                         _, point_hazard = hz.point_hazards[hazard_slot]
                         point_payment = _evaluate_intensity_at_point(
@@ -1047,15 +1146,18 @@ def _compute_cashflow_step(
                         t,
                         duration_left,
                         intensity_kwargs,
-                        (densities.shape[1], duration_left.shape[-1]),
+                        (batch_size, duration_left.shape[-1]),
                         payment_left_layout,
                         phase="left",
                         duration_limit=config.payment_limit,
+                        uniform=state_index in config.uniform_states,
                     )
-                    contribution = active * jnp.sum(
-                        densities[state_index] * payment,
-                        axis=-1,
-                    )
+                    contribution = jnp.zeros_like(template)
+                    if state_index not in config.empty_density_states:
+                        contribution = active * jnp.sum(
+                            densities[state_index] * payment,
+                            axis=-1,
+                        )
                     if point_mask[state_index]:
                         point_payment = _evaluate_intensity_at_point(
                             payment_fn,
@@ -1130,12 +1232,6 @@ def _compute_cashflow_step(
                         "Effective duration event target",
                     )
                     in_horizon = (at_duration >= 0) & (at_duration_index < n_steps)
-                    safe_index = jnp.clip(at_duration_index, 0, config.width - 1)
-                    density_at_duration = jnp.take_along_axis(
-                        densities[state_index],
-                        safe_index[:, None],
-                        axis=-1,
-                    )[:, 0]
                     payment = _evaluate_intensity_at_point(
                         payment_fn,
                         t,
@@ -1150,9 +1246,17 @@ def _compute_cashflow_step(
                         ),
                         phase="left",
                     )
-                    contribution = (
-                        in_horizon & (at_duration_index < config.width)
-                    ).astype(template.dtype) * (density_at_duration * payment)
+                    contribution = jnp.zeros_like(template)
+                    if state_index not in config.empty_density_states:
+                        safe_index = jnp.clip(at_duration_index, 0, config.width - 1)
+                        density_at_duration = jnp.take_along_axis(
+                            densities[state_index],
+                            safe_index[:, None],
+                            axis=-1,
+                        )[:, 0]
+                        contribution = (
+                            in_horizon & (at_duration_index < config.width)
+                        ).astype(template.dtype) * (density_at_duration * payment)
 
                     if point_mask[state_index]:
                         remaining = effective_at_duration - point_d_0[state_index]
@@ -1226,7 +1330,7 @@ def _compute_cashflow_step(
 def _compute_scheduled_events(
     cashflow_components: CashflowComponentSpecs,
     step_size: float,
-    intensity_kwargs: dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, Any],
 ) -> ResolvedScheduledEvents:
     scheduled_events: list[ResolvedScheduledEvent | None] = []
     resolved: dict[IdentityCallable, ResolvedScheduledEvent] = {}
@@ -1249,7 +1353,7 @@ def _compute_scheduled_events(
 def _compute_duration_events(
     cashflow_components: CashflowComponentSpecs,
     step_size: float,
-    intensity_kwargs: dict[str, jnp.ndarray],
+    intensity_kwargs: dict[str, Any],
 ) -> ResolvedDurationEvents:
     duration_events: list[ResolvedDurationEvent | None] = []
     resolved: dict[object, tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]] = {}
@@ -1521,6 +1625,99 @@ def _add_selected_view_values(
     )
 
 
+def _plan_uniform_densities(
+    solver_matrix: Sequence[Sequence[Intensity | None]],
+    cashflow_components: CashflowComponentSpecs,
+    config: _DurationConfig,
+    intensity_grid: _GridContext,
+    payment_mid_grid: _GridContext,
+    payment_left_grid: _GridContext,
+    new_fields: Callable[[], FieldRuntime],
+    step_size: float,
+    batch_size: int,
+) -> tuple[
+    frozenset[int], Callable[[jnp.ndarray], Mapping[object, jnp.ndarray]] | None
+]:
+    """Prove duration uniformity from the callables' unbroadcast grid shapes."""
+    candidates = set(range(len(solver_matrix)))
+    candidates.difference_update(config.empty_density_states, config.marginal_states)
+    for component in cashflow_components:
+        if isinstance(component, DurationEventSpec):
+            candidates.difference_update(
+                target.state_index for target in component.targets
+            )
+    if not candidates:
+        return frozenset(), None
+
+    calls: list[tuple[int, Intensity, _GridContext]] = [
+        (i, fn, intensity_grid)
+        for i, row in enumerate(solver_matrix)
+        if i in candidates
+        for fn in row
+        if fn is not None
+    ]
+    for component in cashflow_components:
+        if isinstance(component, (StateRateSpec, ScheduledEventSpec)):
+            grid = (
+                payment_left_grid
+                if isinstance(component, ScheduledEventSpec)
+                else payment_mid_grid
+            )
+            calls.extend(
+                (payment.state_index, payment.payment, grid)
+                for payment in component.payments
+                if payment.state_index in candidates
+            )
+        elif isinstance(component, TransitionLumpSpec):
+            calls.extend(
+                (payment.source_index, payment.payment, payment_mid_grid)
+                for payment in component.payments
+                if payment.source_index in candidates
+            )
+
+    state_calls = tuple(
+        (i, _grid_output_key(fn, grid.phase, grid.limit)) for i, fn, grid in calls
+    )
+    grid_calls = {
+        key: (fn, grid)
+        for (_, key), (_, fn, grid) in zip(state_calls, calls, strict=True)
+    }
+
+    # Share the JAX trace between shape inspection and the scan body.
+    @partial(jax.jit, inline=True)
+    def samples(t: jnp.ndarray) -> tuple[jnp.ndarray, ...]:
+        fields = new_fields()
+        result: list[jnp.ndarray] = []
+        for fn, (durations, layout, phase, limit) in grid_calls.values():
+            sample_t = t + 0.5 * step_size if phase == "mid" else t
+            values, _ = _grid_callable_output(
+                fn, sample_t, durations, fields, layout, phase, limit
+            )
+            result.append(values)
+        return tuple(result)
+
+    time_shape = jax.ShapeDtypeStruct((), intensity_grid.durations.dtype)
+    shapes = cast(
+        tuple[jax.ShapeDtypeStruct, ...],
+        jax.eval_shape(samples, time_shape),
+    )
+    shapes_by_key = dict(zip(grid_calls, shapes, strict=True))
+    for state_index, key in state_calls:
+        shape = cast(tuple[int, ...], shapes_by_key[key].shape)
+        if (
+            len(shape) > 2
+            or (shape and shape[-1] != 1)
+            or (len(shape) == 2 and shape[0] not in (1, batch_size))
+        ):
+            candidates.discard(state_index)
+
+    def evaluate(t: jnp.ndarray) -> Mapping[object, jnp.ndarray]:
+        values = cast(tuple[jnp.ndarray, ...], samples(t))
+        return dict(zip(grid_calls, values, strict=True))
+
+    return frozenset(candidates), evaluate
+
+
 # JAX accepts arbitrary PyTree axis specifications here, but its public typing
 # does not currently expose a corresponding recursive alias.
 _PMAP_IN_AXES: Any = (
@@ -1701,12 +1898,12 @@ def _midpoint_solver(
     block_0 = _zero_view_values(cashflow_views, value_template)
     terminal_0 = _zero_view_values(cashflow_views, value_template)
     input_fields = field_graph.input_only(intensity_kwargs)
-    grid_fields: dict[object, dict[str, jnp.ndarray]] = {}
+    grid_fields: dict[object, dict[str, Any]] = {}
     grid_durations: dict[object, jnp.ndarray] = {}
     if any(node.needs_duration and not node.needs_time for node in field_graph.nodes):
         prepared_layouts: dict[
             tuple[str, _EvaluationLayout | None],
-            tuple[jnp.ndarray, dict[str, jnp.ndarray]],
+            tuple[jnp.ndarray, dict[str, Any]],
         ] = {}
         grid_contexts: list[
             tuple[tuple[str, str, float | None], jnp.ndarray, _EvaluationLayout | None]
@@ -1755,6 +1952,42 @@ def _midpoint_solver(
                 sampled, resolved = prepared_layouts[layout_key]
                 grid_durations[key] = sampled
                 grid_fields[key] = resolved
+
+    def new_fields(
+        grid_outputs: Mapping[object, jnp.ndarray] | None = None,
+    ) -> FieldRuntime:
+        return FieldRuntime(
+            field_graph, input_fields, grid_fields, grid_durations, grid_outputs
+        )
+
+    evaluate_grid = None
+    if config.allow_uniform_states:
+        uniform_states, evaluate_grid = _plan_uniform_densities(
+            solver_matrix,
+            cashflow_components,
+            config,
+            _GridContext(duration_mid, intensity_layout, "mid", config.intensity_limit),
+            _GridContext(duration_mid, payment_mid_layout, "mid", config.payment_limit),
+            _GridContext(
+                duration_left, payment_left_layout, "left", config.payment_limit
+            ),
+            new_fields,
+            step_size,
+            value_template.shape[0],
+        )
+        config = config._replace(
+            uniform_states=uniform_states,
+            marginal_states=config.marginal_states | uniform_states,
+        )
+        state_0 = tuple(
+            StateCarry(
+                density=jnp.zeros_like(carry.density[:, :_MARGINAL_MASS_WIDTH]),
+                point_mass=carry.point_mass,
+            )
+            if i in uniform_states
+            else carry
+            for i, carry in enumerate(state_0)
+        )
     scheduled_events = _compute_scheduled_events(
         cashflow_components,
         step_size,
@@ -1793,8 +2026,8 @@ def _midpoint_solver(
         ]:
             inner_state, block_cashflows, terminal_cashflows = inner_carry
             current_t = block_start + offset * step_size
-            fields = FieldRuntime(
-                field_graph, input_fields, grid_fields, grid_durations
+            fields = new_fields(
+                evaluate_grid(current_t) if evaluate_grid is not None else None
             )
 
             dynamics = _solver_step_dynamics(
@@ -1804,7 +2037,7 @@ def _midpoint_solver(
                 step_size,
                 solver_matrix,
                 fields,
-                config.intensity_limit,
+                config,
                 intensity_layout,
             )
             aggregation = _compute_cashflow_step(
@@ -1848,8 +2081,7 @@ def _midpoint_solver(
             )
             next_state = _advance_solver_step_from_dynamics(
                 *dynamics,
-                tail_duration=config.probability_limit,
-                tail_collects_mass=config.width < config.n_steps,
+                config=config,
             )
             return (next_state, block_cashflows, terminal_cashflows), None
 
@@ -2135,6 +2367,52 @@ def _prepare_cashflow_components(
                 )
             prepared.append(DurationEventSpec(targets=tuple(targets)))
     return tuple(prepared)
+
+
+def _allows_compact_density(
+    probability: ProbabilityOutput | CallbackFn | None,
+    width: int,
+) -> bool:
+    return width > _MARGINAL_MASS_WIDTH and (
+        probability is None
+        or isinstance(
+            probability,
+            (StateProbability, DensityProbability, MarginalComponents, PointMass),
+        )
+    )
+
+
+def _compact_density_states(
+    solver_matrix: Sequence[Sequence[Intensity | None]],
+    cashflow_components: CashflowComponentSpecs,
+) -> tuple[frozenset[int], frozenset[int]]:
+    """Identify empty densities and absorbing marginals in the reduced model."""
+    incoming = {
+        target
+        for row in solver_matrix
+        for target, fn in enumerate(row)
+        if fn is not None
+    }
+    # The public initial distribution puts all initial mass in point masses.
+    empty_density_states = frozenset(range(len(solver_matrix))) - incoming
+
+    # Transition lumps read the source state's duration. A payment on entry
+    # into an absorbing state can use the original source grid.
+    duration_observed: set[int] = set()
+    for component in cashflow_components:
+        if isinstance(component, (StateRateSpec, ScheduledEventSpec)):
+            duration_observed.update(
+                payment.state_index for payment in component.payments
+            )
+        elif isinstance(component, DurationEventSpec):
+            duration_observed.update(target.state_index for target in component.targets)
+
+    marginal_states = frozenset(
+        i
+        for i, row in enumerate(solver_matrix)
+        if i not in duration_observed and all(fn is None for fn in row)
+    )
+    return empty_density_states, marginal_states - empty_density_states
 
 
 def _prepare_cashflow_views(
@@ -2687,19 +2965,28 @@ def solve(
         tail_grid = jnp.full((1, 1), probability_duration_limit, dtype=grid.dtype)
         duration_left = jnp.concatenate((duration_left, tail_grid), axis=-1)
         duration_mid = jnp.concatenate((duration_mid, tail_grid), axis=-1)
-    duration_config = _DurationConfig(
-        solver_steps,
-        width,
-        intensity_duration_limit,
-        payment_duration_limit,
-        probability_duration_limit,
-    )
     step_size = 1 / steps_per_unit
     prob_callback = resolve_callback(probability, reduced.reachable_states)
     prepared_cashflow_components = _prepare_cashflow_components(
         cashflows,
         reduced.reachable_states,
         solver_matrix,
+    )
+    compact_density = _allows_compact_density(probability, width)
+    empty_density_states, marginal_states = (
+        _compact_density_states(solver_matrix, prepared_cashflow_components)
+        if compact_density
+        else (frozenset[int](), frozenset[int]())
+    )
+    duration_config = _DurationConfig(
+        solver_steps,
+        width,
+        intensity_duration_limit,
+        payment_duration_limit,
+        probability_duration_limit,
+        marginal_states=marginal_states,
+        empty_density_states=empty_density_states,
+        allow_uniform_states=compact_density,
     )
     prepared_cashflow_views = (
         _prepare_cashflow_views(cashflows, cashflow_views, reduced.reachable_states)
@@ -2730,8 +3017,15 @@ def solve(
 
     declared_index = {state: i for i, state in enumerate(canonical.states)}
     state_0: list[StateCarry] = []
-    for state_name in reduced.reachable_states:
-        density = jnp.zeros((batch_size, width), dtype=value_dtype)
+    for i, state_name in enumerate(reduced.reachable_states):
+        if i in empty_density_states:
+            density_width = 1
+        elif i in marginal_states:
+            # The entries hold continuous mass and its rounding residual.
+            density_width = _MARGINAL_MASS_WIDTH
+        else:
+            density_width = width
+        density = jnp.zeros((batch_size, density_width), dtype=value_dtype)
         point_mass = None
         if state_name in declared_index:
             idx = declared_index[state_name]
@@ -2742,7 +3036,11 @@ def solve(
                 value_dtype,
             )
         tail = None
-        if probability_duration_limit is not None:
+        if (
+            probability_duration_limit is not None
+            and i not in empty_density_states
+            and i not in marginal_states
+        ):
             tail = _TailProbability(
                 mass=jnp.zeros((batch_size,), dtype=value_dtype),
                 duration=jnp.full(

@@ -191,11 +191,15 @@ class FieldRuntime:
         inputs: dict[str, Any],
         grid_fields: Mapping[object, dict[str, Any]] | None = None,
         grid_durations: Mapping[object, jnp.ndarray] | None = None,
+        grid_outputs: Mapping[object, jnp.ndarray] | None = None,
     ):
         self.graph = graph
         self.inputs = inputs
         self.grid_fields = grid_fields if grid_fields is not None else {}
         self.grid_durations = grid_durations if grid_durations is not None else {}
+        self.grid_outputs: Mapping[object, jnp.ndarray] = (
+            grid_outputs if grid_outputs is not None else {}
+        )
         self.cache: dict[object, dict[str, Any]] = {}
 
     def resolve(

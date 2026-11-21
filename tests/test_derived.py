@@ -419,10 +419,14 @@ def test_hoisted_grid_fields_match_inline_point_and_payment_contexts():
     _assert_tree_close(actual.cashflows, expected.cashflows)
 
 
-def test_compiled_duration_grid_transform_is_outside_scan():
-    ss = jact.StateSpace(["active", "dead"], [("active", "dead")])
+@pytest.mark.parametrize("has_incoming", [False, True])
+def test_compiled_duration_grid_transform_is_outside_scan(has_incoming):
+    transitions = {("active", "disabled"): lambda t, d, **kw: kw["basis"]}
+    if has_incoming:
+        transitions[("disabled", "active")] = lambda t, d, **kw: 0.1
+    ss = jact.StateSpace(["active", "disabled"], transitions)
     model = ss.build(
-        transitions={("active", "dead"): lambda t, d, **kw: kw["basis"]},
+        transitions=transitions,
         derived={"basis": lambda d, scale: jnp.sin(d * scale)},
     )
     steps = 16
@@ -442,7 +446,7 @@ def test_compiled_duration_grid_transform_is_outside_scan():
         for line in hlo.splitlines()
         if " sine(" in line and f"[1,{steps}]" in line
     ]
-    assert grid_sines
+    assert bool(grid_sines) == has_incoming
     assert all("while/body" not in line for line in grid_sines)
     assert any(
         " sine(" in line and "while/body" in line and f"[1,{steps}]" not in line

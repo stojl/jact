@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.1.16
+
+- Accumulate continuous probability directly in absorbing states when requested
+  outputs and payments only need the duration marginal.
+- Skip empty continuous duration grids for states with no incoming transitions
+  while continuing to evaluate their initial point masses and payments.
+- Accumulate the duration marginal for states whose exit intensities and
+  payments broadcast across duration. Detect eligible states from callback
+  output shapes during JIT tracing and preserve full grids for duration events
+  and duration-resolved outputs.
+
 ## 0.1.15
 
 - Accept JAX pytrees as named solve inputs, preserving their structure in
