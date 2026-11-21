@@ -1111,6 +1111,10 @@ limit because the continuous marginal includes both the regular grid and the
 tail. The order of floating-point additions can differ from a solve that
 records the duration distribution.
 
+A state with no incoming transitions can only carry its initial point mass.
+For these same outputs, the solver can skip its empty continuous grid while
+still evaluating point-mass transitions and payments at their durations.
+
 Custom probability callables have signature
 `(state: tuple[StateCarry, ...]) -> PyTree`. Their returned PyTree is
 stacked by `jax.lax.scan` along a new leading time axis. `StateCarry` and
