@@ -257,11 +257,10 @@ class _RowHazards(NamedTuple):
 class _SameStepTransfers(NamedTuple):
     """Mass transferred inside one step and settled for reuse."""
 
-    raw_inflow: jnp.ndarray
-    survived_inflow: jnp.ndarray
+    survived_inflow: tuple[jnp.ndarray, ...]
     chained_by_source: tuple[tuple[jnp.ndarray, ...], ...]
-    next_inflow_zero: jnp.ndarray
-    next_inflow_one: jnp.ndarray
+    next_inflow_zero: tuple[jnp.ndarray, ...]
+    next_inflow_one: tuple[jnp.ndarray, ...]
 
 
 class _SolverResult(NamedTuple):
@@ -283,56 +282,13 @@ def _state_densities(state: tuple[StateCarry, ...]) -> tuple[jnp.ndarray, ...]:
     )
 
 
-def _stack_point_masses(
-    state: tuple[StateCarry, ...],
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, tuple[bool, ...]]:
-    value_template = state[0].density[:, 0]
-    values: list[jnp.ndarray] = []
-    d_0: list[jnp.ndarray] = []
-    initial_values: list[jnp.ndarray] = []
-    log_survivals: list[jnp.ndarray] = []
-    mask: list[bool] = []
-    for carry in state:
-        if carry.point_mass is None:
-            values.append(jnp.zeros_like(value_template))
-            d_0.append(jnp.zeros_like(value_template))
-            initial_values.append(jnp.zeros_like(value_template))
-            log_survivals.append(jnp.zeros_like(value_template))
-            mask.append(False)
-        else:
-            values.append(carry.point_mass.value)
-            d_0.append(carry.point_mass.d_0)
-            initial_values.append(carry.point_mass.initial_value)
-            log_survivals.append(carry.point_mass.log_survival)
-            mask.append(True)
-    return (
-        jnp.stack(values, axis=0),
-        jnp.stack(d_0, axis=0),
-        jnp.stack(initial_values, axis=0),
-        jnp.stack(log_survivals, axis=0),
-        tuple(mask),
-    )
-
-
 def _restore_state(
     densities: tuple[jnp.ndarray, ...],
-    point_values: jnp.ndarray,
-    point_d_0: jnp.ndarray,
-    point_initial_values: jnp.ndarray,
-    point_log_survivals: jnp.ndarray,
-    point_mask: tuple[bool, ...],
+    points: tuple[_PointMass | None, ...],
     config: _DurationConfig,
 ) -> tuple[StateCarry, ...]:
     state: list[StateCarry] = []
-    for i, has_point_mass in enumerate(point_mask):
-        point_mass = None
-        if has_point_mass:
-            point_mass = _PointMass(
-                value=point_values[i],
-                d_0=point_d_0[i],
-                initial_value=point_initial_values[i],
-                log_survival=point_log_survivals[i],
-            )
+    for i, point_mass in enumerate(points):
         density = densities[i]
         tail = None
         if (
@@ -681,23 +637,13 @@ def _solver_step_dynamics(
     intensity_layout: _EvaluationLayout | None,
 ) -> tuple[
     tuple[jnp.ndarray, ...],
-    jnp.ndarray,
-    jnp.ndarray,
-    jnp.ndarray,
-    jnp.ndarray,
-    tuple[bool, ...],
+    tuple[_PointMass | None, ...],
     tuple[_RowHazards, ...],
     _SameStepTransfers,
 ]:
     densities = _state_densities(state)
     batch_size = densities[0].shape[0]
-    (
-        point_values,
-        point_d_0,
-        point_initial_values,
-        point_log_survivals,
-        point_mask,
-    ) = _stack_point_masses(state)
+    points = tuple(carry.point_mass for carry in state)
     row_hazards_list: list[_RowHazards] = []
 
     for source_index, row in enumerate(solver_matrix):
@@ -705,7 +651,8 @@ def _solver_step_dynamics(
         uniform = source_index in config.uniform_states
         density = densities[source_index]
         density_total = jnp.zeros_like(density[:, :1] if uniform else density)
-        point_total = jnp.zeros_like(point_values[source_index])
+        point = points[source_index]
+        point_total = jnp.zeros_like(density[:, 0])
         density_hazards: list[tuple[int, jnp.ndarray]] = []
         point_hazards: list[tuple[int, jnp.ndarray]] = []
 
@@ -730,11 +677,11 @@ def _solver_step_dynamics(
                 density_total = density_total + density_hazard
             density_hazards.append((target_index, density_hazard))
 
-            if point_mask[source_index]:
+            if point is not None:
                 point_hazard = _integrated_point_hazard(
                     fn,
                     t,
-                    point_d_0[source_index],
+                    point.d_0,
                     step_size,
                     intensity_kwargs,
                     config.intensity_limit,
@@ -759,19 +706,14 @@ def _solver_step_dynamics(
     row_hazards = tuple(row_hazards_list)
     transfers = _compute_same_step_transfers(
         densities,
-        point_values,
-        point_mask,
+        points,
         row_hazards,
         config.empty_density_states,
     )
 
     return (
         densities,
-        point_values,
-        point_d_0,
-        point_initial_values,
-        point_log_survivals,
-        point_mask,
+        points,
         row_hazards,
         transfers,
     )
@@ -779,30 +721,31 @@ def _solver_step_dynamics(
 
 def _compute_same_step_transfers(
     densities: tuple[jnp.ndarray, ...],
-    point_values: jnp.ndarray,
-    point_mask: tuple[bool, ...],
+    points: tuple[_PointMass | None, ...],
     row_hazards: tuple[_RowHazards, ...],
     empty_density_states: frozenset[int],
 ) -> _SameStepTransfers:
-    raw_inflow = jnp.zeros_like(point_values)
+    # State indices are static during tracing. Build one expression per target
+    # so unrelated transfers can fuse without scattering into a shared buffer.
+    zero_mass = jnp.zeros_like(densities[0][:, 0])
+    raw_inflow = [zero_mass] * len(densities)
 
     for i, hz in enumerate(row_hazards):
         if i not in empty_density_states:
             for j, density_hazard in hz.density_hazards:
                 transferred = density_hazard * hz.density_transfer_factor
-                raw_inflow = raw_inflow.at[j].add(
-                    jnp.sum(densities[i] * transferred, axis=-1)
-                )
+                contribution = jnp.sum(densities[i] * transferred, axis=-1)
+                raw_inflow[j] = (raw_inflow[j] + contribution).astype(zero_mass.dtype)
 
-        if point_mask[i]:
+        point = points[i]
+        if point is not None:
             for j, point_hazard in hz.point_hazards:
-                raw_inflow = raw_inflow.at[j].add(
-                    point_values[i] * point_hazard * hz.point_transfer_factor
-                )
+                contribution = point.value * point_hazard * hz.point_transfer_factor
+                raw_inflow[j] = (raw_inflow[j] + contribution).astype(zero_mass.dtype)
 
-    survived_inflow = jnp.zeros_like(raw_inflow)
-    next_inflow_zero = jnp.zeros_like(raw_inflow)
-    next_inflow_one = jnp.zeros_like(raw_inflow)
+    survived_inflow = [zero_mass] * len(densities)
+    next_inflow_zero = [zero_mass] * len(densities)
+    next_inflow_one = [zero_mass] * len(densities)
     chained_by_source: list[tuple[jnp.ndarray, ...]] = []
     incoming_state_indices = _incoming_state_indices(row_hazards)
     for i, hz in enumerate(row_hazards):
@@ -814,22 +757,20 @@ def _compute_same_step_transfers(
                 half_survival = jnp.exp(-half_total)
                 half_transfer_factor = _transfer_factor(half_total)
                 survived = inflow * half_survival
-                survived_inflow = survived_inflow.at[i].add(survived)
-                zero, one = _split_midpoint_inflow(survived)
-                next_inflow_zero = next_inflow_zero.at[i].add(zero)
-                next_inflow_one = next_inflow_one.at[i].add(one)
-
                 for j, density_hazard in hz.density_hazards:
                     chained = (
                         inflow * (0.5 * density_hazard[..., 0]) * half_transfer_factor
                     )
-                    next_inflow_zero = next_inflow_zero.at[j].add(chained)
+                    next_inflow_zero[j] = (next_inflow_zero[j] + chained).astype(
+                        zero_mass.dtype
+                    )
                     chained_from_source.append(chained)
             else:
-                survived_inflow = survived_inflow.at[i].add(inflow)
-                zero, one = _split_midpoint_inflow(inflow)
-                next_inflow_zero = next_inflow_zero.at[i].add(zero)
-                next_inflow_one = next_inflow_one.at[i].add(one)
+                survived = inflow
+            survived_inflow[i] = survived.astype(zero_mass.dtype)
+            zero, one = _split_midpoint_inflow(survived)
+            next_inflow_zero[i] = (next_inflow_zero[i] + zero).astype(zero_mass.dtype)
+            next_inflow_one[i] = one.astype(zero_mass.dtype)
         else:
             for _target_index, _density_hazard in hz.density_hazards:
                 chained_from_source.append(jnp.zeros_like(inflow))
@@ -837,37 +778,33 @@ def _compute_same_step_transfers(
         chained_by_source.append(tuple(chained_from_source))
 
     return _SameStepTransfers(
-        raw_inflow=raw_inflow,
-        survived_inflow=survived_inflow,
+        survived_inflow=tuple(survived_inflow),
         chained_by_source=tuple(chained_by_source),
-        next_inflow_zero=next_inflow_zero,
-        next_inflow_one=next_inflow_one,
+        next_inflow_zero=tuple(next_inflow_zero),
+        next_inflow_one=tuple(next_inflow_one),
     )
 
 
 def _advance_solver_step_from_dynamics(
     densities: tuple[jnp.ndarray, ...],
-    point_values: jnp.ndarray,
-    point_d_0: jnp.ndarray,
-    point_initial_values: jnp.ndarray,
-    point_log_survivals: jnp.ndarray,
-    point_mask: tuple[bool, ...],
+    points: tuple[_PointMass | None, ...],
     row_hazards: tuple[_RowHazards, ...],
     same_step_transfers: _SameStepTransfers,
     config: _DurationConfig,
 ) -> tuple[StateCarry, ...]:
-    next_point_values = point_values
-    next_point_log_survivals = point_log_survivals
-
-    for i, hz in enumerate(row_hazards):
-        if point_mask[i]:
-            next_log_survival = point_log_survivals[i] - hz.point_total
-            next_point_log_survivals = next_point_log_survivals.at[i].set(
-                next_log_survival
+    next_points: list[_PointMass | None] = []
+    for point, hz in zip(points, row_hazards):
+        if point is not None:
+            next_log_survival = point.log_survival - hz.point_total
+            point = _PointMass(
+                value=(point.initial_value * jnp.exp(next_log_survival)).astype(
+                    point.value.dtype
+                ),
+                d_0=point.d_0,
+                initial_value=point.initial_value,
+                log_survival=next_log_survival.astype(point.log_survival.dtype),
             )
-            next_point_values = next_point_values.at[i].set(
-                point_initial_values[i] * jnp.exp(next_log_survival)
-            )
+        next_points.append(point)
 
     # A full-width grid has no omitted regular cells. Advance it with the
     # uncompressed transport rule and keep the requested tail empty.
@@ -903,22 +840,14 @@ def _advance_solver_step_from_dynamics(
 
     return _restore_state(
         tuple(next_densities),
-        next_point_values,
-        point_d_0,
-        point_initial_values,
-        next_point_log_survivals,
-        point_mask,
+        tuple(next_points),
         config,
     )
 
 
 def _compute_cashflow_step(
     densities: tuple[jnp.ndarray, ...],
-    point_values: jnp.ndarray,
-    point_d_0: jnp.ndarray,
-    point_initial_values: jnp.ndarray,
-    point_log_survivals: jnp.ndarray,
-    point_mask: tuple[bool, ...],
+    points: tuple[_PointMass | None, ...],
     row_hazards: tuple[_RowHazards, ...],
     same_step_transfers: _SameStepTransfers,
     t: jnp.ndarray,
@@ -979,18 +908,19 @@ def _compute_cashflow_step(
                             density_midpoint * payment,
                             axis=-1,
                         )
-                    if point_mask[state_index]:
+                    point = points[state_index]
+                    if point is not None:
                         point_payment = _evaluate_intensity_at_point(
                             payment_fn,
                             t_mid,
-                            point_d_0[state_index] + t_mid,
+                            point.d_0 + t_mid,
                             intensity_kwargs,
                             config.payment_limit,
                             _threshold_value(payment, payment_mid_layout),
                             context_key=("source", state_index),
                         )
-                        point_midpoint = point_initial_values[state_index] * jnp.exp(
-                            point_log_survivals[state_index] - 0.5 * hz.point_total
+                        point_midpoint = point.initial_value * jnp.exp(
+                            point.log_survival - 0.5 * hz.point_total
                         )
                         contribution = contribution + (
                             step_size * point_midpoint * point_payment
@@ -1062,19 +992,20 @@ def _compute_cashflow_step(
                             * payment,
                             axis=-1,
                         )
-                    if point_mask[source_index]:
+                    point = points[source_index]
+                    if point is not None:
                         _, point_hazard = hz.point_hazards[hazard_slot]
                         point_payment = _evaluate_intensity_at_point(
                             payment_fn,
                             t_mid,
-                            point_d_0[source_index] + t_mid,
+                            point.d_0 + t_mid,
                             intensity_kwargs,
                             config.payment_limit,
                             _threshold_value(payment, payment_mid_layout),
                             context_key=("source", source_index),
                         )
                         contribution = contribution + (
-                            point_values[source_index]
+                            point.value
                             * point_hazard
                             * hz.point_transfer_factor
                             * point_payment
@@ -1158,11 +1089,12 @@ def _compute_cashflow_step(
                             densities[state_index] * payment,
                             axis=-1,
                         )
-                    if point_mask[state_index]:
+                    point = points[state_index]
+                    if point is not None:
                         point_payment = _evaluate_intensity_at_point(
                             payment_fn,
                             t,
-                            point_d_0[state_index] + t,
+                            point.d_0 + t,
                             intensity_kwargs,
                             config.payment_limit,
                             _threshold_value(payment, payment_left_layout),
@@ -1170,7 +1102,7 @@ def _compute_cashflow_step(
                             phase="left",
                         )
                         contribution = contribution + (
-                            active * point_values[state_index] * point_payment
+                            active * point.value * point_payment
                         )
                     if attachment.task_id >= 0:
                         core_values[attachment.task_id] = contribution
@@ -1258,8 +1190,9 @@ def _compute_cashflow_step(
                             in_horizon & (at_duration_index < config.width)
                         ).astype(template.dtype) * (density_at_duration * payment)
 
-                    if point_mask[state_index]:
-                        remaining = effective_at_duration - point_d_0[state_index]
+                    point = points[state_index]
+                    if point is not None:
+                        remaining = effective_at_duration - point.d_0
                         trigger_index = _scheduled_event_index(remaining, step_size)
                         current_index = jnp.round(t / step_size).astype(jnp.int32)
                         not_past_target = (remaining >= 0) | _is_near_grid_zero(
@@ -1275,7 +1208,7 @@ def _compute_cashflow_step(
                         point_payment = payment
                         contribution = contribution + (
                             active_point.astype(template.dtype)
-                            * point_values[state_index]
+                            * point.value
                             * point_payment
                         )
                     if target.task_id >= 0:
