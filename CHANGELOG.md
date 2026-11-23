@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.17
+
+- Reduce scatter updates in the JAX solver loop by accumulating same-step
+  inflows directly by destination and advancing each state's point masses
+  without packing them into shared arrays.
+
 ## 0.1.16
 
 - Accumulate continuous probability directly in absorbing states when requested
