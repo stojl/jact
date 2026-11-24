@@ -26,14 +26,17 @@ When helping a user, first identify:
 - whether the desired output is state occupancy, duration diagnostics,
   component cashflows, grouped cashflows, or a terminal value.
 
-1. Define the state topology with `jact.StateSpace`.
-2. Bind transition intensities with `state_space.build(...)`.
-3. Choose an initial state, per-individual initial states, or an
+1. Construct `jact.Model(states=..., transitions=...)` with a callable for each
+   edge. Use `groups` for an intensity covering several specified edges.
+2. Choose an initial state, per-individual initial states, or an
    `InitialDistribution`.
-4. Call `model.solve(...)` with horizon, grid resolution, output reducers, and
+3. Call `model.solve(...)` with horizon, grid resolution, output reducers, and
    user covariates.
-5. Select probability reducers and cashflow views that match the user's
-   question.
+
+Use `model.state_space` for cashflow declarations and initial distribution
+helpers. Use `StateSpace.build(...)` when comparing intensity assumptions on a
+fixed topology or assigning all exits from a state with `exits`. Each build
+requires one assignment per declared edge.
 
 Before choosing an output form, classify the requested quantity by intent:
 
@@ -48,15 +51,6 @@ Core pattern:
 ```python
 import jax.numpy as jnp
 import jact
-
-state_space = jact.StateSpace(
-    states=["healthy", "disabled", "dead"],
-    transitions=[
-        ("healthy", "disabled"),
-        ("healthy", "dead"),
-        ("disabled", "dead"),
-    ],
-)
 
 
 def disability_onset(t, d, *, age):
@@ -75,7 +69,8 @@ def disabled_mortality(t, d, *, age):
     return 2.0 * healthy_mortality(t, d, age=age)
 
 
-model = state_space.build(
+model = jact.Model(
+    states=["healthy", "disabled", "dead"],
     transitions={
         ("healthy", "disabled"): disability_onset,
         ("healthy", "dead"): healthy_mortality,
@@ -151,10 +146,10 @@ additional JIT compilation.
 ## Shared Derived Fields
 
 Use `derived={...}` to share expensive exogenous features across transition
-intensities and cashflows. Fields may be declared on `StateSpace.build(...)`,
-`StateSpace.cashflows(...)`, or an individual `solve(...)`. A field function's
-named parameters declare its dependencies on solve inputs, `t`, `d`, or other
-fields; its calculation should use pure JAX operations.
+intensities and cashflows. Fields may be declared on `Model(...)`,
+`model.state_space.cashflows(...)`, or an individual `solve(...)`. A field
+function's named parameters declare its dependencies on solve inputs, `t`, `d`,
+or other fields. Use pure JAX operations in the field function.
 
 For compiled performance, separate an expensive duration-only calculation from
 any time-dependent calculation that consumes it. On fixed density grids, `jact`
@@ -196,10 +191,6 @@ values involving `d` may contain duration-grid leaves such as `(1, D)`.
 import jax.numpy as jnp
 import jact
 
-state_space = jact.StateSpace(
-    states=["active", "dead"], transitions=[("active", "dead")]
-)
-
 
 def duration_basis(d, scale):
     return jnp.sin(d * scale[:, None])
@@ -209,11 +200,12 @@ def mortality(t, d, **kwargs):
     return 0.02 + 0.01 * kwargs["duration_basis"] + 0.001 * t
 
 
-model = state_space.build(
+model = jact.Model(
+    states=["active", "dead"],
     transitions={("active", "dead"): mortality},
     derived={"duration_basis": duration_basis},
 )
-cashflows = state_space.cashflows(
+cashflows = model.state_space.cashflows(
     {
         "premium": jact.cashflows.StateRate(
             {"active": lambda t, d, **kw: 1_000 * (1 + 0.1 * kw["duration_basis"])}
@@ -237,11 +229,11 @@ speedup for the actual workload.
 Use the simplest initial condition that represents the problem:
 
 - `initial="healthy"` for a shared point-mass start in one state.
-- `initial=state_space.initial_at("disabled", duration=durations)` for explicit
+- `initial=model.state_space.initial_at("disabled", duration=durations)` for explicit
   starting duration in one state.
-- `initial=state_space.initial_per_individual(...)` when each individual starts
+- `initial=model.state_space.initial_per_individual(...)` when each individual starts
   in a possibly different state.
-- `initial=state_space.initial_distribution(...)` for mixed starting masses
+- `initial=model.state_space.initial_distribution(...)` for mixed starting masses
   across multiple states.
 
 Pass `initial_duration=...` only with shorthand starts: `initial="healthy"` or
@@ -251,7 +243,7 @@ pass duration through the helper's `duration=...` argument.
 Example mixed initial distribution:
 
 ```python
-initial = state_space.initial_distribution(
+initial = model.state_space.initial_distribution(
     {
         "healthy": {"mass": jnp.array([0.9, 0.7]), "duration": 0.0},
         "disabled": {"mass": jnp.array([0.1, 0.3]), "duration": jnp.array([2.0, 5.0])},
@@ -319,7 +311,8 @@ fitted_params = {
 
 mortality = jact.wrappers.bind_intensity(apply, fitted_params, features)
 
-model = state_space.build(
+model = jact.Model(
+    states=["healthy", "disabled", "dead"],
     transitions={
         ("healthy", "disabled"): disability_onset,
         ("healthy", "dead"): mortality,
@@ -366,6 +359,10 @@ healthy_exits = jact.wrappers.bind_exit_intensity(
     output_count=2,
 )
 
+state_space = jact.StateSpace(
+    states=["healthy", "disabled", "dead"],
+    transitions=[("healthy", "disabled"), ("healthy", "dead"), ("disabled", "dead")],
+)
 model = state_space.build(
     exits={"healthy": healthy_exits},
     transitions={("disabled", "dead"): disabled_mortality},
@@ -397,7 +394,7 @@ state-space topology:
 
 ## Cashflow Guidance
 
-Declare cashflow components from the same `StateSpace`, then select solve-time
+Declare cashflow components with `model.state_space`, then select solve-time
 views:
 
 - `jact.cashflows.Raw()` returns component-level streams for inspection.
@@ -433,7 +430,7 @@ def death_benefit(t, d, *, age):
     return jnp.full((age.shape[0], d.shape[-1]), 100_000.0)
 
 
-cashflows = state_space.cashflows(
+cashflows = model.state_space.cashflows(
     {
         "premium": jact.cashflows.StateRate({"healthy": annual_premium}),
         "death_benefit": jact.cashflows.TransitionLump(
@@ -480,7 +477,7 @@ def disabled_after_one_year(t, d, *, age):
     )
 
 
-cashflows = state_space.cashflows(
+cashflows = model.state_space.cashflows(
     {
         "disabled_duration_gt_1": jact.cashflows.StateRate(
             {"disabled": disabled_after_one_year}
@@ -509,7 +506,7 @@ expected_time = result.cashflows["expected_time"]
 ## Shared Payment Cores
 
 When several payments have the form `weight(t, inputs) * core(t, d, inputs)`,
-register the core once with `state_space.cashflows(..., cores={...})` and use
+register the core once with `model.state_space.cashflows(..., cores={...})` and use
 `jact.cashflows.Scaled("core_name", weight=...)` in each payment mapping.
 Derived fields share exogenous feature evaluations; named cores also share the
 complete integrated payment contribution, including point masses and transfer
@@ -523,10 +520,8 @@ import jax.numpy as jnp
 import jact
 from jact import cashflows as cf
 
-state_space = jact.StateSpace(
-    ["disabled", "dead"], [("disabled", "dead")],
-)
-model = state_space.build(
+model = jact.Model(
+    states=["disabled", "dead"],
     transitions={("disabled", "dead"): lambda t, d, **kw: 0.02},
 )
 
@@ -535,7 +530,7 @@ def eligible(t, d, **kwargs):
     return jnp.where(d >= 0.5, 1.0, 0.0)
 
 
-cashflows = state_space.cashflows(
+cashflows = model.state_space.cashflows(
     {
         "income": cf.StateRate({
             "disabled": cf.Scaled(

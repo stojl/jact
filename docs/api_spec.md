@@ -9,8 +9,8 @@ large cohorts.
 
 The public API has four layers:
 
-- `StateSpace`: states and allowed transitions only.
-- `Model`: a `StateSpace` bound to intensity callables.
+- `Model`: states and transitions paired with intensity callables.
+- `StateSpace`: the topology of a model, which can be defined and reused separately.
 - `CashflowDeclaration`: reusable named cashflow components declared from a
   `StateSpace`.
 - `solve()`: a midpoint-quadrature solver over the reachable subgraph that can
@@ -45,62 +45,41 @@ only. They are not part of the public contract.
 The installed package includes a PEP 561 `py.typed` marker, so type checkers
 use these inline annotations without separate stub packages.
 
-## StateSpace
-
-`StateSpace` defines topology only. It carries no intensities and no data.
-
-```python
-state_space = jact.StateSpace(
-    states=["healthy", "disabled", "dead"],
-    transitions=[
-        ("healthy", "disabled"),
-        ("healthy", "dead"),
-        ("disabled", "dead"),
-    ],
-)
-```
-
-Construction validates:
-
-- no duplicate state names,
-- no transitions to unknown states,
-- no self-transitions,
-- no duplicate transitions.
-
-Surface:
-
-| Name | Meaning |
-|---|---|
-| `states` | Tuple of state names in declared order |
-| `n_states` | Number of states |
-| `transitions` | `frozenset[(src, tgt)]` of declared transitions |
-| `absorbing` | States with no outgoing transitions |
-| `transient` | States with outgoing transitions |
-| `exits(state)` | Outgoing transitions from `state`, ordered by target-state order |
-| `targets(state)` | Outgoing target states from `state`, ordered by state order |
-| `sources(state)` | Source states with a transition into `state`, ordered by state order |
-| `has_transition(src, tgt)` | Whether `(src, tgt)` is declared |
-| `state_index(state)` | Zero-based index in `states` |
-| `reachable_from(state)` | Starting state first, then reachable states in original state order |
-| `build(transitions=..., exits=..., groups=..., derived=...)` | Create a `Model` |
-| `cashflows({...}, derived=..., cores=...)` | Create a `CashflowDeclaration` |
-| `initial_at(state, duration=0.0)` | Create an `InitialDistribution` |
-| `initial_distribution(components=..., normalise=True)` | Create an `InitialDistribution` |
-| `initial_per_individual(...)` | Create an `InitialDistribution` from per-individual initial states |
-
-Serialization:
-
-```python
-state_space.to_json("model.json")
-loaded = jact.StateSpace.from_json("model.json")
-```
-
 ## Model
 
-`Model` binds intensity callables to a `StateSpace`. Create it via
-`state_space.build(...)`.
+`Model` binds intensity callables to a `StateSpace`. Construct it directly
+from states and intensity assignments, or use `state_space.build(...)` to
+bind intensities to an existing topology.
 
-### Building a model
+### Constructing a model directly
+
+```python
+model = jact.Model(
+    states=["healthy", "disabled", "dead"],
+    transitions={
+        ("healthy", "disabled"): onset,
+        ("healthy", "dead"): mortality,
+    },
+)
+result = model.solve(initial="healthy", horizon=10, steps_per_unit=12)
+```
+
+The keys in `transitions` and the edges listed in any `groups` define the
+topology. Include every state in `states`, including states with no assigned
+edges. Each edge must have one intensity assignment. In this example,
+`disabled` and `dead` are absorbing states. Omit both assignment mappings to
+construct a model with no edges.
+
+The generated topology is available as `model.state_space` for cashflow
+declarations, initial distributions, and topology queries. Use `groups` to
+pair a multi-output intensity with an ordered list of edges. The `exits`
+shortcut is available when building from an existing state space, whose
+topology supplies the exit targets.
+
+### Building from a state space
+
+Use `StateSpace.build(...)` when multiple intensity specifications share a
+fixed topology or when assigning intensities to all exits from a state.
 
 Every declared transition must be assigned exactly once across these three
 kwargs:
@@ -135,19 +114,21 @@ Notes:
 
 ### Shared derived fields
 
-`StateSpace.build`, `StateSpace.cashflows`, `Model.solve`, and `jact.solve`
-accept an optional `derived` mapping. The three declaration scopes compose into
-one graph at solve time. Scope determines ownership and reuse; every callable
-receives the same resolved fields through its existing `**kwargs` interface.
+`Model`, `StateSpace.build`, `StateSpace.cashflows`, `Model.solve`, and
+`jact.solve` accept an optional `derived` mapping. The three declaration scopes
+compose into one graph at solve time. Scope determines ownership and reuse.
+Every callable receives the same resolved fields through its existing
+`**kwargs` interface.
 
 ```python
-model = state_space.build(
+model = jact.Model(
+    states=["healthy", "dead"],
     transitions={("healthy", "dead"): mortality},
     derived={
         "age": lambda t, baseline_age: baseline_age + t,
     },
 )
-cashflows = state_space.cashflows(
+cashflows = model.state_space.cashflows(
     {"premium": jact.cashflows.StateRate({"healthy": premium})},
     derived={"indexed_premium": lambda age, salary: salary * (1 + 0.01 * age)},
 )
@@ -226,6 +207,56 @@ TransitionInfo(source, target, assignment, callable, index)
 
 `index` is `None` for `transitions` assignments and the output slot index for
 `exits` and `groups`.
+
+## StateSpace
+
+`StateSpace` defines topology only. It carries no intensities and no data.
+
+```python
+state_space = jact.StateSpace(
+    states=["healthy", "disabled", "dead"],
+    transitions=[
+        ("healthy", "disabled"),
+        ("healthy", "dead"),
+        ("disabled", "dead"),
+    ],
+)
+```
+
+Construction validates:
+
+- no duplicate state names,
+- no transitions to unknown states,
+- no self-transitions,
+- no duplicate transitions.
+
+Surface:
+
+| Name | Meaning |
+|---|---|
+| `states` | Tuple of state names in declared order |
+| `n_states` | Number of states |
+| `transitions` | `frozenset[(src, tgt)]` of declared transitions |
+| `absorbing` | States with no outgoing transitions |
+| `transient` | States with outgoing transitions |
+| `exits(state)` | Outgoing transitions from `state`, ordered by target-state order |
+| `targets(state)` | Outgoing target states from `state`, ordered by state order |
+| `sources(state)` | Source states with a transition into `state`, ordered by state order |
+| `has_transition(src, tgt)` | Whether `(src, tgt)` is declared |
+| `state_index(state)` | Zero-based index in `states` |
+| `reachable_from(state)` | Starting state first, then reachable states in original state order |
+| `build(transitions=..., exits=..., groups=..., derived=...)` | Create a `Model` |
+| `cashflows({...}, derived=..., cores=...)` | Create a `CashflowDeclaration` |
+| `initial_at(state, duration=0.0)` | Create an `InitialDistribution` |
+| `initial_distribution(components=..., normalise=True)` | Create an `InitialDistribution` |
+| `initial_per_individual(...)` | Create an `InitialDistribution` from per-individual initial states |
+
+Serialization:
+
+```python
+state_space.to_json("model.json")
+loaded = jact.StateSpace.from_json("model.json")
+```
 
 ## InitialDistribution
 
@@ -515,10 +546,11 @@ Construction validation:
 
 ### Declaration
 
-Cashflows are declared from a `StateSpace`, not from a `Model`:
+Use `model.state_space` to declare cashflows for the states and transitions in
+the model.
 
 ```python
-cashflows = state_space.cashflows({
+cashflows = model.state_space.cashflows({
     "premium": jact.cashflows.StateRate({"healthy": premium_fn}),
     "death": jact.cashflows.TransitionLump({("healthy", "dead"): death_fn}),
     "bonus": jact.cashflows.ScheduledEvent(

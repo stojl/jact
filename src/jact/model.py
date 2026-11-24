@@ -82,20 +82,28 @@ class ReducedModel:
 class Model:
     """A multi-state model with intensity callables assigned to transitions.
 
-    Created via :meth:`StateSpace.build`. Not instantiated directly.
+    Pass ``states`` and intensity assignments to create the topology and model
+    together, or use :meth:`StateSpace.build` with an existing topology.
 
     Parameters
     ----------
     state_space : StateSpace
-        The underlying state space.
+        An existing topology. Supply either ``state_space`` or ``states``.
+    states : Iterable[str], keyword-only
+        Ordered state names for direct construction. The transitions in
+        ``transitions`` and ``groups`` define the underlying topology.
     transitions : dict, optional
         ``{(source, target): callable}`` for single-transition assignments.
     exits : dict, optional
         ``{source_state: callable}`` for all-exits-from-a-state assignments.
+        Requires an existing ``state_space`` to identify the targets.
     groups : dict, optional
         ``{callable: [(src, tgt), ...]}`` for arbitrary transition groups.
+    derived : Derived, optional
+        Shared derived fields contributed by the model.
     """
 
+    @overload
     def __init__(
         self,
         state_space: StateSpace,
@@ -103,7 +111,40 @@ class Model:
         exits: Mapping[str, GroupedIntensity] | None = None,
         groups: Mapping[GroupedIntensity, Sequence[Transition]] | None = None,
         derived: Derived | None = None,
+    ) -> None: ...
+
+    @overload
+    def __init__(
+        self,
+        *,
+        states: Iterable[str],
+        transitions: Mapping[Transition, Intensity] | None = None,
+        groups: Mapping[GroupedIntensity, Sequence[Transition]] | None = None,
+        derived: Derived | None = None,
+    ) -> None: ...
+
+    def __init__(
+        self,
+        state_space: StateSpace | None = None,
+        transitions: Mapping[Transition, Intensity] | None = None,
+        exits: Mapping[str, GroupedIntensity] | None = None,
+        groups: Mapping[GroupedIntensity, Sequence[Transition]] | None = None,
+        derived: Derived | None = None,
+        *,
+        states: Iterable[str] | None = None,
     ) -> None:
+        if (state_space is None) == (states is None):
+            raise TypeError("Provide exactly one of state_space or states.")
+
+        if states is not None:
+            if exits is not None:
+                raise TypeError("exits requires an existing state_space.")
+            edges = set(transitions or {})
+            for group_edges in (groups or {}).values():
+                edges.update(group_edges)
+            state_space = StateSpace(states=states, transitions=edges)
+
+        assert state_space is not None
         self._state_space = state_space
         self.derived: Derived = dict(derived or {})
         self._transitions_map: Mapping[Transition, Intensity] = transitions or {}

@@ -8,32 +8,15 @@ multi-state models with duration-dependent transition intensities.
 Example
 -------
 >>> import jact
->>> import jax.numpy as jnp
 >>>
->>> state_space = jact.StateSpace(
-...     states=["healthy", "disabled", "dead"],
-...     transitions=[
-...         ("healthy", "disabled"),
-...         ("healthy", "dead"),
-...         ("disabled", "dead"),
-...     ],
+>>> model = jact.Model(
+...     states=["healthy", "dead"],
+...     transitions={("healthy", "dead"): lambda t, d, **kw: 0.01},
 ... )
 >>>
->>> model = state_space.build(
-...     transitions={
-...         ("healthy", "disabled"): onset_fn,
-...         ("healthy", "dead"): mortality_fn,
-...         ("disabled", "dead"): disabled_mort_fn,
-...     }
-... )
->>>
->>> result = model.solve(
-...     initial="healthy",
-...     horizon=10,
-...     steps_per_unit=12,
-...     probability=jact.probability.StateProbability(),
-...     age=ages,
-... )
+>>> result = model.solve(initial="healthy", horizon=1, steps_per_unit=12)
+>>> result.states
+('healthy', 'dead')
 """
 
 from importlib.metadata import PackageNotFoundError, version

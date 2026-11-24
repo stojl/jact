@@ -4,12 +4,13 @@ This directory contains the public documentation for `jact`.
 
 ## Start here
 
-- [API specification](api_spec.md): authoritative public API contract.
-- [Example notebook](example_notebook.ipynb): runnable walkthrough of the main workflow.
+- [README quickstart](../README.md#quickstart) pairs transitions with intensities in `jact.Model` and solves for state probabilities.
+- [Example notebook](example_notebook.ipynb) walks through a solve and adds cashflows and initial distributions.
+- [API specification](api_spec.md) defines the public API.
 - [Derived fields notebook](derived_fields_notebook.ipynb): share computed covariates across intensities and cashflows, then measure reuse and runtime.
 - [Pytree domain modelling notebook](pytree_domain_modeling_notebook.ipynb): use registered domain objects and structured derived fields in a solve.
 - [Autodiff notebook](autodiff_notebook.ipynb): differentiate a terminal present value with respect to an intensity parameter.
-- [Fitted neural-network notebook](fitted_nn_notebook.ipynb): fit synthetic hazard targets with pure `jax`, then pass the learned intensities directly into `jact.solve(...)`.
+- [Fitted neural-network notebook](fitted_nn_notebook.ipynb) compares fitted and reference intensities on a shared `StateSpace`.
 
 ## Maintainer-only material
 

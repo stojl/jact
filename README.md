@@ -6,34 +6,121 @@ JAX-based transition probability and expected cashflow computation for multi-sta
 
 `jact` computes transition probabilities and expected cashflows in semi-Markov multi-state models. It takes fitted intensity models — parametric functions, GLMs, neural networks, or any JIT-compatible callable — and produces transition probabilities and cashflow streams for thousands of individuals in a single vectorized pass on GPU. Computations are optimized for JIT-compiled GPU execution.
 
-## Quick example
+## Quickstart
 
 ```python
 import jax.numpy as jnp
 import jact
 
-# Define the state space
-state_space = jact.StateSpace(
+
+def onset(t, d, *, age):
+    return 0.02 * jnp.exp(0.03 * (age[:, None] + t - 50.0))
+
+
+def mortality(t, d, **kwargs):
+    return 0.01
+
+
+def disabled_mortality(t, d, **kwargs):
+    return 0.02
+
+
+model = jact.Model(
     states=["healthy", "disabled", "dead"],
-    transitions=[
-        ("healthy", "disabled"),
-        ("healthy", "dead"),
-        ("disabled", "dead"),
-    ],
+    transitions={
+        ("healthy", "disabled"): onset,
+        ("healthy", "dead"): mortality,
+        ("disabled", "dead"): disabled_mortality,
+    },
 )
 
-# Build a model with intensity functions
-model = state_space.build(
+ages = jnp.linspace(30, 80, 1_000)
+result = model.solve(initial="healthy", horizon=30, steps_per_unit=12, age=ages)
+print(result.states)             # ('healthy', 'disabled', 'dead')
+print(result.probability.shape)  # (361, 1000, 3)
+```
+
+`result.probability` is indexed by time, individual, and state. The first
+snapshot is at time zero, and `result.states` gives the order of the state axis.
+
+## Reuse a topology across models
+
+When comparing intensity assumptions on the same topology, declare a
+`StateSpace` once. Here the stress scenario increases mortality by 20% in
+both living states. Each call to `build()` checks that all edges have an
+intensity assignment.
+
+```python
+state_space = jact.StateSpace(
+    states=["healthy", "disabled", "dead"],
+    transitions=[("healthy", "disabled"), ("healthy", "dead"), ("disabled", "dead")],
+)
+baseline_rates = {
+    ("healthy", "disabled"): onset,
+    ("healthy", "dead"): mortality,
+    ("disabled", "dead"): disabled_mortality,
+}
+baseline = state_space.build(transitions=baseline_rates)
+stress = state_space.build(
     transitions={
-        ("healthy", "disabled"): onset_fn,
-        ("healthy", "dead"): mortality_fn,
-        ("disabled", "dead"): disabled_mort_fn,
+        **baseline_rates,
+        ("healthy", "dead"): lambda t, d, **kw: 1.2 * mortality(t, d, **kw),
+        ("disabled", "dead"): lambda t, d, **kw: 1.2 * disabled_mortality(t, d, **kw),
+    },
+)
+```
+
+## Cashflow example
+
+Use `model.state_space.cashflows(...)` to declare payments against the states
+and transitions in your model. The same `model.state_space` gives you access
+to the initial distribution helpers. This example uses `model` and `ages`
+from the quickstart.
+
+```python
+import jax.numpy as jnp
+import jact
+
+
+def annual_premium(t, d, *, age):
+    return jnp.full((age.shape[0], d.shape[-1]), -1_200.0)
+
+
+def death_benefit(t, d, *, age):
+    return jnp.full((age.shape[0], d.shape[-1]), 100_000.0)
+
+
+cashflows = model.state_space.cashflows(
+    {
+        "premium": jact.cashflows.StateRate({"healthy": annual_premium}),
+        "death_benefit": jact.cashflows.TransitionLump(
+            {
+                ("healthy", "dead"): death_benefit,
+                ("disabled", "dead"): death_benefit,
+            }
+        ),
     }
 )
 
-# Compute transition probabilities for 1000 individuals
-ages = jnp.linspace(30, 80, 1_000)
-result = model.solve(initial="healthy", horizon=30, steps_per_unit=12, age=ages)
+result = model.solve(
+    initial="healthy",
+    horizon=30,
+    steps_per_unit=12,
+    record_every=12,
+    probability=None,
+    cashflows=cashflows,
+    cashflow_views={
+        "raw": jact.cashflows.Raw(),
+        "pv_total": jact.cashflows.Total(
+            weight=lambda t, **kwargs: jnp.exp(-0.03 * t),
+            terminal=True,
+        ),
+    },
+    age=ages,
+)
+
+premium_stream = result.cashflows["raw"]["premium"]
+present_value = result.cashflows["pv_total"]
 ```
 
 ## Shared derived fields
@@ -43,24 +130,27 @@ solve. Field function parameters name their dependencies on solve inputs,
 `t`, `d`, or other fields:
 
 ```python
-model = state_space.build(
+def onset_by_attained_age(t, d, *, attained_age, **kwargs):
+    return 0.02 * jnp.exp(0.03 * (attained_age[:, None] - 50.0))
+
+
+model_with_derived = jact.Model(
+    states=["healthy", "disabled", "dead"],
     transitions={
-        ("healthy", "disabled"): onset_fn,
-        ("healthy", "dead"): mortality_fn,
-        ("disabled", "dead"): disabled_mort_fn,
+        ("healthy", "disabled"): onset_by_attained_age,
+        ("healthy", "dead"): mortality,
+        ("disabled", "dead"): disabled_mortality,
     },
     derived={"attained_age": lambda t, baseline_age: baseline_age + t},
 )
 
-# onset_fn, mortality_fn, and payment functions can read
-# kwargs["attained_age"] without rebuilding it separately.
-result = model.solve(
+result = model_with_derived.solve(
     initial="healthy", horizon=30, steps_per_unit=12,
     baseline_age=ages,
 )
 ```
 
-`derived` is also accepted by `state_space.cashflows(...)` and `model.solve(...)`.
+`derived` is also accepted by cashflow declarations and `model.solve(...)`.
 The combined field graph rejects duplicate names, missing inputs, and cycles.
 
 Solve inputs and derived fields can also be JAX pytrees, so callbacks can use
@@ -83,7 +173,7 @@ from jact import cashflows as cf
 def eligible(t, d, **kwargs):
     return jnp.where(d >= 0.5, 1.0, 0.0)
 
-cashflows = state_space.cashflows(
+cashflows = model.state_space.cashflows(
     {
         "income": cf.StateRate({
             "disabled": cf.Scaled(
@@ -135,56 +225,6 @@ For fitted models that emit several hazards at once, use
 `jact.wrappers.bind_exit_intensity(..., output_count=K)`. The wrappers clamp
 outputs to non-negative hazards and normalize grouped output axes. Raw fitted
 model outputs only need to be broadcastable to the solver shape.
-
-## Cashflow example
-
-Using the same `state_space`, `model`, and `ages` as above:
-
-```python
-import jax.numpy as jnp
-import jact
-
-
-def annual_premium(t, d, *, age):
-    return jnp.full((age.shape[0], d.shape[-1]), -1_200.0)
-
-
-def death_benefit(t, d, *, age):
-    return jnp.full((age.shape[0], d.shape[-1]), 100_000.0)
-
-
-cashflows = state_space.cashflows(
-    {
-        "premium": jact.cashflows.StateRate({"healthy": annual_premium}),
-        "death_benefit": jact.cashflows.TransitionLump(
-            {
-                ("healthy", "dead"): death_benefit,
-                ("disabled", "dead"): death_benefit,
-            }
-        ),
-    }
-)
-
-result = model.solve(
-    initial="healthy",
-    horizon=30,
-    steps_per_unit=12,
-    record_every=12,
-    probability=None,
-    cashflows=cashflows,
-    cashflow_views={
-        "raw": jact.cashflows.Raw(),
-        "pv_total": jact.cashflows.Total(
-            weight=lambda t, **kwargs: jnp.exp(-0.03 * t),
-            terminal=True,
-        ),
-    },
-    age=ages,
-)
-
-premium_stream = result.cashflows["raw"]["premium"]
-present_value = result.cashflows["pv_total"]
-```
 
 ## Key features
 

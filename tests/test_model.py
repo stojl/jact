@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 import jact
@@ -92,6 +93,53 @@ def mixed_assignment_model(mixed_assignment_state_space):
             ],
         },
     )
+
+
+class TestDirectModelConstruction:
+    def test_direct_model_matches_build_with_the_same_edges(
+        self, mixed_assignment_model
+    ):
+        model = jact.Model(
+            states=["healthy", "disabled", "recovered", "dead", "archived"],
+            transitions={("healthy", "disabled"): _single_transition_fn},
+            groups={
+                _healthy_mortality_group: [("healthy", "dead"), ("recovered", "dead")],
+                _disabled_exit_group: [("disabled", "recovered"), ("disabled", "dead")],
+            },
+        )
+
+        space = model.state_space
+        assert space.states == mixed_assignment_model.state_space.states
+        assert space.transitions == mixed_assignment_model.state_space.transitions
+        assert space.absorbing == ("dead", "archived")
+        assert model.info("disabled", "dead").index == 1
+
+        age = jnp.array([45.0])
+        actual = model.solve(space.initial_at("healthy"), 1, 4, age=age)
+        expected = mixed_assignment_model.solve("healthy", 1, 4, age=age)
+        assert actual.states == expected.states
+        np.testing.assert_allclose(actual.probability, expected.probability)
+
+    def test_direct_model_can_omit_all_edges(self):
+        model = jact.Model(states=["healthy", "dead"])
+
+        assert model.state_space.absorbing == ("healthy", "dead")
+        assert model.reduce("healthy").reachable_states == ("healthy",)
+
+    def test_direct_model_rejects_unknown_target(self):
+        with pytest.raises(ValueError, match="target 'dead' is not a declared state"):
+            jact.Model(
+                states=["healthy"],
+                transitions={("healthy", "dead"): _single_transition_fn},
+            )
+
+    def test_direct_model_rejects_duplicate_assignments(self):
+        with pytest.raises(ValueError, match="assigned multiple times"):
+            jact.Model(
+                states=["healthy", "dead"],
+                transitions={("healthy", "dead"): _single_transition_fn},
+                groups={_healthy_mortality_group: [("healthy", "dead")]},
+            )
 
 
 class TestModelBuildValidation:
