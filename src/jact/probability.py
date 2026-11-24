@@ -255,29 +255,36 @@ def _continuous_mass(carry: StateCarry) -> jnp.ndarray:
 
 @jax.jit
 def _tail_callback(state: tuple[StateCarry, ...]) -> TailResult:
-    return {
-        "mass": jnp.stack(tuple(
-            jnp.zeros_like(carry.density[:, 0])
-            if carry.tail is None else carry.tail.mass for carry in state
-        ), axis=-1),
-        "duration": jnp.stack(tuple(
-            jnp.zeros_like(carry.density[:, 0])
-            if carry.tail is None else carry.tail.duration for carry in state
-        ), axis=-1),
-    }
-
-
-@jax.jit
-def _state_probability_callback(state: tuple[StateCarry, ...]) -> jnp.ndarray:
-    return jnp.stack(
+    masses = jnp.stack(
         tuple(
-            _continuous_mass(carry)
-            if carry.point_mass is None
-            else _continuous_mass(carry) + carry.point_mass.value
+            jnp.zeros_like(carry.density[:, 0])
+            if carry.tail is None
+            else carry.tail.mass
             for carry in state
         ),
         axis=-1,
     )
+    durations = jnp.stack(
+        tuple(
+            jnp.zeros_like(carry.density[:, 0])
+            if carry.tail is None
+            else carry.tail.duration
+            for carry in state
+        ),
+        axis=-1,
+    )
+    return {"mass": masses, "duration": durations}
+
+
+@jax.jit
+def _state_probability_callback(state: tuple[StateCarry, ...]) -> jnp.ndarray:
+    state_masses: list[jnp.ndarray] = []
+    for carry in state:
+        mass = _continuous_mass(carry)
+        if carry.point_mass is not None:
+            mass = mass + carry.point_mass.value
+        state_masses.append(mass)
+    return jnp.stack(tuple(state_masses), axis=-1)
 
 
 @jax.jit

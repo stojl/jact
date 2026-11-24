@@ -25,8 +25,14 @@ def run_sweep(use_x64: bool) -> list[tuple[int, float]]:
         jax.config.update("jax_enable_x64", True)
     import jax.numpy as jnp
 
-    from jact.callbacks import StateCarry
-    from jact.solver import _KIND_STATE_RATE, _SOURCE_COMPONENT, _midpoint_solver
+    from jact._cashflow_ir import (
+        ComponentSource,
+        PreparedCashflowView,
+        StatePayment,
+        StateRateSpec,
+    )
+    from jact.probability import StateCarry
+    from jact.solver import _midpoint_solver
 
     dtype = jnp.float64 if use_x64 else jnp.float32
     batch_size = 1
@@ -40,6 +46,15 @@ def run_sweep(use_x64: bool) -> list[tuple[int, float]]:
         return jnp.ones((batch_size, d.shape[-1]), dtype=dtype)
 
     expected = (1.0 - jnp.exp(jnp.asarray(-RATE * HORIZON, dtype=dtype))) / RATE
+    annuity = StateRateSpec(payments=(StatePayment(state_index=0, payment=unit_payment),))
+    terminal_view = PreparedCashflowView(
+        name="annuity",
+        terminal=True,
+        weight=None,
+        sources=(ComponentSource(component_index=0),),
+        leaf_names=("annuity",),
+        output="single",
+    )
     rows: list[tuple[int, float]] = []
     for steps_per_unit in STEPS_SWEEP:
         solver_steps = HORIZON * steps_per_unit
@@ -70,20 +85,13 @@ def run_sweep(use_x64: bool) -> list[tuple[int, float]]:
             {},
             lambda _state: None,
             solver_steps,
-            ((_KIND_STATE_RATE, ((0, unit_payment),)),),
-            (
-                (
-                    "annuity",
-                    True,
-                    None,
-                    ((_SOURCE_COMPONENT, 0),),
-                    ("annuity",),
-                    "single",
-                ),
-            ),
+            cashflow_components=(annuity,),
+            cashflow_views=(terminal_view,),
         )
-        value = result["cashflow_terminal"][0][0]
-        rows.append((steps_per_unit, float(jnp.max(jnp.abs(value - expected)))))
+        assert result.cashflow_terminal is not None
+        (annuity_value,), = result.cashflow_terminal
+        error = float(jnp.max(jnp.abs(annuity_value - expected)))
+        rows.append((steps_per_unit, error))
     return rows
 
 

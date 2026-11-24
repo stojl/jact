@@ -60,7 +60,8 @@ def install_skill(target: str | Path, *, force: bool = False) -> Path:
         )
 
     target_dir.mkdir(parents=True, exist_ok=True)
-    destination.write_text(skill_text(), encoding="utf-8")
+    bundled_markdown = skill_text()
+    destination.write_text(bundled_markdown, encoding="utf-8")
     return destination
 
 

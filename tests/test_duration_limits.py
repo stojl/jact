@@ -523,18 +523,26 @@ def test_padded_multi_device_batch_matches_single_device():
         from jact import probability as pr, cashflows as cf
         space = _space()
         model = _model(space)
-        args: dict[str, Any] = dict(initial="a", horizon=3, steps_per_unit=4,
-                    initial_duration=jnp.arange(5.) / 2,
-                    rate=jnp.arange(5.)[:, None] / 10 + .1,
-                    probability=pr.Full(), cashflows=_cashflows(space),
-                    cashflow_views={"stream": cf.Total(),
-                                    "terminal": cf.Total(terminal=True)},
-                    record_every=3, intensity_duration_limit=.3,
-                    payment_duration_limit=.6, probability_duration_limit=.2)
-        reference = model.solve(**args)
+        # Five individuals require padding when split across two devices.
+        solve_options: dict[str, Any] = dict(
+            initial="a",
+            horizon=3,
+            steps_per_unit=4,
+            initial_duration=jnp.arange(5.) / 2,
+            rate=jnp.arange(5.)[:, None] / 10 + .1,
+            probability=pr.Full(),
+            cashflows=_cashflows(space),
+            cashflow_views={"stream": cf.Total(), "terminal": cf.Total(terminal=True)},
+            record_every=3,
+            intensity_duration_limit=.3,
+            payment_duration_limit=.6,
+            probability_duration_limit=.2,
+        )
+        reference = model.solve(**solve_options)
         for devices in (2, tuple(reversed(jax.local_devices()))):
-            actual = model.solve(**args, devices=devices)
+            actual = model.solve(**solve_options, devices=devices)
             _assert_tree_close(actual, reference)
+            # Recorded time, unpadded batch, reachable state.
             assert actual.probability["tail"]["mass"].shape == (5, 5, 2)
     """)
     env = dict(

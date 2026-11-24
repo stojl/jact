@@ -91,6 +91,8 @@ ResolvedScheduledEvents: TypeAlias = tuple[ResolvedScheduledEvent | None, ...]
 
 
 class ResolvedDurationTarget(NamedTuple):
+    """Requested duration and its grid-aligned duration and index."""
+
     state_index: int
     at_duration: jnp.ndarray
     at_duration_index: jnp.ndarray
@@ -135,6 +137,8 @@ CashflowViewOutput: TypeAlias = Literal["single", "mapping"]
 
 
 class PreparedCashflowView(NamedTuple):
+    """Static view with one source per named output leaf."""
+
     name: str
     terminal: bool
     weight: Weight | Scalar | None
@@ -152,6 +156,8 @@ FormattedCashflows: TypeAlias = CashflowResult
 
 
 class StepAggregation(NamedTuple):
+    """Per-step totals and the event subtotals valued at the left edge."""
+
     by_component: CashflowLeaves
     by_state: CashflowLeaves
     by_kind: CashflowLeaves

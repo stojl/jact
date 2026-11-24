@@ -306,7 +306,7 @@ def validate_cashflow_components(
                 payments=cast(Mapping[str, Payment | Scaled], payments),
             )
         elif isinstance(component, DurationEvent):  # pyright: ignore[reportUnnecessaryIsInstance]
-            at_durations = _validate_at_duration_mapping(
+            duration_selectors = _validate_at_duration_mapping(
                 component.at_durations,
                 f"DurationEvent('{name}').at_durations",
             )
@@ -315,16 +315,18 @@ def validate_cashflow_components(
                 f"DurationEvent('{name}').payments",
                 frozen_cores,
             )
-            for state in at_durations:
+            for state in duration_selectors:
                 state_space._check_state(cast(str, state))
             _validate_state_payments(state_space, payments)
-            if set(at_durations) != set(payments):
+            if set(duration_selectors) != set(payments):
                 raise ValueError(
                     f"DurationEvent('{name}').at_durations and payments "
                     "must use the same state keys."
                 )
             frozen_component = DurationEvent(
-                at_durations=cast(Mapping[str, ArrayLike | DurationAt], at_durations),
+                at_durations=cast(
+                    Mapping[str, ArrayLike | DurationAt], duration_selectors
+                ),
                 payments=cast(Mapping[str, Payment | Scaled], payments),
             )
         else:

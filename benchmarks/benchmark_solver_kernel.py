@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Benchmark the production end-to-end solver and cashflow valuation.
 
-This benchmark measures warm JIT execution only:
-- it excludes first-call compilation time
-- it forces synchronization after every timed run
-- it measures only production-relevant end-to-end solve timings
+This benchmark measures warmed end-to-end solves. The timer includes
+Python dispatch and waits for the result to be ready. Warmup runs happen
+before the timer so first-call compilation is excluded.
 
 By default the script requires a GPU backend. Pass ``--allow-cpu`` only
 for local smoke checks when a CUDA-visible device is unavailable.
@@ -889,10 +888,9 @@ def _time_runs(name: str, fn: Callable[[], Any], timed_runs: int) -> TimingStats
         elapsed_ms = (time.perf_counter_ns() - start_ns) / 1_000_000.0
         timings_ms.append(elapsed_ms)
 
-    p95_index = max(
-        0,
-        min(len(timings_ms) - 1, math.ceil(0.95 * len(timings_ms)) - 1),
-    )
+    sample_count = len(timings_ms)
+    p95_rank = math.ceil(0.95 * sample_count)
+    p95_index = max(0, min(sample_count - 1, p95_rank - 1))
     sorted_timings = sorted(timings_ms)
     return TimingStats(
         name=name,

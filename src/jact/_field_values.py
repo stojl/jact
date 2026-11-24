@@ -22,11 +22,11 @@ def as_field_value(value: Any, name: str) -> Any:
         except (TypeError, ValueError):
             pass
 
-    paths, treedef = jax.tree_util.tree_flatten_with_path(value)
-    if not paths:
+    leaves_with_paths, tree_definition = jax.tree_util.tree_flatten_with_path(value)
+    if not leaves_with_paths:
         return value
-    leaves = []
-    for path, leaf in paths:
+    numeric_leaves = []
+    for path, leaf in leaves_with_paths:
         try:
             array = jnp.asarray(leaf)
             if array.dtype.kind in {"O", "S", "U"}:
@@ -36,5 +36,5 @@ def as_field_value(value: Any, name: str) -> Any:
             raise TypeError(
                 f"{name}{location} must be an array-compatible numeric leaf."
             ) from exc
-        leaves.append(array)
-    return treedef.unflatten(leaves)
+        numeric_leaves.append(array)
+    return tree_definition.unflatten(numeric_leaves)

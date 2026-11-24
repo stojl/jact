@@ -146,30 +146,41 @@ def _evaluation_layout(
 ) -> _EvaluationLayout | None:
     if limit is None:
         return None
-    samples = [(k + offset) * step_size for k in range(config.width)]
+    sample_durations = [
+        (cell_index + offset) * step_size for cell_index in range(config.width)
+    ]
     if config.probability_limit is not None:
-        samples.append(config.probability_limit)
-    # The probability tail can coincide with a retained sample (particularly
-    # on the left grid). Keep just one callable input for that duration.
-    slots: dict[float, int] = {}
-    indices: list[int] = []
-    for i, value in enumerate(samples):
-        if value <= limit and value not in slots:
-            slots[value] = len(indices)
-            indices.append(i)
-    if len(indices) == len(samples):
+        sample_durations.append(config.probability_limit)
+
+    # A tail duration can coincide with a regular cell on the left grid.
+    output_slot_by_duration: dict[float, int] = {}
+    retained_sample_indices: list[int] = []
+    for sample_index, duration in enumerate(sample_durations):
+        if duration <= limit and duration not in output_slot_by_duration:
+            output_slot_by_duration[duration] = len(retained_sample_indices)
+            retained_sample_indices.append(sample_index)
+    if len(retained_sample_indices) == len(sample_durations):
         return None
+
+    # Sample the cutoff separately only when a cell needs it and the grid
+    # does not already supply it.
     threshold = None
-    if any(value > limit for value in samples) and limit not in slots:
-        slots[limit] = len(indices)
-        threshold = limit
-    gather = tuple(slots[min(value, limit)] for value in samples)
-    threshold_output_index = gather.index(slots[limit]) if limit in slots else None
+    if any(duration > limit for duration in sample_durations):
+        if limit not in output_slot_by_duration:
+            output_slot_by_duration[limit] = len(retained_sample_indices)
+            threshold = limit
+
+    gather = tuple(
+        output_slot_by_duration[min(duration, limit)] for duration in sample_durations
+    )
+    threshold_slot = output_slot_by_duration.get(limit)
     return _EvaluationLayout(
-        tuple(indices),
-        gather,
-        threshold,
-        threshold_output_index,
+        indices=tuple(retained_sample_indices),
+        gather=gather,
+        threshold=threshold,
+        threshold_output_index=(
+            gather.index(threshold_slot) if threshold_slot is not None else None
+        ),
     )
 
 
@@ -730,51 +741,61 @@ def _compute_same_step_transfers(
     zero_mass = jnp.zeros_like(densities[0][:, 0])
     raw_inflow = [zero_mass] * len(densities)
 
-    for i, hz in enumerate(row_hazards):
-        if i not in empty_density_states:
-            for j, density_hazard in hz.density_hazards:
-                transferred = density_hazard * hz.density_transfer_factor
-                contribution = jnp.sum(densities[i] * transferred, axis=-1)
-                raw_inflow[j] = (raw_inflow[j] + contribution).astype(zero_mass.dtype)
+    for source_index, hazards in enumerate(row_hazards):
+        if source_index not in empty_density_states:
+            density = densities[source_index]
+            for target_index, density_hazard in hazards.density_hazards:
+                transfer_fraction = density_hazard * hazards.density_transfer_factor
+                contribution = jnp.sum(density * transfer_fraction, axis=-1)
+                raw_inflow[target_index] = (
+                    raw_inflow[target_index] + contribution
+                ).astype(zero_mass.dtype)
 
-        point = points[i]
+        point = points[source_index]
         if point is not None:
-            for j, point_hazard in hz.point_hazards:
-                contribution = point.value * point_hazard * hz.point_transfer_factor
-                raw_inflow[j] = (raw_inflow[j] + contribution).astype(zero_mass.dtype)
+            for target_index, point_hazard in hazards.point_hazards:
+                contribution = (
+                    point.value * point_hazard * hazards.point_transfer_factor
+                )
+                raw_inflow[target_index] = (
+                    raw_inflow[target_index] + contribution
+                ).astype(zero_mass.dtype)
 
     survived_inflow = [zero_mass] * len(densities)
     next_inflow_zero = [zero_mass] * len(densities)
     next_inflow_one = [zero_mass] * len(densities)
     chained_by_source: list[tuple[jnp.ndarray, ...]] = []
     incoming_state_indices = _incoming_state_indices(row_hazards)
-    for i, hz in enumerate(row_hazards):
-        chained_from_source: list[jnp.ndarray] = []
-        inflow = raw_inflow[i]
-        if i in incoming_state_indices:
-            if hz.density_hazards:
-                half_total = 0.5 * hz.density_total[..., 0]
-                half_survival = jnp.exp(-half_total)
-                half_transfer_factor = _transfer_factor(half_total)
-                survived = inflow * half_survival
-                for j, density_hazard in hz.density_hazards:
-                    chained = (
-                        inflow * (0.5 * density_hazard[..., 0]) * half_transfer_factor
-                    )
-                    next_inflow_zero[j] = (next_inflow_zero[j] + chained).astype(
-                        zero_mass.dtype
-                    )
-                    chained_from_source.append(chained)
-            else:
-                survived = inflow
-            survived_inflow[i] = survived.astype(zero_mass.dtype)
-            zero, one = _split_midpoint_inflow(survived)
-            next_inflow_zero[i] = (next_inflow_zero[i] + zero).astype(zero_mass.dtype)
-            next_inflow_one[i] = one.astype(zero_mass.dtype)
-        else:
-            for _target_index, _density_hazard in hz.density_hazards:
-                chained_from_source.append(jnp.zeros_like(inflow))
+    for source_index, hazards in enumerate(row_hazards):
+        inflow = raw_inflow[source_index]
+        if source_index not in incoming_state_indices:
+            # Cashflows index these contributions in outgoing transition order.
+            chained_by_source.append(
+                tuple(jnp.zeros_like(inflow) for _ in hazards.density_hazards)
+            )
+            continue
 
+        chained_from_source: list[jnp.ndarray] = []
+        survived = inflow
+        if hazards.density_hazards:
+            # New entrants experience the remaining half-step at duration zero.
+            half_total = 0.5 * hazards.density_total[..., 0]
+            half_survival = jnp.exp(-half_total)
+            half_transfer_factor = _transfer_factor(half_total)
+            survived = inflow * half_survival
+            for target_index, density_hazard in hazards.density_hazards:
+                chained = inflow * (0.5 * density_hazard[..., 0]) * half_transfer_factor
+                next_inflow_zero[target_index] = (
+                    next_inflow_zero[target_index] + chained
+                ).astype(zero_mass.dtype)
+                chained_from_source.append(chained)
+
+        survived_inflow[source_index] = survived.astype(zero_mass.dtype)
+        duration_zero, duration_one = _split_midpoint_inflow(survived)
+        next_inflow_zero[source_index] = (
+            next_inflow_zero[source_index] + duration_zero
+        ).astype(zero_mass.dtype)
+        next_inflow_one[source_index] = duration_one.astype(zero_mass.dtype)
         chained_by_source.append(tuple(chained_from_source))
 
     return _SameStepTransfers(
@@ -793,9 +814,9 @@ def _advance_solver_step_from_dynamics(
     config: _DurationConfig,
 ) -> tuple[StateCarry, ...]:
     next_points: list[_PointMass | None] = []
-    for point, hz in zip(points, row_hazards):
+    for point, hazards in zip(points, row_hazards):
         if point is not None:
-            next_log_survival = point.log_survival - hz.point_total
+            next_log_survival = point.log_survival - hazards.point_total
             point = _PointMass(
                 value=(point.initial_value * jnp.exp(next_log_survival)).astype(
                     point.value.dtype
@@ -810,22 +831,29 @@ def _advance_solver_step_from_dynamics(
     # uncompressed transport rule and keep the requested tail empty.
     empty_tail = config.probability_limit is not None and config.width == config.n_steps
     next_densities: list[jnp.ndarray] = []
-    for i, hz in enumerate(row_hazards):
-        if i in config.empty_density_states:
-            next_densities.append(densities[i])
+    for state_index, hazards in enumerate(row_hazards):
+        stored_density = densities[state_index]
+        if state_index in config.empty_density_states:
+            next_densities.append(stored_density)
             continue
-        inflow_zero = same_step_transfers.next_inflow_zero[i]
-        inflow_one = same_step_transfers.next_inflow_one[i]
-        if i in config.marginal_states:
-            mass = densities[i]
-            if i in config.uniform_states and hz.density_hazards:
-                mass = _survive_uniform_mass(mass, hz.density_total)
+
+        inflow_zero = same_step_transfers.next_inflow_zero[state_index]
+        inflow_one = same_step_transfers.next_inflow_one[state_index]
+        if state_index in config.marginal_states:
+            mass = stored_density
+            if state_index in config.uniform_states and hazards.density_hazards:
+                mass = _survive_uniform_mass(mass, hazards.density_total)
             next_densities.append(
                 _accumulate_marginal_mass(mass, inflow_zero + inflow_one)
             )
             continue
-        density = densities[i][..., :-1] if empty_tail else densities[i]
-        total_hazard = hz.density_total[..., :-1] if empty_tail else hz.density_total
+
+        # Advance only the regular grid when the tail cannot receive mass.
+        density = stored_density
+        total_hazard = hazards.density_total
+        if empty_tail:
+            density = density[..., :-1]
+            total_hazard = total_hazard[..., :-1]
         next_density = _advance_density(
             density,
             total_hazard,
@@ -834,7 +862,7 @@ def _advance_solver_step_from_dynamics(
         )
         if empty_tail:
             next_density = jnp.concatenate(
-                (next_density, jnp.zeros_like(densities[i][..., -1:])), axis=-1
+                (next_density, jnp.zeros_like(stored_density[..., -1:])), axis=-1
             )
         next_densities.append(next_density)
 
@@ -843,6 +871,134 @@ def _advance_solver_step_from_dynamics(
         tuple(next_points),
         config,
     )
+
+
+class _MidpointCashflowInputs(NamedTuple):
+    densities: tuple[jnp.ndarray, ...]
+    points: tuple[_PointMass | None, ...]
+    hazards: tuple[_RowHazards, ...]
+    transfers: _SameStepTransfers
+    time: jnp.ndarray
+    durations: jnp.ndarray
+    step_size: float
+    fields: FieldRuntime
+    template: jnp.ndarray
+    payment_layout: _EvaluationLayout | None
+    config: _DurationConfig
+    incoming_states: frozenset[int]
+
+
+def _state_rate_contribution(
+    attachment: StatePayment,
+    step: _MidpointCashflowInputs,
+) -> jnp.ndarray:
+    state_index = attachment.state_index
+    hazards = step.hazards[state_index]
+    density = step.densities[state_index]
+    point = step.points[state_index]
+    payment = _call_payment(
+        attachment.payment,
+        step.time,
+        step.durations,
+        step.fields,
+        (step.template.shape[0], step.durations.shape[-1]),
+        step.payment_layout,
+        duration_limit=step.config.payment_limit,
+        uniform=state_index in step.config.uniform_states,
+    )
+    contribution = jnp.zeros_like(step.template)
+    if state_index not in step.config.empty_density_states:
+        density_midpoint = density * hazards.density_midpoint_factor
+        contribution = step.step_size * jnp.sum(
+            density_midpoint * payment,
+            axis=-1,
+        )
+    if point is not None:
+        point_payment = _evaluate_intensity_at_point(
+            attachment.payment,
+            step.time,
+            point.d_0 + step.time,
+            step.fields,
+            step.config.payment_limit,
+            _threshold_value(payment, step.payment_layout),
+            context_key=("source", state_index),
+        )
+        point_midpoint = point.initial_value * jnp.exp(
+            point.log_survival - 0.5 * hazards.point_total
+        )
+        contribution = contribution + (step.step_size * point_midpoint * point_payment)
+    if state_index in step.incoming_states:
+        same_step_inflow = step.transfers.survived_inflow[state_index]
+        same_step_payment = (
+            _evaluate_intensity_at_point(
+                attachment.payment,
+                step.time,
+                jnp.full_like(step.template, 0.5 * step.step_size),
+                step.fields,
+                context_key=("inflow", state_index),
+            )
+            if step.config.payment_limit is None
+            else payment[:, 0]
+        )
+        contribution = contribution + (
+            0.5 * step.step_size * same_step_inflow * same_step_payment
+        )
+    return contribution
+
+
+def _transition_lump_contribution(
+    attachment: TransitionPayment,
+    step: _MidpointCashflowInputs,
+) -> jnp.ndarray:
+    source_index = attachment.source_index
+    hazards = step.hazards[source_index]
+    density = step.densities[source_index]
+    point = step.points[source_index]
+    hazard_slot = attachment.hazard_slot
+    payment = _call_payment(
+        attachment.payment,
+        step.time,
+        step.durations,
+        step.fields,
+        (step.template.shape[0], step.durations.shape[-1]),
+        step.payment_layout,
+        duration_limit=step.config.payment_limit,
+        uniform=source_index in step.config.uniform_states,
+    )
+    contribution = jnp.zeros_like(step.template)
+    if source_index not in step.config.empty_density_states:
+        _, density_hazard = hazards.density_hazards[hazard_slot]
+        contribution = jnp.sum(
+            density * density_hazard * hazards.density_transfer_factor * payment,
+            axis=-1,
+        )
+    if point is not None:
+        _, point_hazard = hazards.point_hazards[hazard_slot]
+        point_payment = _evaluate_intensity_at_point(
+            attachment.payment,
+            step.time,
+            point.d_0 + step.time,
+            step.fields,
+            step.config.payment_limit,
+            _threshold_value(payment, step.payment_layout),
+            context_key=("source", source_index),
+        )
+        contribution = contribution + (
+            point.value * point_hazard * hazards.point_transfer_factor * point_payment
+        )
+    if source_index in step.incoming_states:
+        chained_exit = step.transfers.chained_by_source[source_index][hazard_slot]
+        chained_payment = _evaluate_intensity_at_point(
+            attachment.payment,
+            step.time,
+            jnp.zeros_like(step.template),
+            step.fields,
+            step.config.payment_limit,
+            _threshold_value(payment, step.payment_layout),
+            context_key=("chained", source_index),
+        )
+        contribution = contribution + chained_exit * chained_payment
+    return contribution
 
 
 def _compute_cashflow_step(
@@ -872,7 +1028,20 @@ def _compute_cashflow_step(
     event_by_kind = _zero_leaves(4, template)
     t_mid = t + 0.5 * step_size
     n_steps = config.n_steps
-    incoming_state_indices = _incoming_state_indices(row_hazards)
+    midpoint = _MidpointCashflowInputs(
+        densities=densities,
+        points=points,
+        hazards=row_hazards,
+        transfers=same_step_transfers,
+        time=t_mid,
+        durations=duration_mid,
+        step_size=step_size,
+        fields=intensity_kwargs,
+        template=template,
+        payment_layout=payment_mid_layout,
+        config=config,
+        incoming_states=_incoming_state_indices(row_hazards),
+    )
     # This Python dictionary shares traced expressions within one scan body.
     # Each expression is evaluated afresh at every numerical solver step.
     core_values: dict[int, jnp.ndarray] = {}
@@ -884,65 +1053,10 @@ def _compute_cashflow_step(
         if isinstance(component, StateRateSpec):
             for attachment in component.payments:
                 state_index = attachment.state_index
-                payment_fn = attachment.payment
                 if attachment.task_id >= 0 and attachment.task_id in core_values:
                     contribution = core_values[attachment.task_id]
                 else:
-                    hz = row_hazards[state_index]
-                    payment = _call_payment(
-                        payment_fn,
-                        t_mid,
-                        duration_mid,
-                        intensity_kwargs,
-                        (batch_size, duration_mid.shape[-1]),
-                        payment_mid_layout,
-                        duration_limit=config.payment_limit,
-                        uniform=state_index in config.uniform_states,
-                    )
-                    contribution = jnp.zeros_like(template)
-                    if state_index not in config.empty_density_states:
-                        density_midpoint = (
-                            densities[state_index] * hz.density_midpoint_factor
-                        )
-                        contribution = step_size * jnp.sum(
-                            density_midpoint * payment,
-                            axis=-1,
-                        )
-                    point = points[state_index]
-                    if point is not None:
-                        point_payment = _evaluate_intensity_at_point(
-                            payment_fn,
-                            t_mid,
-                            point.d_0 + t_mid,
-                            intensity_kwargs,
-                            config.payment_limit,
-                            _threshold_value(payment, payment_mid_layout),
-                            context_key=("source", state_index),
-                        )
-                        point_midpoint = point.initial_value * jnp.exp(
-                            point.log_survival - 0.5 * hz.point_total
-                        )
-                        contribution = contribution + (
-                            step_size * point_midpoint * point_payment
-                        )
-                    if state_index in incoming_state_indices:
-                        same_step_inflow = same_step_transfers.survived_inflow[
-                            state_index
-                        ]
-                        same_step_payment = (
-                            _evaluate_intensity_at_point(
-                                payment_fn,
-                                t_mid,
-                                jnp.full_like(template, 0.5 * step_size),
-                                intensity_kwargs,
-                                context_key=("inflow", state_index),
-                            )
-                            if config.payment_limit is None
-                            else payment[:, 0]
-                        )
-                        contribution = contribution + (
-                            0.5 * step_size * same_step_inflow * same_step_payment
-                        )
+                    contribution = _state_rate_contribution(attachment, midpoint)
                     if attachment.task_id >= 0:
                         core_values[attachment.task_id] = contribution
                 if attachment.weight is not None:
@@ -966,64 +1080,10 @@ def _compute_cashflow_step(
         elif isinstance(component, TransitionLumpSpec):
             for attachment in component.payments:
                 source_index = attachment.source_index
-                hazard_slot = attachment.hazard_slot
-                payment_fn = attachment.payment
                 if attachment.task_id >= 0 and attachment.task_id in core_values:
                     contribution = core_values[attachment.task_id]
                 else:
-                    hz = row_hazards[source_index]
-                    payment = _call_payment(
-                        payment_fn,
-                        t_mid,
-                        duration_mid,
-                        intensity_kwargs,
-                        (batch_size, duration_mid.shape[-1]),
-                        payment_mid_layout,
-                        duration_limit=config.payment_limit,
-                        uniform=source_index in config.uniform_states,
-                    )
-                    contribution = jnp.zeros_like(template)
-                    if source_index not in config.empty_density_states:
-                        _, density_hazard = hz.density_hazards[hazard_slot]
-                        contribution = jnp.sum(
-                            densities[source_index]
-                            * density_hazard
-                            * hz.density_transfer_factor
-                            * payment,
-                            axis=-1,
-                        )
-                    point = points[source_index]
-                    if point is not None:
-                        _, point_hazard = hz.point_hazards[hazard_slot]
-                        point_payment = _evaluate_intensity_at_point(
-                            payment_fn,
-                            t_mid,
-                            point.d_0 + t_mid,
-                            intensity_kwargs,
-                            config.payment_limit,
-                            _threshold_value(payment, payment_mid_layout),
-                            context_key=("source", source_index),
-                        )
-                        contribution = contribution + (
-                            point.value
-                            * point_hazard
-                            * hz.point_transfer_factor
-                            * point_payment
-                        )
-                    if source_index in incoming_state_indices:
-                        chained_exit = same_step_transfers.chained_by_source[
-                            source_index
-                        ][hazard_slot]
-                        chained_payment = _evaluate_intensity_at_point(
-                            payment_fn,
-                            t_mid,
-                            jnp.zeros_like(template),
-                            intensity_kwargs,
-                            config.payment_limit,
-                            _threshold_value(payment, payment_mid_layout),
-                            context_key=("chained", source_index),
-                        )
-                        contribution = contribution + chained_exit * chained_payment
+                    contribution = _transition_lump_contribution(attachment, midpoint)
                     if attachment.task_id >= 0:
                         core_values[attachment.task_id] = contribution
                 if attachment.weight is not None:
@@ -1047,25 +1107,23 @@ def _compute_cashflow_step(
         elif isinstance(component, ScheduledEventSpec):
             scheduled_event = scheduled_events[component_index]
             assert scheduled_event is not None
-            event_time = scheduled_event.event_time
-            event_index = scheduled_event.event_index
             event_time = _broadcast_vector_output(
-                event_time,
+                scheduled_event.event_time,
                 template.shape,
                 "Scheduled event time",
             )
             event_index = _broadcast_vector_output(
-                event_index,
+                scheduled_event.event_index,
                 template.shape,
                 "Scheduled event index",
             )
             current_index = jnp.round(t / step_size).astype(jnp.int32)
-            active = (
+            event_mask = (
                 (event_index == current_index)
                 & (event_time >= 0)
                 & (event_index < n_steps)
             )
-            active = active.astype(template.dtype)
+            event_weight = event_mask.astype(template.dtype)
             for attachment in component.payments:
                 state_index = attachment.state_index
                 payment_fn = attachment.payment
@@ -1085,7 +1143,7 @@ def _compute_cashflow_step(
                     )
                     contribution = jnp.zeros_like(template)
                     if state_index not in config.empty_density_states:
-                        contribution = active * jnp.sum(
+                        contribution = event_weight * jnp.sum(
                             densities[state_index] * payment,
                             axis=-1,
                         )
@@ -1102,7 +1160,7 @@ def _compute_cashflow_step(
                             phase="left",
                         )
                         contribution = contribution + (
-                            active * point.value * point_payment
+                            event_weight * point.value * point_payment
                         )
                     if attachment.task_id >= 0:
                         core_values[attachment.task_id] = contribution
@@ -1123,6 +1181,7 @@ def _compute_cashflow_step(
                     kind=_KIND_SCHEDULED_EVENT,
                     contribution=contribution,
                 )
+                # Event subtotals let views apply left-edge weights.
                 (
                     event_component_total,
                     event_by_state,
@@ -1141,25 +1200,22 @@ def _compute_cashflow_step(
             assert duration_event is not None
             for target in duration_event.targets:
                 state_index = target.state_index
-                at_duration = target.at_duration
-                at_duration_index = target.at_duration_index
-                effective_at_duration = target.effective_at_duration
                 payment_fn = target.payment
                 if target.task_id >= 0 and target.task_id in core_values:
                     contribution = core_values[target.task_id]
                 else:
                     at_duration = _broadcast_vector_output(
-                        at_duration,
+                        target.at_duration,
                         template.shape,
                         "Duration event target",
                     )
                     at_duration_index = _broadcast_vector_output(
-                        at_duration_index,
+                        target.at_duration_index,
                         template.shape,
                         "Duration event index",
                     )
                     effective_at_duration = _broadcast_vector_output(
-                        effective_at_duration,
+                        target.effective_at_duration,
                         template.shape,
                         "Effective duration event target",
                     )
@@ -1180,23 +1236,29 @@ def _compute_cashflow_step(
                     )
                     contribution = jnp.zeros_like(template)
                     if state_index not in config.empty_density_states:
+                        # Clip the read index before applying the retained-grid mask.
                         safe_index = jnp.clip(at_duration_index, 0, config.width - 1)
                         density_at_duration = jnp.take_along_axis(
                             densities[state_index],
                             safe_index[:, None],
                             axis=-1,
                         )[:, 0]
-                        contribution = (
-                            in_horizon & (at_duration_index < config.width)
-                        ).astype(template.dtype) * (density_at_duration * payment)
+                        on_retained_grid = in_horizon & (
+                            at_duration_index < config.width
+                        )
+                        contribution = on_retained_grid.astype(template.dtype) * (
+                            density_at_duration * payment
+                        )
 
                     point = points[state_index]
                     if point is not None:
-                        remaining = effective_at_duration - point.d_0
-                        trigger_index = _scheduled_event_index(remaining, step_size)
+                        time_until_target = effective_at_duration - point.d_0
+                        trigger_index = _scheduled_event_index(
+                            time_until_target, step_size
+                        )
                         current_index = jnp.round(t / step_size).astype(jnp.int32)
-                        not_past_target = (remaining >= 0) | _is_near_grid_zero(
-                            remaining,
+                        not_past_target = (time_until_target >= 0) | _is_near_grid_zero(
+                            time_until_target,
                             step_size,
                         )
                         active_point = (
@@ -1205,11 +1267,10 @@ def _compute_cashflow_step(
                             & (trigger_index == current_index)
                             & (trigger_index < n_steps)
                         )
-                        point_payment = payment
                         contribution = contribution + (
                             active_point.astype(template.dtype)
                             * point.value
-                            * point_payment
+                            * payment
                         )
                     if target.task_id >= 0:
                         core_values[target.task_id] = contribution
@@ -1404,39 +1465,36 @@ def _compute_cashflow_views(
     )
     view_values: list[tuple[jnp.ndarray, ...]] = []
     for view in cashflow_views:
-        factor = _evaluate_weight(
+        midpoint_weight = _evaluate_weight(
             view.weight,
             t + 0.5 * step_size,
             intensity_kwargs,
             template,
             "mid",
         )
-        event_factor = _evaluate_weight(
+        event_weight = _evaluate_weight(
             view.weight,
             t,
             intensity_kwargs,
             template,
             "left",
         )
-        view_values.append(
-            tuple(
-                _source_value(
-                    source,
-                    midpoint_by_component,
-                    midpoint_by_state,
-                    midpoint_by_kind,
-                )
-                * factor
-                + _source_value(
-                    source,
-                    event_by_component,
-                    event_by_state,
-                    event_by_kind,
-                )
-                * event_factor
-                for source in view.sources
-            )
-        )
+        weighted_sources: list[jnp.ndarray] = []
+        for source in view.sources:
+            midpoint_value = _source_value(
+                source,
+                midpoint_by_component,
+                midpoint_by_state,
+                midpoint_by_kind,
+            ) * midpoint_weight
+            event_value = _source_value(
+                source,
+                event_by_component,
+                event_by_state,
+                event_by_kind,
+            ) * event_weight
+            weighted_sources.append(midpoint_value + event_value)
+        view_values.append(tuple(weighted_sources))
     return tuple(view_values)
 
 
@@ -1456,14 +1514,12 @@ def _shard_batch_array(
 ) -> tuple[jnp.ndarray, int]:
     batch_size = value.shape[0]
     remainder = batch_size % device_count
-    padded_size = (
-        batch_size if remainder == 0 else batch_size + device_count - remainder
-    )
-    if padded_size != batch_size:
+    padding = 0 if remainder == 0 else device_count - remainder
+    if padding:
         pad_width = [(0, 0)] * value.ndim
-        pad_width[0] = (0, padded_size - batch_size)
+        pad_width[0] = (0, padding)
         value = jnp.pad(value, tuple(pad_width))
-    per_device = padded_size // device_count
+    per_device = (batch_size + padding) // device_count
     return value.reshape((device_count, per_device) + value.shape[1:]), batch_size
 
 
@@ -1517,15 +1573,18 @@ def _unshard_batch_array(value: jnp.ndarray, original_batch_size: int) -> jnp.nd
     if value.ndim < 2:
         return value
     if value.ndim == 2:
-        merged = value.reshape((value.shape[0] * value.shape[1],) + value.shape[2:])
-        return merged[:original_batch_size]
+        # Terminal cashflows have only device and per-device batch axes.
+        batch_size = value.shape[0] * value.shape[1]
+        batch = value.reshape((batch_size,))
+        return batch[:original_batch_size]
 
+    # Probabilities and streamed cashflows regain their leading time axis.
     time_major = jnp.moveaxis(value, 0, 1)
-    merged = time_major.reshape(
-        (time_major.shape[0], time_major.shape[1] * time_major.shape[2])
-        + time_major.shape[3:]
+    time_count, device_count, per_device, *output_shape = time_major.shape
+    time_and_batch = time_major.reshape(
+        (time_count, device_count * per_device, *output_shape)
     )
-    return merged[:, :original_batch_size, ...]
+    return time_and_batch[:, :original_batch_size, ...]
 
 
 def _unshard_batch_tree(
@@ -1828,8 +1887,8 @@ def _midpoint_solver(
     n_records = n_steps // record_every
     has_cashflows = bool(cashflow_components)
     value_template = state_0[0].density[:, 0]
-    block_0 = _zero_view_values(cashflow_views, value_template)
-    terminal_0 = _zero_view_values(cashflow_views, value_template)
+    initial_interval_totals = _zero_view_values(cashflow_views, value_template)
+    initial_terminal_totals = _zero_view_values(cashflow_views, value_template)
     input_fields = field_graph.input_only(intensity_kwargs)
     grid_fields: dict[object, dict[str, Any]] = {}
     grid_durations: dict[object, jnp.ndarray] = {}
@@ -1939,7 +1998,7 @@ def _midpoint_solver(
         tuple[tuple[StateCarry, ...], CashflowViewValues],
         tuple[Any, CashflowStreamValues],
     ]:
-        state_carry, terminal_carry = carry
+        interval_state, terminal_totals = carry
         offsets = jnp.arange(record_every, dtype=duration_mid.dtype)
 
         def step_scan(
@@ -1957,14 +2016,14 @@ def _midpoint_solver(
             ],
             None,
         ]:
-            inner_state, block_cashflows, terminal_cashflows = inner_carry
+            step_state, interval_totals, terminal_totals = inner_carry
             current_t = block_start + offset * step_size
             fields = new_fields(
                 evaluate_grid(current_t) if evaluate_grid is not None else None
             )
 
             dynamics = _solver_step_dynamics(
-                inner_state,
+                step_state,
                 current_t,
                 duration_mid,
                 step_size,
@@ -2000,14 +2059,14 @@ def _midpoint_solver(
                 cashflow_views,
                 value_template,
             )
-            block_cashflows = _add_selected_view_values(
-                block_cashflows,
+            interval_totals = _add_selected_view_values(
+                interval_totals,
                 step_cashflows,
                 cashflow_views,
                 terminal=False,
             )
-            terminal_cashflows = _add_selected_view_values(
-                terminal_cashflows,
+            terminal_totals = _add_selected_view_values(
+                terminal_totals,
                 step_cashflows,
                 cashflow_views,
                 terminal=True,
@@ -2016,19 +2075,20 @@ def _midpoint_solver(
                 *dynamics,
                 config=config,
             )
-            return (next_state, block_cashflows, terminal_cashflows), None
+            return (next_state, interval_totals, terminal_totals), None
 
-        (state_carry, block_cashflows, terminal_carry), _ = jax.lax.scan(
+        # Streamed views restart at each record. Terminal views carry across records.
+        (interval_state, interval_totals, terminal_totals), _ = jax.lax.scan(
             step_scan,
-            (state_carry, block_0, terminal_carry),
+            (interval_state, initial_interval_totals, terminal_totals),
             offsets,
         )
         stream_output = tuple(
             None if view.terminal else values
-            for view, values in zip(cashflow_views, block_cashflows)
+            for view, values in zip(cashflow_views, interval_totals)
         )
-        return (state_carry, terminal_carry), (
-            prob_callback(state_carry),
+        return (interval_state, terminal_totals), (
+            prob_callback(interval_state),
             stream_output,
         )
 
@@ -2039,9 +2099,9 @@ def _midpoint_solver(
     block_starts = jnp.arange(n_records, dtype=duration_mid.dtype) * (
         record_every * step_size
     )
-    (_final_state, final_terminal), scan_output = jax.lax.scan(
+    (_final_state, final_terminal_totals), scan_output = jax.lax.scan(
         block_scan,
-        (state_0, terminal_0),
+        (state_0, initial_terminal_totals),
         block_starts,
     )
     probability, cashflow_streams = scan_output
@@ -2060,7 +2120,7 @@ def _midpoint_solver(
     return _SolverResult(
         probability=probability,
         cashflow_streams=cashflow_streams if has_cashflows else None,
-        cashflow_terminal=final_terminal if has_cashflows else None,
+        cashflow_terminal=final_terminal_totals if has_cashflows else None,
     )
 
 
@@ -2193,6 +2253,65 @@ def _seed_point_mass(
         value=_broadcast_batch(mass, batch_size).astype(dtype),
         d_0=_broadcast_batch(duration, batch_size).astype(dtype),
     )
+
+
+def _build_duration_grids(
+    horizon: int,
+    solver_steps: int,
+    width: int,
+    probability_duration_limit: float | None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    grid = jnp.linspace(0, horizon, solver_steps + 1, endpoint=True)[None, :]
+    duration_left = grid[:, :width]
+    duration_mid = 0.5 * (duration_left + grid[:, 1 : width + 1])
+    if probability_duration_limit is not None:
+        tail_grid = jnp.full((1, 1), probability_duration_limit, dtype=grid.dtype)
+        duration_left = jnp.concatenate((duration_left, tail_grid), axis=-1)
+        duration_mid = jnp.concatenate((duration_mid, tail_grid), axis=-1)
+    return duration_left, duration_mid
+
+
+def _build_initial_carries(
+    canonical: _CanonicalDistribution,
+    reachable_states: tuple[str, ...],
+    batch_size: int,
+    value_dtype: jnp.dtype,
+    config: _DurationConfig,
+) -> tuple[StateCarry, ...]:
+    declared_index = {state: index for index, state in enumerate(canonical.states)}
+    state_0: list[StateCarry] = []
+    for state_index, state_name in enumerate(reachable_states):
+        if state_index in config.empty_density_states:
+            density_width = 1
+        elif state_index in config.marginal_states:
+            # The entries hold continuous mass and its rounding residual.
+            density_width = _MARGINAL_MASS_WIDTH
+        else:
+            density_width = config.width
+        density = jnp.zeros((batch_size, density_width), dtype=value_dtype)
+        point_mass = None
+        if state_name in declared_index:
+            initial_index = declared_index[state_name]
+            point_mass = _seed_point_mass(
+                canonical.masses[initial_index],
+                canonical.durations[initial_index],
+                batch_size,
+                value_dtype,
+            )
+        tail = None
+        if (
+            config.probability_limit is not None
+            and state_index not in config.empty_density_states
+            and state_index not in config.marginal_states
+        ):
+            tail = _TailProbability(
+                mass=jnp.zeros((batch_size,), dtype=value_dtype),
+                duration=jnp.full(
+                    (batch_size,), config.probability_limit, dtype=value_dtype
+                ),
+            )
+        state_0.append(StateCarry(density=density, point_mass=point_mass, tail=tail))
+    return tuple(state_0)
 
 
 def _prepare_cashflow_components(
@@ -2874,6 +2993,8 @@ def solve(
     if cashflows is not None and cashflows.state_space is not model.state_space:
         raise ValueError("cashflows must be declared from model.state_space.")
     if cashflows is not None:
+        # Report invalid views before evaluating fields or reducing the model.
+        # ByState sources are bound to reachable-state indices after reduction.
         _prepare_cashflow_views(cashflows, cashflow_views, model.state_space.states)
 
     field_graph = FieldGraph.build(
@@ -2890,14 +3011,10 @@ def solve(
 
     reduced = model.reduce(canonical.states)
     solver_matrix = reduced.solver_matrix
-    grid = jnp.linspace(0, horizon, solver_steps + 1, endpoint=True)[None, :]
     width = _duration_width(probability_duration_limit, steps_per_unit, solver_steps)
-    duration_left = grid[:, :width]
-    duration_mid = 0.5 * (duration_left + grid[:, 1 : width + 1])
-    if probability_duration_limit is not None:
-        tail_grid = jnp.full((1, 1), probability_duration_limit, dtype=grid.dtype)
-        duration_left = jnp.concatenate((duration_left, tail_grid), axis=-1)
-        duration_mid = jnp.concatenate((duration_mid, tail_grid), axis=-1)
+    duration_left, duration_mid = _build_duration_grids(
+        horizon, solver_steps, width, probability_duration_limit
+    )
     step_size = 1 / steps_per_unit
     prob_callback = resolve_callback(probability, reduced.reachable_states)
     prepared_cashflow_components = _prepare_cashflow_components(
@@ -2948,42 +3065,12 @@ def solve(
         batch_size = 1
     value_dtype = _solver_value_dtype(canonical, intensity_kwargs)
 
-    declared_index = {state: i for i, state in enumerate(canonical.states)}
-    state_0: list[StateCarry] = []
-    for i, state_name in enumerate(reduced.reachable_states):
-        if i in empty_density_states:
-            density_width = 1
-        elif i in marginal_states:
-            # The entries hold continuous mass and its rounding residual.
-            density_width = _MARGINAL_MASS_WIDTH
-        else:
-            density_width = width
-        density = jnp.zeros((batch_size, density_width), dtype=value_dtype)
-        point_mass = None
-        if state_name in declared_index:
-            idx = declared_index[state_name]
-            point_mass = _seed_point_mass(
-                canonical.masses[idx],
-                canonical.durations[idx],
-                batch_size,
-                value_dtype,
-            )
-        tail = None
-        if (
-            probability_duration_limit is not None
-            and i not in empty_density_states
-            and i not in marginal_states
-        ):
-            tail = _TailProbability(
-                mass=jnp.zeros((batch_size,), dtype=value_dtype),
-                duration=jnp.full(
-                    (batch_size,), probability_duration_limit, dtype=value_dtype
-                ),
-            )
-        state_0.append(StateCarry(density=density, point_mass=point_mass, tail=tail))
+    initial_state = _build_initial_carries(
+        canonical, reduced.reachable_states, batch_size, value_dtype, duration_config
+    )
     selected_devices = _resolve_devices(devices)
     result = _run_midpoint_solver(
-        tuple(state_0),
+        initial_state,
         duration_mid,
         duration_left,
         step_size,

@@ -153,15 +153,17 @@ def benchmark(libraries, inputs, scenario, limit, args):
         executables[label] = (executable, compile_seconds)
 
     timings = {label: [] for label in executables}
-    for i in range(args.warmups + args.repeats):
+    for sample_index in range(args.warmups + args.repeats):
         labels = list(executables)
-        if i % 2:
+        # Alternate which executable runs first to reduce timing-order bias.
+        if sample_index % 2:
             labels.reverse()
         for label in labels:
+            executable, _ = executables[label]
             start = time.perf_counter()
-            jax.block_until_ready(executables[label][0](inputs))
+            jax.block_until_ready(executable(inputs))
             elapsed = time.perf_counter() - start
-            if i >= args.warmups:
+            if sample_index >= args.warmups:
                 timings[label].append(elapsed)
 
     row = {

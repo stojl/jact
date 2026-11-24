@@ -136,18 +136,20 @@ class Model:
                 raise ValueError(
                     f"State '{src}' has no outgoing transitions — cannot assign exits."
                 )
-            for i, (s, t) in enumerate(exit_transitions):
-                self._register_transition(s, t, "exits", fn, index=i, covered=covered)
+            for output_index, (source, target) in enumerate(exit_transitions):
+                self._register_transition(
+                    source, target, "exits", fn, index=output_index, covered=covered
+                )
 
         # Groups
-        for fn, trans_list in self._groups_map.items():
-            if not trans_list:
+        for fn, transitions in self._groups_map.items():
+            if not transitions:
                 raise ValueError(
                     "Group assignments must cover at least one transition."
                 )
-            for i, (src, tgt) in enumerate(trans_list):
+            for output_index, (source, target) in enumerate(transitions):
                 self._register_transition(
-                    src, tgt, "groups", fn, index=i, covered=covered
+                    source, target, "groups", fn, index=output_index, covered=covered
                 )
 
         # Check all transitions are covered
@@ -200,22 +202,20 @@ class Model:
 
         Used as the basis for building reduced matrices per initial state.
         """
-        J = self._state_space.n_states
+        state_count = self._state_space.n_states
 
         self._full_solver_matrix: list[list[Intensity | None]] = [
-            [None for _ in range(J)] for _ in range(J)
+            [None for _ in range(state_count)] for _ in range(state_count)
         ]
 
-        for (src, tgt), info in self._transition_info.items():
-            i = self._state_space.state_index(src)
-            j = self._state_space.state_index(tgt)
-
+        for (source, target), info in self._transition_info.items():
+            source_index = self._state_space.state_index(source)
+            target_index = self._state_space.state_index(target)
             if info.index is None:
-                self._full_solver_matrix[i][j] = info.callable
+                intensity = info.callable
             else:
-                self._full_solver_matrix[i][j] = _make_slice_wrapper(
-                    info.callable, info.index
-                )
+                intensity = _make_slice_wrapper(info.callable, info.index)
+            self._full_solver_matrix[source_index][target_index] = intensity
 
     # ------------------------------------------------------------------ #
     # Reduction to reachable states                                       #
@@ -270,13 +270,13 @@ class Model:
             self._state_space.state_index(state) for state in reachable
         )
 
-        # Extract the submatrix
+        # Keep the original callable wrappers, including their output slots.
         reduced_matrix: SolverMatrix = tuple(
             tuple(
-                self._full_solver_matrix[full_indices[i]][full_indices[j]]
-                for j in range(n_reachable)
+                self._full_solver_matrix[source_index][target_index]
+                for target_index in full_indices
             )
-            for i in range(n_reachable)
+            for source_index in full_indices
         )
         return ReducedModel(
             initial_states=initial_ordered,

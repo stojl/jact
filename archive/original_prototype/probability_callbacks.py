@@ -1,3 +1,9 @@
+"""Historical reducers for the prototype solver's duration grid.
+
+The no-duration callbacks select the final duration cell. The current
+solver uses its own probability reducers.
+"""
+
 import jax
 import jax.numpy as jnp
 from typing import Union

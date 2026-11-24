@@ -41,10 +41,12 @@ def bind_intensity(
         **kwargs: Any,
     ) -> Array:
         features = feature_fn(t, d, **kwargs)
-        raw = _apply_model(apply_fn, params, model_state, features, bound_apply_kwargs)
-        output = jnp.asarray(raw)
-        _check_single_shape(output, d)
-        return jnp.maximum(output, 0.0)
+        predictions = _apply_model(
+            apply_fn, params, model_state, features, bound_apply_kwargs
+        )
+        rates = jnp.asarray(predictions)
+        _check_single_shape(rates, d)
+        return jnp.maximum(rates, 0.0)
 
     return intensity
 
@@ -77,12 +79,14 @@ def bind_grouped_intensity(
         **kwargs: Any,
     ) -> Array:
         features = feature_fn(t, d, **kwargs)
-        raw = _apply_model(apply_fn, params, model_state, features, bound_apply_kwargs)
-        output = jnp.asarray(raw)
-        _check_grouped_rank(output)
-        normalized = jnp.moveaxis(output, output_axis, 0)
-        _check_grouped_shape(normalized, d, output_count)
-        return jnp.maximum(normalized, 0.0)
+        predictions = _apply_model(
+            apply_fn, params, model_state, features, bound_apply_kwargs
+        )
+        rates = jnp.asarray(predictions)
+        _check_grouped_rank(rates)
+        transition_major_rates = jnp.moveaxis(rates, output_axis, 0)
+        _check_grouped_shape(transition_major_rates, d, output_count)
+        return jnp.maximum(transition_major_rates, 0.0)
 
     return intensity
 

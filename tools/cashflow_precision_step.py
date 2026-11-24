@@ -66,7 +66,7 @@ def main():
     ss = jact.StateSpace(["alive", "dead"], [("alive", "dead")])
     model = ss.build(transitions={("alive", "dead"): constant_intensity(RATE, 2)})
     cashflows = ss.cashflows({
-        "annuity": jact.StateRate({
+        "annuity": jact.cashflows.StateRate({
             "alive": time_duration_payment(BASE, TIME_COEF, DURATION_COEF, 2)
         })
     })
@@ -79,10 +79,10 @@ def main():
             steps_per_unit=steps,
             probability=None,
             cashflows=cashflows,
-            cashflow_views={"annuity": jact.Raw("annuity")},
+            cashflow_views={"annuity": jact.cashflows.Raw("annuity")},
             age=jnp.arange(2.0, dtype=jnp.float32),
         )
-        stream = np.asarray(result["cashflows"]["annuity"])  # (T_out, batch)
+        stream = np.asarray(result.cashflows["annuity"])  # (T_out, batch)
         per_step = stream[:, 0]  # individual 0
         exp_0 = float(expected[0])
 

@@ -107,11 +107,11 @@ def main() -> None:
 
     for _ in range(args.warmups):
         jax.block_until_ready(run())
-    timings = []
+    timings_ms = []
     for _ in range(args.repeats):
         start = time.perf_counter()
         value = jax.block_until_ready(run())
-        timings.append(1000 * (time.perf_counter() - start))
+        timings_ms.append(1000 * (time.perf_counter() - start))
 
     if args.output is not None:
         np.save(args.output, np.asarray(value))
@@ -128,8 +128,8 @@ def main() -> None:
                 "duration_limit": args.duration_limit,
                 "warmups": args.warmups,
                 "repeats": args.repeats,
-                "median_ms": statistics.median(timings),
-                "min_ms": min(timings),
+                "median_ms": statistics.median(timings_ms),
+                "min_ms": min(timings_ms),
                 "mean_pv": float(jnp.mean(value)),
             }
         )

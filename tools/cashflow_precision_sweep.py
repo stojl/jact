@@ -64,7 +64,7 @@ def run_sweep(use_x64: bool) -> list[tuple[int, float]]:
     ss = jact.StateSpace(["alive", "dead"], [("alive", "dead")])
     model = ss.build(transitions={("alive", "dead"): constant_intensity(RATE, 2)})
     cashflows = ss.cashflows({
-        "annuity": jact.StateRate({
+        "annuity": jact.cashflows.StateRate({
             "alive": time_duration_payment(BASE, TIME_COEF, DURATION_COEF, 2)
         })
     })
@@ -78,10 +78,10 @@ def run_sweep(use_x64: bool) -> list[tuple[int, float]]:
             steps_per_unit=steps,
             probability=None,
             cashflows=cashflows,
-            cashflow_views={"annuity": jact.Raw("annuity", terminal=True)},
+            cashflow_views={"annuity": jact.cashflows.Raw("annuity", terminal=True)},
             age=jnp.arange(2.0, dtype=dtype),
         )
-        err = float(jnp.max(jnp.abs(result["cashflows"]["annuity"] - expected)))
+        err = float(jnp.max(jnp.abs(result.cashflows["annuity"] - expected)))
         rows.append((steps, err))
     return rows
 

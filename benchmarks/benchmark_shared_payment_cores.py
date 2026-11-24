@@ -123,8 +123,9 @@ def main():
                 ("ordinary", "shared") if iteration % 2 == 0 else ("shared", "ordinary")
             )
             for label in order:
+                executable, _ = runs[label]
                 start = time.perf_counter()
-                jax.block_until_ready(runs[label][0](inputs))
+                jax.block_until_ready(executable(inputs))
                 elapsed = time.perf_counter() - start
                 if iteration >= args.warmups:
                     samples[label].append(elapsed)

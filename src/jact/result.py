@@ -32,8 +32,8 @@ class ModelResult(Generic[ProbabilityT]):
     cashflows : dict[str, ndarray or dict[str, ndarray]] or None
         Mapping from cashflow view name to view value, or ``None`` when
         ``cashflows=None`` was passed to ``solve()``. View values are
-        arrays or nested dicts; see ``docs/api_spec.md`` for the per-view
-        shape table.
+        arrays or nested dicts. Streamed leaves have leading time and batch
+        axes. Terminal leaves have a leading batch axis.
     """
 
     states: tuple[str, ...]
@@ -43,6 +43,7 @@ class ModelResult(Generic[ProbabilityT]):
     def tree_flatten(
         self,
     ) -> tuple[tuple[Any, Any], tuple[str, ...]]:
+        # State names are static metadata. The outputs supply the PyTree leaves.
         return (self.probability, self.cashflows), self.states
 
     @classmethod

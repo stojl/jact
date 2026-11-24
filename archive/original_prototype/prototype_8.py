@@ -1,3 +1,5 @@
+"""Historical Heun solver with separate continuous and point-mass carries."""
+
 import jax
 import jax.numpy as jnp
 from functools import partial, reduce
@@ -31,6 +33,7 @@ def _compute_core(p_single, p_point_single, mu_plus_matrix, mu_minus_matrix):
     outflow_avg_list = [[] for _ in range(J)]
     next_inflow_list = []
 
+    # Matrix rows are sources. Accumulate incoming mass one target at a time.
     for j in range(J):
         inflow_terms_for_j = []
         for i in range(J):
@@ -47,7 +50,7 @@ def _compute_core(p_single, p_point_single, mu_plus_matrix, mu_minus_matrix):
                 term_p = jnp.sum(m_avg * p_single[i, :])
                 inflow_terms_for_j.append(term_p)
                 
-                if i == 0:
+                if i == 0:  # The prototype places all initial point mass in state 0.
                     term_p_point = jnp.sum(m_p_slice * p_point_single)
                     inflow_terms_for_j.append(term_p_point)
 

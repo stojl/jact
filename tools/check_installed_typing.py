@@ -84,14 +84,17 @@ def main() -> None:
             encoding="utf-8",
         )
 
-        verification = (
-            "from pathlib import Path; import jact, sys; "
-            "package = Path(jact.__file__).resolve(); "
-            "environment = Path(sys.prefix).resolve(); "
-            "assert environment in package.parents, "
-            "f'{package} is not installed in {environment}'; "
-            "print(f'checking installed package: {package}')"
-        )
+        verification = """\
+from pathlib import Path
+import sys
+
+import jact
+
+package = Path(jact.__file__).resolve()
+environment = Path(sys.prefix).resolve()
+assert environment in package.parents, f'{package} is not installed in {environment}'
+print(f'checking installed package: {package}')
+"""
         _run(
             [str(python), "-c", verification],
             cwd=root,

@@ -112,11 +112,13 @@ def main():
             for mode, limits in modes.items():
 
                 def run():
+                    # This end-to-end sample includes constructing the covariate grid.
+                    covariates = jnp.linspace(0.0, 1.0, args.batch)[:, None]
                     return model.solve(
                         "a",
                         horizon,
                         args.steps_per_unit,
-                        x=jnp.linspace(0.0, 1.0, args.batch)[:, None],
+                        x=covariates,
                         probability=diagnostic,
                         cashflows=declaration,
                         cashflow_views={"total": cf.Total(terminal=True)},
@@ -124,6 +126,7 @@ def main():
                         **limits,
                     )
 
+                # Warm the selected mode before collecting synchronized timings.
                 result = jax.block_until_ready(run())
                 if exact is None:
                     exact = result

@@ -83,7 +83,7 @@ class FieldGraph:
                     raise TypeError(f"Derived field {name!r} must be callable.")
                 definitions[name] = fn
 
-        parameters: dict[str, tuple[str, ...]] = {}
+        dependencies_by_name: dict[str, tuple[str, ...]] = {}
         for name, fn in definitions.items():
             try:
                 signature = inspect.signature(fn)
@@ -91,7 +91,7 @@ class FieldGraph:
                 raise TypeError(
                     f"Derived field {name!r} needs an inspectable signature."
                 ) from exc
-            deps: list[str] = []
+            dependencies: list[str] = []
             for parameter in signature.parameters.values():
                 if parameter.kind in (
                     inspect.Parameter.VAR_POSITIONAL,
@@ -113,47 +113,41 @@ class FieldGraph:
                             f"{parameter.name!r}."
                         )
                     continue
-                deps.append(parameter.name)
-            parameters[name] = tuple(deps)
+                dependencies.append(parameter.name)
+            dependencies_by_name[name] = tuple(dependencies)
 
-        ordered: list[_Node] = []
+        ordered_nodes: dict[str, _Node] = {}
         visiting: set[str] = set()
-        visited: set[str] = set()
 
         def visit(name: str) -> None:
             if name in visiting:
                 raise ValueError(f"Cycle in derived fields involving {name!r}.")
-            if name in visited:
+            if name in ordered_nodes:
                 return
             visiting.add(name)
-            for dep in parameters[name]:
-                if dep in definitions:
-                    visit(dep)
+            dependencies = dependencies_by_name[name]
+            for dependency in dependencies:
+                if dependency in definitions:
+                    visit(dependency)
             visiting.remove(name)
-            visited.add(name)
-            deps = parameters[name]
-            ancestors = {node.name: node for node in ordered}
-            ordered.append(
-                _Node(
-                    name,
-                    definitions[name],
-                    deps,
-                    "t" in deps
-                    or any(
-                        ancestors[dep].needs_time for dep in deps if dep in ancestors
-                    ),
-                    "d" in deps
-                    or any(
-                        ancestors[dep].needs_duration
-                        for dep in deps
-                        if dep in ancestors
-                    ),
-                )
+            derived_dependencies = [
+                ordered_nodes[dependency]
+                for dependency in dependencies
+                if dependency in ordered_nodes
+            ]
+            ordered_nodes[name] = _Node(
+                name=name,
+                fn=definitions[name],
+                dependencies=dependencies,
+                needs_time="t" in dependencies
+                or any(node.needs_time for node in derived_dependencies),
+                needs_duration="d" in dependencies
+                or any(node.needs_duration for node in derived_dependencies),
             )
 
         for field in definitions:
             visit(field)
-        return cls(tuple(ordered))
+        return cls(tuple(ordered_nodes.values()))
 
     def input_only(self, inputs: dict[str, Any]) -> dict[str, Any]:
         values = dict(inputs)
@@ -183,7 +177,11 @@ class FieldGraph:
 
 
 class FieldRuntime:
-    """A step-local cache; graph functions execute once per requested context."""
+    """Resolve fields once per trace context within a numerical step.
+
+    Duration-only grid fields are computed before the scan. Time-only fields
+    are shared by grid and point evaluations in the same step phase.
+    """
 
     def __init__(
         self,
@@ -211,11 +209,10 @@ class FieldRuntime:
         if key in self.cache:
             return self.cache[key]
         phase = key[1] if isinstance(key, tuple) and len(key) > 1 else key
-        values = (
-            dict(self.resolve(("time", phase), t))
-            if d is not None and t is not None
-            else dict(self.inputs)
-        )
+        if d is not None and t is not None:
+            values = dict(self.resolve(("time", phase), t))
+        else:
+            values = dict(self.inputs)
         if d is not None:
             values.update(self.grid_fields.get(key, {}))
         if t is not None:

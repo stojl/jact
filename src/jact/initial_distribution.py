@@ -362,7 +362,7 @@ class InitialDistribution:
                 batch_size=self._batch_size(),
             )
 
-        states = self.active_initial_states(model_states)
+        indexed_states = self.active_initial_states(model_states)
         batch_size = self._batch_size()
         if batch_size is None:
             raise ValueError(
@@ -373,13 +373,17 @@ class InitialDistribution:
         state_indices = self._state_indices
         if per_individual_duration is None or state_indices is None:
             raise ValueError("per_individual distribution has incomplete values.")
-        duration = self._broadcast_value(per_individual_duration, batch_size)
+        batch_durations = self._broadcast_value(per_individual_duration, batch_size)
         indices = jnp.asarray(state_indices)
-        one_hot = jax.nn.one_hot(indices, len(states), dtype=duration.dtype)
-        masses = tuple(one_hot[:, i] for i in range(len(states)))
-        durations = tuple(duration for _ in states)
+        # The one-hot matrix is batch-major. The solver consumes one column
+        # per declared initial state, paired with that batch's durations.
+        one_hot = jax.nn.one_hot(
+            indices, len(indexed_states), dtype=batch_durations.dtype
+        )
+        masses = tuple(one_hot[:, index] for index in range(len(indexed_states)))
+        durations = tuple(batch_durations for _ in indexed_states)
         return _CanonicalDistribution(
-            states=states,
+            states=indexed_states,
             masses=masses,
             durations=durations,
             batch_size=batch_size,
@@ -401,8 +405,7 @@ class InitialDistribution:
         n_states = len(self.active_initial_states(model_states))
         is_valid = jnp.all((indices >= 0) & (indices < n_states))
         try:
-            if not bool(is_valid):
-                _raise_invalid_per_individual_indices(False)
+            concrete_is_valid = bool(is_valid)
         except Exception as exc:  # pragma: no cover - tracer path
             if not _is_tracer_or_concretization_error(exc):
                 raise
@@ -410,6 +413,10 @@ class InitialDistribution:
                 _raise_invalid_per_individual_indices,
                 is_valid,
             )
+            return
+
+        if not concrete_is_valid:
+            _raise_invalid_per_individual_indices(False)
 
     def _broadcast_components(
         self,

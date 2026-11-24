@@ -25,9 +25,12 @@ def fill_function_matrix(
     return filled_matrix
 
 def get_reference_function(function_matrix):
-    all_functions = (f for row in function_matrix for f in row)
-    global_reference_func = next((f for f in all_functions if f is not None), None)
-    return global_reference_func
+    """Find the first callable used to infer a missing entry's output shape."""
+    for row in function_matrix:
+        for function in row:
+            if function is not None:
+                return function
+    return None
 
 def prepare_function_matrix(
     function_matrix: Sequence[Sequence[Callable[..., jnp.ndarray]]]

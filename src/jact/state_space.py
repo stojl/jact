@@ -243,17 +243,21 @@ class StateSpace:
         """
         self._check_state(state)
         visited = {state}
-        queue = deque([state])
-        while queue:
-            current = queue.popleft()
-            for tgt in self.targets(current):
-                if tgt not in visited:
-                    visited.add(tgt)
-                    queue.append(tgt)
+        pending = deque([state])
+        while pending:
+            source = pending.popleft()
+            for target in self.targets(source):
+                if target not in visited:
+                    visited.add(target)
+                    pending.append(target)
 
-        # Return in original state order, but with starting state first
-        others = [s for s in self._states if s in visited and s != state]
-        return (state, *others)
+        # Traversal determines membership. State-space order determines output.
+        other_reachable_states = [
+            candidate
+            for candidate in self._states
+            if candidate in visited and candidate != state
+        ]
+        return (state, *other_reachable_states)
 
     def _check_state(self, state: str) -> None:
         if state not in self._state_to_index:
